@@ -7,6 +7,7 @@ this project is about different ais trying to solve a problem together. original
 
 run this by executing:
 > python main.py --cpu_support --model_path ./model/ggml-vic7b-q4_3.bin --conversation_settings characterSetups/ai_flirt.txt
+
 > python main.py --gpu_support --model_path ./model/vicuna-13B-1.1-GPTQ-4bit-128g.latest.safetensors --conversation_settings characterSetups/ai_flirt.txt
 
 explanation of the parameters:
