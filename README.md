@@ -60,6 +60,19 @@ you might need to:
 > pip install spacy
 > python -m spacy download en_core_web_sm
 
+> pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu117
+this shall install torch with CUDA 11.7 support
+you then will have to install oobabooga-windows (preferably with the 1-click installer)
+https://github.com/oobabooga/text-generation-webui
+then start it:
+> cd C:\AI\oobabooga_windows\text-generation-webui
+> python server.py --wbits 4 --groupsize 128 --model_type llama --model wizard-vicuna-13B-GPTQ --api
+
+this should result in something like this:
+![example oobabooga-windows api startup](oobabooga_windows_api-startup.png "API startup of oobabooga_windows (running GPU, with a gptq model)")
+
+you should have something like this, model/file-wise
+![example files for oobabooga model](wizard-vicuna-13B-GPTQ-files.png "Example files for a GPTQ model")
 
 if you're on windows and don't see colors, you could download ConEmu64 (https://conemu.github.io/)
 
