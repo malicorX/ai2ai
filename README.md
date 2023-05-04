@@ -74,6 +74,12 @@ this should result in something like this:
 you should have something like this, model/file-wise
 ![example files for oobabooga model](wizard-vicuna-13B-GPTQ-files.png "Example files for a GPTQ model")
 
+if you call oobabooga-windows in your browsers (at http://127.0.0.1:7860), you should have settings something like this:
+![example settings for oobabooga model text-generation](oobabooga_windows_textgeneration_example.png "Example text generation parameters")
+
+![example settings for oobabooga model model](oobabooga_windows_modelparameters_example.png "Example model parameters")
+
+
 if you're on windows and don't see colors, you could download ConEmu64 (https://conemu.github.io/)
 
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -  
