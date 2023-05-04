@@ -11,10 +11,15 @@ run this by executing:
 > python main.py --gpu_support --model_path ./model/vicuna-13B-1.1-GPTQ-4bit-128g.latest.safetensors --conversation_settings characterSetups/ai_flirt.txt
 
 explanation of the parameters:
+
 --cpu_support					use CPU (GGML model)
+
 --gpu_support					...or use GPU (.safetensors model)
+
 --model_path					put your model in here, you have to download it somewhere, it's not part of this repository
+
 --debug_template				init a conversation about chess
+
 --conversation_settings			contains the setup for the conversation
  
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -  
