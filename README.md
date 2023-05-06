@@ -19,11 +19,11 @@ in order for this to work, you need the ggml-vic7b-q4_3.bin file in your ./model
 
 for this you will first have to start the oobabooga server in API mode, check the documentation further below to find out how to start this.
 
-===== using GPU and the oobabooga server in API mode =====
+===== using GPU with MPT model =====
 
 > python main.py --mode mpt --model_path ./model/mpt-7b-storywriter --conversation_settings characterSetups/ai_flirt.txt 
 
-in order for this to work, you need the ggml-vic7b-q4_3.bin file in your ./model/ directory.
+in order for this to work, you need the mpt-7b-storywriter/\* files in your ./model/ directory.
 
 
 
