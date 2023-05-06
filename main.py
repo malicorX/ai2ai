@@ -59,7 +59,7 @@ def main():
         print("...mode: mpt")
         
         # TODO: pass the model as parameter, right now possible parameters are "mpt-7b-storywriter" (which is 65k tokens) or "mpt-7b-chat"
-        model_directory = os.path.join("model", "mpt-7b-chat")
+        model_directory = os.path.join("model", "mpt-7b-storywriter")
         config = transformers.AutoConfig.from_pretrained(
             model_directory,
             trust_remote_code=True
