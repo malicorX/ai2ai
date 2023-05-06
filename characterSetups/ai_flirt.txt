@@ -1,0 +1,3 @@
+a flirt
+Peter;I am Peter, a 29 years old banker from New York. My hobbies are tennis and reading;red
+Mary;I am Mary, a 25 years old librarian from New York. My hobbies are reading and exploring my town;green
