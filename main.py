@@ -5,12 +5,17 @@ from utils.preprompt import prepend
 from helpers.file_utils import read_agents_from_file, read_lines_from_file
 from typing import Tuple, Any, Optional
 
+import transformers
 import argparse
 import os
+os.environ["HF_MODULES_CACHE"] = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "modules")
+
+
 import random
 import psutil
 from termcolor import colored
 from functools import reduce
+from transformers import AutoConfig, set_seed
 
 try:
     import torch
@@ -29,8 +34,7 @@ def parse_args():
     parser.add_argument('--model_path', type=str, help='path to the model')
     parser.add_argument('--debug_template', type=str, help='init a conversation about chess')
     parser.add_argument('--conversation_settings', type=str, help='contains the setup for the conversation')
-    parser.add_argument('--gpu_support', action='store_true', help='add this to enable GPU support \(.safetensors model\)')
-    parser.add_argument('--cpu_support', action='store_true', help='add this to enable CPU support \(GGML model\)')
+    parser.add_argument('--mode', type=str, help='choose a mode \(cpu, oobabooga, mpt\)')
     return parser.parse_args()
 
 def _init_model(path: str, use_gptq=False, gptq_safetensors=False, verbose=False, **kwargs: Any) -> Any:
@@ -48,15 +52,33 @@ def main():
 #    model = init_model(model_path, n_threads=4, n_ctx=2048, use_mlock=False)
     
     
-    if args.gpu_support:
-        print("...using GPU, with safetensors model")
-        model, tokenizer = _init_model(model_path, use_gptq=True, gptq_safetensors=True)
-    elif args.cpu_support:
-        print("...using CPU, with GGML model")
+    if args.mode == "oobabooga":
+        print("...mode: oobabooga")
+
+    elif args.mode == "mpt":
+        print("...mode: mpt")
+        
+        # TODO: pass the model as parameter
+        model_directory = os.path.join("model", "mpt-7b-storywriter")
+        config = transformers.AutoConfig.from_pretrained(
+            model_directory,
+            trust_remote_code=True
+        )
+
+        model = transformers.AutoModelForCausalLM.from_pretrained(
+            model_directory,
+            config=config,
+            trust_remote_code=True
+        )
+
+        tokenizer = transformers.AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
+
+    elif args.mode == "cpu":
+        print("...mode: cpu")
         model = init_model(model_path, n_threads=psutil.cpu_count(logical=False) + 2, n_ctx=2048, use_mlock=False)    
     else:
-        print("...using default support (CPU, with GGML model)")
-        model = init_model(model_path, n_threads=psutil.cpu_count(logical=False) + 2, n_ctx=2048, use_mlock=False)
+        print("...mode: NO MODE GIVEN, QUITTING NOW")
+        exit
     
     action_lines = read_lines_from_file("action_input.txt")
     
@@ -95,6 +117,8 @@ def main():
             color = colors.pop()
             agents.append(Agent(name=name, self_description=self_description, color=color))
 
+    print(f"Agents: {agents}")
+    print(f"Topic: {topic}")
 
     # --- EXPLANATION -------------------------------------------------
     # this part runs the conversation between the various ais

@@ -5,23 +5,28 @@ this project is about different ais trying to solve a problem together. original
 
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
 
-run this by executing:
-> python main.py --cpu_support --model_path ./model/ggml-vic7b-q4_3.bin --conversation_settings characterSetups/ai_flirt.txt
+there are different ways to execute this, with different types of models:
 
-> python main.py --gpu_support --model_path ./model/vicuna-13B-1.1-GPTQ-4bit-128g.latest.safetensors --conversation_settings characterSetups/ai_flirt.txt
+===== using CPU =====
 
-explanation of the parameters:
+> python main.py --mode cpu --model_path ./model/ggml-vic7b-q4_3.bin --conversation_settings characterSetups/ai_flirt.txt
 
---cpu_support					use CPU (GGML model)
+in order for this to work, you need the ggml-vic7b-q4_3.bin file in your ./model/ directory.
 
---gpu_support					...or use GPU (.safetensors model)
+===== using GPU and the oobabooga server in API mode =====
 
---model_path					put your model in here, you have to download it somewhere, it's not part of this repository
+> python main.py --mode oobabooga --conversation_settings characterSetups/ai_flirt.txt 
 
---debug_template				init a conversation about chess
+for this you will first have to start the oobabooga server in API mode, check the documentation further below to find out how to start this.
 
---conversation_settings			contains the setup for the conversation
- 
+===== using GPU and the oobabooga server in API mode =====
+
+> python main.py --mode mpt --model_path ./model/mpt-7b-storywriter --conversation_settings characterSetups/ai_flirt.txt 
+
+in order for this to work, you need the ggml-vic7b-q4_3.bin file in your ./model/ directory.
+
+
+
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -  
  
 TODOs (in order of importance! )
