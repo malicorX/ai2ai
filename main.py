@@ -59,19 +59,20 @@ def main():
         print("...mode: mpt")
         
         # TODO: pass the model as parameter, right now possible parameters are "mpt-7b-storywriter" (which is 65k tokens) or "mpt-7b-chat"
-        model_directory = os.path.join("model", "mpt-7b-storywriter")
-        config = transformers.AutoConfig.from_pretrained(
-            model_directory,
-            trust_remote_code=True
-        )
+        model_directory = os.path.join("model", "mpt-7b-chat")
+        
+        config = transformers.AutoConfig.from_pretrained(model_directory, trust_remote_code=True)
+        config.update({"max_seq_len": 4096})
 
-        model = transformers.AutoModelForCausalLM.from_pretrained(
-            model_directory,
-            config=config,
-            trust_remote_code=True
-        )
+        model = AutoModelForCausalLM.from_pretrained(model_directory, config=config, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
 
-        tokenizer = transformers.AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
+        if not torch.cuda.is_available():
+            raise SystemError("cuda is unavailable - use ggml for cpu inference")
+        model.to("cuda")
+        model.eval()
+
+        return model, tokenizer
 
     elif args.mode == "cpu":
         print("...mode: cpu")

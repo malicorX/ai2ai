@@ -22,20 +22,13 @@ def run(prompt, model, config: Dict[str, any], max_tokens=128, stop=List[str], n
                        )
         generated_text = output['choices'][0]['text']
     else:
-        tokenizer = AutoTokenizer.from_pretrained('mosaicml/mpt-7b-storywriter', use_fast=True)
-        input_ids = tokenizer.encode(prompt, return_tensors="pt")
-        print(f"Input Prompt encoded: {input_ids}")
-        
-        gen_tokens = model.generate(input_ids,
-                                     max_length=input_ids.shape[-1] + max_tokens,
-                                     pad_token_id=tokenizer.eos_token_id,
-                                     do_sample=True,
-                                     top_p=config['top_p'],
-                                     top_k=config['top_k'],
-                                     temperature=config['temp'],
-                                     num_return_sequences=1)
-        generated_text = tokenizer.decode(gen_tokens[:, input_ids.shape[-1]:][0], skip_special_tokens=True)
+        print(f"!!! NO SUPPORT YET FOR GTP")
 
     print(f"Generated Output: {generated_text}")
 
     return generated_text
+    
+    
+    
+    
+    
