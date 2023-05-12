@@ -5,6 +5,7 @@ from utils.preprompt import prepend
 from helpers.file_utils import read_agents_from_file, read_lines_from_file
 from typing import Tuple, Any, Optional
 
+import requests
 import transformers
 import argparse
 import os
@@ -52,27 +53,8 @@ def main():
 #    model = init_model(model_path, n_threads=4, n_ctx=2048, use_mlock=False)
     
     
-    if args.mode == "oobabooga":
-        print("...mode: oobabooga")
-
-    elif args.mode == "mpt":
-        print("...mode: mpt")
-        
-        # TODO: pass the model as parameter, right now possible parameters are "mpt-7b-storywriter" (which is 65k tokens) or "mpt-7b-chat"
-        model_directory = os.path.join("model", "mpt-7b-chat")
-        
-        config = transformers.AutoConfig.from_pretrained(model_directory, trust_remote_code=True)
-        config.update({"max_seq_len": 4096})
-
-        model = AutoModelForCausalLM.from_pretrained(model_directory, config=config, trust_remote_code=True)
-        tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
-
-        if not torch.cuda.is_available():
-            raise SystemError("cuda is unavailable - use ggml for cpu inference")
-        model.to("cuda")
-        model.eval()
-
-        return model, tokenizer
+    if args.mode == "gpu":
+        print("...mode: gpu -> run mainGPU.py instead")
 
     elif args.mode == "cpu":
         print("...mode: cpu")
