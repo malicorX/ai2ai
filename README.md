@@ -15,24 +15,22 @@ in order for this to work, you need the ggml-vic7b-q4_3.bin file in your ./model
 
 ===== using GPU and the oobabooga server in API mode =====
 
-> python main.py --mode oobabooga --conversation_settings characterSetups/ai_flirt.txt 
+> python mainGPU.py
 
 for this you will first have to start the oobabooga server in API mode, check the documentation further below to find out how to start this.
 
-===== using GPU with MPT model =====
 
-> python main.py --mode mpt --model_path ./model/mpt-7b-storywriter --conversation_settings characterSetups/ai_flirt.txt 
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -  
 
-in order for this to work, you need the mpt-7b-storywriter/\* files in your ./model/ directory.
+INFORMATION:
 
-
+I'm currently only working on the GPU mode
 
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -  
  
 TODOs (in order of importance! )
 
 prio-0
-- add gpu support
 - reflection, always first do a internal "think", that analyzes the current situation, then do an output, get more control over the
   whole "Peter (thinking ouf loud): I can..." syntax, and better control about what is seen by the other ais and what not.
   (Thoughts should not be seen by other ais, but by the human reader)
@@ -81,17 +79,20 @@ you might need to:
 
 this shall install torch with CUDA 11.7 support
 
-===== install oobabooga-windows =====
+===== install oobabooga-windows WSL 2 mode =====
 
-you then will have to install oobabooga-windows (preferably with the 1-click installer)
+you then will have to install oobabooga in windows 10 inside WSL 2
 
 https://github.com/oobabooga/text-generation-webui
 
 then start it:
 
-> cd C:\AI\oobabooga_windows\text-generation-webui
+> cd /mnt/c/ai/oobabooga_WSL/text-generation-webui
 
-> python server.py --wbits 4 --groupsize 128 --model_type llama --model wizard-vicuna-13B-GPTQ --api
+> python3 server.py --wbits 4 --groupsize 128 --model_type llama --model wizard-vicuna-13B-GPTQ --api
+> python3 server.py --wbits 4 --groupsize 128 --model_type llama --model WizardLM-7B-uncensored-GPTQ --api
+> python3 server.py --wbits 4 --groupsize 128 --model_type llama --model WizardLM-13B-Uncensored-4bit-128g --api
+> python3 server.py --wbits 4 --model_type llama --model h2ogpt-oasst1-512-30B-GPTQ --api
 
 this should result in something like this:
 ![example oobabooga-windows api startup](oobabooga_windows_api-startup.png "API startup of oobabooga_windows (running GPU, with a gptq model)")
