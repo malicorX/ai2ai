@@ -53,6 +53,12 @@ prio-2
 - possibility for intervention and "steer" in a direction
 - have a "narrator", who will output facts about the ais world
 - have internet search access
+- have wolfram alpha access
+- have it write python code and execute it
+- have it have a paypal account, buy and sell things
+- have it /reason for everything it does
+- have traits ("can play soccer")
+- have forbids ("can't code")
 - have wikipedia search access (maybe https://www.youtube.com/watch?v=KerHlb8nuVc helps here)
 - ability to "save" and "load" a run
 - speed up the whole thing
@@ -121,6 +127,13 @@ https://www.youtube.com/watch?v=NfGcWGaO1E4
 
 building a multi chatbot
 https://www.pinecone.io/learn/javascript-chatbot/
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -  
+
+FURTHER IDEAS:
+
+- interactive sim like game, where people can control avatars
+- new goal: make money, use 10$ paypal as start
 
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -  
 
