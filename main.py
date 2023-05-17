@@ -1,8 +1,8 @@
-from utils.runner import run, init_model
-from utils.conversation import Conversation, Message
-from utils.agent import Agent
-from utils.preprompt import prepend
-from helpers.file_utils import read_agents_from_file, read_lines_from_file
+from cpu.utils.runner import run, init_model
+from cpu.utils.conversation import Conversation, Message
+from cpu.utils.agent import Agent
+from cpu.utils.preprompt import prepend
+from cpu.helpers.file_utils import read_agents_from_file, read_lines_from_file
 from typing import Tuple, Any, Optional
 
 import requests

@@ -15,7 +15,7 @@ in order for this to work, you need the ggml-vic7b-q4_3.bin file in your ./model
 
 ===== using GPU and the oobabooga server in API mode =====
 
-> python mainGPU.py
+> python mainGPU.py --model_name wizard-mega-13B-GPTQ
 
 for this you will first have to start the oobabooga server in API mode, check the documentation further below to find out how to start this.
 
@@ -99,6 +99,7 @@ then start it:
 > python3 server.py --wbits 4 --groupsize 128 --model_type llama --model WizardLM-7B-uncensored-GPTQ --api
 > python3 server.py --wbits 4 --groupsize 128 --model_type llama --model WizardLM-13B-Uncensored-4bit-128g --api
 > python3 server.py --wbits 4 --model_type llama --model h2ogpt-oasst1-512-30B-GPTQ --api
+> python3 server.py --wbits 4 --groupsize 128 --model_type llama --model wizard-mega-13B-GPTQ --api
 
 this should result in something like this:
 ![example oobabooga-windows api startup](oobabooga_windows_api-startup.png "API startup of oobabooga_windows (running GPU, with a gptq model)")
