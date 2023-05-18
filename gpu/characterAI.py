@@ -3,21 +3,31 @@ import requests
 HOST = 'localhost:5000'
 URI = f'http://{HOST}/api/v1/generate'
 
-class Character:
+class CharacterAI:
     def __init__(self, name, description, color):
         self.name = name
         self.description = description
         self.color = color
 
     def create_prompt(self, conversation, top_p):
+        __DEBUG__ = true
+   
         prompt = f"""
 ### YOUR CHARACTER:
 You are {self.name}, {self.description}.
 
 ### YOUR CONVERSATION SO FAR:{conversation}
 
-### YOUR RESPONSE:
+### YOUR RESPONSEE:
 """
+
+        print ("___DEBUG___")
+        print ("name: " + self.name)
+        print ("description: " + self.description)
+        print ("conversation: " + conversation)
+        print ("prompt: " + prompt)
+        print ("___DEBUG___")
+            
         return prompt
 
     def generate_response(self, prompt, top_p):

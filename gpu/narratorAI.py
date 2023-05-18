@@ -1,18 +1,67 @@
-from gpu.character import Character
+import requests
+
+HOST = 'localhost:5000'
+URI = f'http://{HOST}/api/v1/generate'
+
 from colorama import Fore
 
-class NarratorAI(Character):
-    def __init__(self):
-        super().__init__("Narrator", "an AI designed to tell the story setting and environment", Fore.GREEN)
-        
-    def create_prompt(self, name, response):
+class NarratorAI():
+    def __init__(self, name, description, color):
+        self.name = name
+        self.description = description
+        self.color = color
+           
+    def create_prompt(self, conversation, top_p):
+        __DEBUG__ = False
+
         prompt = f"""
-### FORMATTING TASK:
-You are tasked with telling the story environment and setting, where people are and what they plan to do.
+    ### FORMATTING TASK:
+    You are tasked with telling the story environment and setting, where people are and what they plan to do.
 
-### RESPONSE TO FORMAT:
-{response}
+    ### CONVERSATION SO FAR:
+    {conversation}
 
-### YOUR FORMATTED RESPONSE:
-"""
+    ### CONTINUE HERE:
+    """
+
+        if (__DEBUG__):
+            print (" === ___DEBUG___ = BEGIN ==============================================")
+            print ("name: " + self.name)
+            print ("conversation: " + conversation)  # change this line
+            print ("prompt: " + prompt)
+            print (" === ___DEBUG___ = END   ==============================================")
+
         return prompt
+
+    def generate_response(self, prompt, top_p):
+        request = {
+            'prompt': prompt,
+            'max_new_tokens': 150,
+            'do_sample': True,
+            'temperature': 1.3,
+            'top_p': top_p,
+            'typical_p': 1,
+            'repetition_penalty': 1.18,
+            'top_k': 40,
+            'min_length': 0,
+            'no_repeat_ngram_size': 0,
+            'num_beams': 1,
+            'penalty_alpha': 0,
+            'length_penalty': 1,
+            'early_stopping': False,
+            'seed': -1,
+            'add_bos_token': True,
+            'truncation_length': 2048,
+            'ban_eos_token': False,
+            'skip_special_tokens': True,
+            'stopping_strings': []
+        }
+
+        response = requests.post(URI, json=request)
+
+        if response.status_code == 200:
+            result = response.json()['results'][0]['text']
+            response_text = result.split("### YOUR RESPONSE:")[-1].strip()
+            return response_text
+        else:
+            return None

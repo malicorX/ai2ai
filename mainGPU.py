@@ -5,7 +5,7 @@ import argparse
 
 from colorama import Fore, Style, init
 
-from gpu.character import Character
+from gpu.characterAI import CharacterAI
 from gpu.formatterAI import FormatterAI
 from gpu.narratorAI import NarratorAI
 
@@ -24,13 +24,12 @@ def main():
     
     print("MODEL_NAME: " + model_name)
 
-    narrator = NarratorAI()
-    peter = Character("Peter", "a tennis professional from New York, 29 years old.", Fore.BLUE)
-    mary = Character("Mary", "an environmentalist, passionate about climate change.", Fore.RED)
-    formatter = FormatterAI()
+    narrator = NarratorAI("Narrator", "an AI designed to tell the story setting and environment", Fore.GREEN)
+    formatter = FormatterAI("Formatter", "an AI designed to format responses.", Fore.LIGHTBLACK_EX)
+    peter = CharacterAI("Peter", "a tennis professional from New York, 29 years old.", Fore.BLUE)
+    mary = CharacterAI("Mary", "an environmentalist, passionate about climate change.", Fore.RED)
 
     conversation = """
-### CONVERSATION SO FAR:
 A calm night in New York City.
 """
 
@@ -48,17 +47,24 @@ A calm night in New York City.
             #
             # --- EXPLANATION -------------------------------------------------
             
-            print ("conversation: " + conversation)
+            #print ("[ 1 ] conversation: " + conversation)
             character_prompt = character.create_prompt(conversation, 0.8)
+            #print ("[ 2 ] character_prompt: " + character_prompt)
             character_response = character.generate_response(character_prompt, 0.8)
             
             if character_response:
-                print ("character_response: " + character_response)
+                #print ("[ 3 ] character_response: " + character_response)
 
                 formatter_prompt = formatter.create_prompt(character.name, character_response)
+                #print ("[ 4 ] formatter_prompt: " + formatter_prompt)
+                
                 formatted_character_response = formatter.generate_response(formatter_prompt, 0.8)
+                #print ("[ 5 ] formatted_character_response: " + formatted_character_response)
+                
                 conversation += formatted_character_response + "\n"
-                print(character.color + formatted_character_response)
+                #print ("[ 6 ] conversation (new): " + conversation)
+                
+                #print(character.color + formatted_character_response)
                 break
             else:
                 print("Error generating " + character.name + "'s response. Exiting.")
@@ -66,7 +72,7 @@ A calm night in New York City.
 
         print(Fore.LIGHTBLACK_EX + conversation)
 
-        if i == 1:
+        if i == 5:
             break
 
 if __name__ == '__main__':
