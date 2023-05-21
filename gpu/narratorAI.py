@@ -1,4 +1,5 @@
 import requests
+import json
 
 HOST = 'localhost:5000'
 URI = f'http://{HOST}/api/v1/generate'
@@ -34,9 +35,11 @@ class NarratorAI():
         return prompt
 
     def generate_response(self, prompt, top_p):
+        __DEBUG__ = False
+    
         request = {
             'prompt': prompt,
-            'max_new_tokens': 150,
+            'max_new_tokens': 300,
             'do_sample': True,
             'temperature': 1.3,
             'top_p': top_p,
@@ -59,9 +62,21 @@ class NarratorAI():
 
         response = requests.post(URI, json=request)
 
+        if (__DEBUG__):
+            print (" === ___DEBUG___ = BEGIN ==============================================")
+            print ("name: " + self.name)
+            print ("prompt: " + prompt)
+            print ("request: " + json.dumps(request))
+            print ("response: " + json.dumps(response.json()))
+            print (" === ___DEBUG___ = END   ==============================================")
+
+
         if response.status_code == 200:
             result = response.json()['results'][0]['text']
+            print(Fore.RED + "NO ERROR!!! response.json(): " + json.dumps(response.json()) + " | " + str(response.status_code))
             response_text = result.split("### YOUR RESPONSE:")[-1].strip()
+            print(Fore.RED + "NO ERROR!!! response_text: " + response_text + " | " + str(response.status_code))
             return response_text
         else:
+            print(Fore.RED + "ERROR!!! " + str(response.status_code))
             return None

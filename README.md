@@ -102,7 +102,8 @@ then start it:
 > python3 server.py --wbits 4 --groupsize 128 --model_type llama --model wizard-mega-13B-GPTQ --api
 # next one seems good for stories:
 > python3 server.py --wbits 4 --groupsize -1 --model_type llama --model GPT4-X-Alpasta-30b-4bit --api
-> python3 server.py --wbits 4 --groupsize 128 --model_type llama --model VicUnlocked-30B-LoRA-GPTQ --api
+> python3 server.py --wbits 4 --groupsize -1 --model_type llama --model VicUnlocked-30B-LoRA-GPTQ --api
+> python3 server.py --wbits 4 --groupsize 128 --model_type llama --model pygmalion-13b-4bit-128g --api
 
 this should result in something like this:
 ![example oobabooga-windows api startup](oobabooga_windows_api-startup.png "API startup of oobabooga_windows (running GPU, with a gptq model)")
