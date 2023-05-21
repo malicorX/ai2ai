@@ -15,38 +15,12 @@ class CharacterAI:
         self.color = color
         self.conversation = conversation
 
-
-
     def act(self, i):
+        # init a formatterAI that will later on format this characters response better
         formatter = FormatterAI("Formatter", "an AI designed to format responses.", Fore.LIGHTBLACK_EX)
 
-        character_prompt = self.create_prompt()
-        print ("[ " + str(i) +  "-2 ] character_prompt: " + character_prompt)
-        character_response = self.generate_response(character_prompt)
-        
-        if character_response:
-            print ("[ " + str(i) +  "-3 ] character_response: " + character_response)
-
-            formatter_prompt = formatter.create_prompt(self.name, character_response)
-            print ("[ " + str(i) +  "-4 ] formatter_prompt: " + formatter_prompt)
-            
-            formatted_character_response = formatter.generate_response(formatter_prompt, 0.8)
-            print ("[ " + str(i) +  "-5 ] formatted_character_response: " + formatted_character_response)
-            
-            self.conversation += formatted_character_response + "\n"
-            print ("[ " + str(i) +  "-6 ] conversation (new): " + self.conversation)
-            
-            print(self.color + formatted_character_response)
-            
-        else:
-            print("Error generating " + self.name + "'s response. Exiting.")
-            return
-    
-
-    def create_prompt(self):
-        __DEBUG__ = False
-   
-        prompt = f"""
+        # create this characters prompt, based on his template and current memory (==conversation)
+        character_prompt = f"""
 ### YOUR CHARACTER:
 You are {self.name}, {self.description}.
 
@@ -54,16 +28,27 @@ You are {self.name}, {self.description}.
 
 ### YOUR RESPONSE:
 """
-
-        if (__DEBUG__):
-            print (" === ___DEBUG___ = BEGIN ==============================================")
-            print ("name: " + self.name)
-            print ("description: " + self.description)
-            print ("conversation: " + self.conversation)
-            print ("prompt: " + prompt)
-            print (" === ___DEBUG___ = BEGIN ==============================================")
+        print (Fore.WHITE + "[ " + str(i) +  "-1 ] character_prompt: " + character_prompt)
+        
+        # create a response from the current character, regarding the just built prompt
+        character_response = self.generate_response(character_prompt)
+        print (Fore.WHITE + "[ " + str(i) +  "-2 ] character_response: " + character_response)
+        
+        if character_response:
+            # reformat the created response (to have it fit better into the story telling character
+            formatter_prompt = formatter.create_prompt(self.name, character_response)
+            formatted_character_response = formatter.generate_response(formatter_prompt, 0.8)
+            self.conversation += formatted_character_response + "\n"
+            print (Fore.WHITE + "[ " + str(i) +  "-3 ] self.conversation reformatted: " + self.conversation)
             
-        return prompt
+            #print(self.color + self.conversation)
+            
+        else:
+            print("Error generating " + self.name + "'s response. Exiting.")
+            return
+    
+
+
 
     def generate_response(self, prompt):
         __DEBUG__ = False
@@ -96,12 +81,12 @@ You are {self.name}, {self.description}.
         response = requests.post(URI, json=request)
 
         if (__DEBUG__):
-            print (" === ___DEBUG___ = BEGIN ==============================================")
-            print ("name: " + self.name)
-            print ("prompt: " + prompt)
-            print ("request: " + json.dumps(request))
-            print ("response: " + json.dumps(response.json()))
-            print (" === ___DEBUG___ = END   ==============================================")
+            print (Fore.WHITE + " === ___DEBUG___ = BEGIN ==============================================")
+            print (Fore.WHITE + "name: " + self.name)
+            print (Fore.WHITE + "prompt: " + prompt)
+            print (Fore.WHITE + "request: " + json.dumps(request))
+            print (Fore.WHITE + "response: " + json.dumps(response.json()))
+            print (Fore.WHITE + " === ___DEBUG___ = END   ==============================================")
 
         if response.status_code == 200:
             result = response.json()['results'][0]['text']

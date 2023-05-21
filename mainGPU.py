@@ -20,8 +20,7 @@ def parse_args():
 def main():
     args = parse_args()
     model_name = args.model_name
-    
-    print("MODEL_NAME: " + model_name)
+    print(Fore.YELLOW + "MODEL_NAME: " + model_name)
 
     narrator = NarratorAI("Narrator", "an AI designed to tell the story setting and environment", Fore.GREEN)
     
@@ -40,19 +39,8 @@ A calm night in New York City.
     while True:
         i += 1
 
-        for character in characters:
-            # --- EXPLANATION -------------------------------------------------
-            # each character gets the following input (==longterm memory), which is used to generate his answer:
-            # 
-            # - conversation: this contains the complete conversation from everybody so far                                 TODO: take out all "thinks" here
-            # - TODO: add stuff like google search / wolfram alpha and so on
-            #
-            # --- EXPLANATION -------------------------------------------------
-            
+        for character in characters:           
             character.act(i)
-            
-
-#        print(Fore.LIGHTBLACK_EX + conversation)
 
         if i == 1:
             break
