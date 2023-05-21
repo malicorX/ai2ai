@@ -1,4 +1,4 @@
-from utils.agent import Agent
+from cpu.utils.agent import Agent
 
 def read_agents_from_file(filename):
     agents = []

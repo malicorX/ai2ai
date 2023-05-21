@@ -15,7 +15,7 @@ in order for this to work, you need the ggml-vic7b-q4_3.bin file in your ./model
 
 ===== using GPU and the oobabooga server in API mode =====
 
-> python mainGPU.py
+> python mainGPU.py --model_name wizard-mega-13B-GPTQ
 
 for this you will first have to start the oobabooga server in API mode, check the documentation further below to find out how to start this.
 
@@ -53,6 +53,12 @@ prio-2
 - possibility for intervention and "steer" in a direction
 - have a "narrator", who will output facts about the ais world
 - have internet search access
+- have wolfram alpha access
+- have it write python code and execute it
+- have it have a paypal account, buy and sell things
+- have it /reason for everything it does
+- have traits ("can play soccer")
+- have forbids ("can't code")
 - have wikipedia search access (maybe https://www.youtube.com/watch?v=KerHlb8nuVc helps here)
 - ability to "save" and "load" a run
 - speed up the whole thing
@@ -93,6 +99,11 @@ then start it:
 > python3 server.py --wbits 4 --groupsize 128 --model_type llama --model WizardLM-7B-uncensored-GPTQ --api
 > python3 server.py --wbits 4 --groupsize 128 --model_type llama --model WizardLM-13B-Uncensored-4bit-128g --api
 > python3 server.py --wbits 4 --model_type llama --model h2ogpt-oasst1-512-30B-GPTQ --api
+> python3 server.py --wbits 4 --groupsize 128 --model_type llama --model wizard-mega-13B-GPTQ --api
+# next one seems good for stories:
+> python3 server.py --wbits 4 --groupsize -1 --model_type llama --model GPT4-X-Alpasta-30b-4bit --api
+> python3 server.py --wbits 4 --groupsize -1 --model_type llama --model VicUnlocked-30B-LoRA-GPTQ --api
+> python3 server.py --wbits 4 --groupsize 128 --model_type llama --model pygmalion-13b-4bit-128g --api
 
 this should result in something like this:
 ![example oobabooga-windows api startup](oobabooga_windows_api-startup.png "API startup of oobabooga_windows (running GPU, with a gptq model)")
@@ -121,6 +132,13 @@ https://www.youtube.com/watch?v=NfGcWGaO1E4
 
 building a multi chatbot
 https://www.pinecone.io/learn/javascript-chatbot/
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -  
+
+FURTHER IDEAS:
+
+- interactive sim like game, where people can control avatars
+- new goal: make money, use 10$ paypal as start
 
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -  
 
