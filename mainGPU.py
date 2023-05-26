@@ -32,8 +32,7 @@ A calm night in New York City.
 """, Fore.RED)
 
 
-#    characters = [peter, mary]
-    characters = [peter]
+    characters = [peter, mary]
     
     i = 0
     while True:
@@ -42,8 +41,14 @@ A calm night in New York City.
         for character in characters:           
             character.act(i)
 
-        if i == 1:
+        if i == 3:
             break
 
 if __name__ == '__main__':
     main()
+    
+    
+    
+    
+    
+# there has to be a common conversation for all characters and a private memory for each character separately

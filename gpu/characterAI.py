@@ -36,13 +36,11 @@ You are {self.name}, {self.description}.
         
         if character_response:
             # reformat the created response (to have it fit better into the story telling character
-            formatter_prompt = formatter.create_prompt(self.name, character_response)
-            formatted_character_response = formatter.generate_response(formatter_prompt, 0.8)
+            formatted_character_response = formatter.act(self.name, character_response)
             self.conversation += formatted_character_response + "\n"
             print (Fore.WHITE + "[ " + str(i) +  "-3 ] self.conversation reformatted: " + self.conversation)
             
-            #print(self.color + self.conversation)
-            
+            print(self.color + self.conversation)
         else:
             print("Error generating " + self.name + "'s response. Exiting.")
             return

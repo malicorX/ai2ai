@@ -112,6 +112,8 @@ then start it:
 
 > python3 server.py --wbits 4 --groupsize 128 --model_type llama --model pygmalion-13b-4bit-128g --api
 
+> python3 server.py --wbits 4 --groupsize -1 --model_type llama --model WizardLM-30B-Uncensored-GPTQ --api
+
 this should result in something like this:
 ![example oobabooga-windows api startup](oobabooga_windows_api-startup.png "API startup of oobabooga_windows (running GPU, with a gptq model)")
 
