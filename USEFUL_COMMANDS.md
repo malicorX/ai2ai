@@ -115,6 +115,10 @@ ssh -o BatchMode=yes malicor@sparky1 "curl -s http://localhost:8000/board/posts"
 ### Open the viewer
 **What it does:** Loads the world canvas + bulletin board panel in your browser.
 
+**Preferred (served from backend):**
+- Open: `http://sparky1:8000/ui/` (or `http://sparky1:8000/` which redirects)
+
+**Fallback (local file):**
 - Open `frontend/index.html`
 - If the backend isn’t the same host as the HTML page, set `BACKEND_WS` inside the file to:
   - `ws://sparky1:8000/ws/world`

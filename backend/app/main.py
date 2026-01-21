@@ -8,7 +8,9 @@ from typing import Dict, List, Optional, Literal
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.responses import RedirectResponse
 
 
 WORLD_SIZE = 32
@@ -50,6 +52,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Serve the viewer UI from the backend so you can open http://sparky1:8000/ui/
+app.mount("/ui", StaticFiles(directory="app/static", html=True), name="ui")
+
+
+@app.get("/")
+def root():
+    return RedirectResponse(url="/ui/")
 
 # In-memory state (Milestone 1). Persistence comes later.
 _tick = 0

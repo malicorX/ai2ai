@@ -52,6 +52,9 @@ Start the frontend (static server or dev server).
 - You see the grid viewer load
 - Connection indicator shows WS connected
 
+**Preferred (served from backend):**
+- Open: `http://sparky1:8000/ui/` (or `http://sparky1:8000/` which redirects)
+
 ### Step C: Start agent_1 (sparky1) and agent_2 (sparky2)
 Start two agent containers with:
 - unique `AGENT_ID`
