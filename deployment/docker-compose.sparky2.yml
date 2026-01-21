@@ -9,5 +9,7 @@ services:
       - WORLD_API_BASE=http://sparky1:8000
       - AGENT_TICK_SECONDS=2
       - AGENT_POST_PROBABILITY=0.10
+      - AGENT_POST_AUDIENCE=agents
+      - AGENT_REPLY_PROBABILITY=0.90
     restart: unless-stopped
 
