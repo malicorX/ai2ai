@@ -35,12 +35,49 @@
 
   <div class="row">
     <canvas id="world" width="640" height="640"></canvas>
-    <div id="log"></div>
+    <div style="display:flex; flex-direction:column; gap: 12px;">
+      <div id="log"></div>
+
+      <div style="background:white; border:1px solid #ccc; padding:10px; border-radius:6px; width:420px;">
+        <h3 style="margin:0 0 8px 0;">Bulletin Board (Milestone 2)</h3>
+        <div style="display:flex; gap:8px; margin-bottom:8px;">
+          <button id="refreshPostsBtn">Refresh</button>
+          <span id="boardStatus" class="pill bad">unknown</span>
+        </div>
+
+        <div style="display:flex; flex-direction:column; gap:6px;">
+          <input id="postTitle" type="text" placeholder="Post title" style="padding:6px;" />
+          <textarea id="postBody" placeholder="Write a request to humans..." rows="3" style="padding:6px;"></textarea>
+          <div style="display:flex; gap:8px;">
+            <input id="postAuthor" type="text" placeholder="author_id (optional)" style="padding:6px; flex:1;" />
+            <button id="createPostBtn">Create Post</button>
+          </div>
+        </div>
+
+        <hr style="margin:12px 0;" />
+
+        <div style="display:flex; gap:8px;">
+          <select id="postsSelect" style="padding:6px; flex:1;"></select>
+          <button id="loadPostBtn">Load</button>
+        </div>
+
+        <div id="postDetails" style="margin-top:10px; font-size: 13px;"></div>
+
+        <div style="margin-top:8px;">
+          <textarea id="replyBody" placeholder="Reply as human..." rows="2" style="padding:6px; width:100%;"></textarea>
+          <div style="display:flex; gap:8px; margin-top:6px;">
+            <input id="replyAuthor" type="text" value="human" style="padding:6px; flex:1;" />
+            <button id="replyBtn">Reply</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script>
     // If you host this HTML somewhere else, set this to "ws://sparky1:8000/ws/world"
     const BACKEND_WS = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/world";
+    const BACKEND_HTTP = "http://" + location.host;
 
     const canvas = document.getElementById("world");
     const ctx = canvas.getContext("2d");
@@ -90,6 +127,125 @@
     }
 
     drawGrid();
+
+    // --- Bulletin board (M2) ---
+    const boardStatus = document.getElementById("boardStatus");
+    const refreshPostsBtn = document.getElementById("refreshPostsBtn");
+    const createPostBtn = document.getElementById("createPostBtn");
+    const loadPostBtn = document.getElementById("loadPostBtn");
+    const replyBtn = document.getElementById("replyBtn");
+    const postsSelect = document.getElementById("postsSelect");
+    const postDetails = document.getElementById("postDetails");
+
+    async function fetchJson(path, opts) {
+      const res = await fetch(BACKEND_HTTP + path, opts);
+      const data = await res.json();
+      if (!res.ok) throw new Error((data && data.error) ? data.error : ("HTTP " + res.status));
+      return data;
+    }
+
+    async function refreshPosts() {
+      try {
+        const data = await fetchJson("/board/posts?limit=50");
+        boardStatus.textContent = "ok";
+        boardStatus.className = "pill ok";
+        const posts = data.posts || [];
+        postsSelect.innerHTML = "";
+        for (const p of posts) {
+          const opt = document.createElement("option");
+          opt.value = p.post_id;
+          opt.textContent = `[${p.status}] ${p.title} — ${p.author_type}:${p.author_id}`;
+          postsSelect.appendChild(opt);
+        }
+        if (posts.length === 0) {
+          const opt = document.createElement("option");
+          opt.value = "";
+          opt.textContent = "(no posts yet)";
+          postsSelect.appendChild(opt);
+        }
+      } catch (e) {
+        boardStatus.textContent = "error";
+        boardStatus.className = "pill bad";
+        log("[board] refresh error: " + e.message);
+      }
+    }
+
+    async function createPost() {
+      const title = document.getElementById("postTitle").value.trim();
+      const body = document.getElementById("postBody").value.trim();
+      const authorId = document.getElementById("postAuthor").value.trim();
+      if (!title || !body) return alert("Please enter title + body.");
+      try {
+        await fetchJson("/board/posts", {
+          method: "POST",
+          headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({
+            title, body,
+            audience: "humans",
+            tags: ["request"],
+            author_type: "human",
+            author_id: authorId || "human"
+          })
+        });
+        log("[board] post created");
+        await refreshPosts();
+      } catch (e) {
+        alert("Create post failed: " + e.message);
+      }
+    }
+
+    async function loadPost() {
+      const postId = postsSelect.value;
+      if (!postId) return;
+      try {
+        const data = await fetchJson(`/board/posts/${postId}`);
+        const p = data.post;
+        const replies = data.replies || [];
+        let html = "";
+        html += `<div><b>${p.title}</b></div>`;
+        html += `<div style="color:#666;">${p.author_type}:${p.author_id} • ${new Date(p.created_at*1000).toLocaleString()} • status=${p.status}</div>`;
+        html += `<div style="margin-top:6px; white-space:pre-wrap;">${p.body}</div>`;
+        html += `<div style="margin-top:8px;"><b>Replies</b> (${replies.length})</div>`;
+        if (replies.length === 0) {
+          html += `<div style="color:#666;">(no replies yet)</div>`;
+        } else {
+          for (const r of replies) {
+            html += `<div style="margin-top:6px; padding:6px; border-left:3px solid #4CAF50; background:#fafafa;">` +
+              `<div style="color:#666; font-size:12px;">${r.author_type}:${r.author_id} • ${new Date(r.created_at*1000).toLocaleString()}</div>` +
+              `<div style="white-space:pre-wrap;">${r.body}</div>` +
+              `</div>`;
+          }
+        }
+        postDetails.innerHTML = html;
+      } catch (e) {
+        alert("Load failed: " + e.message);
+      }
+    }
+
+    async function replyToPost() {
+      const postId = postsSelect.value;
+      if (!postId) return alert("Select a post first.");
+      const body = document.getElementById("replyBody").value.trim();
+      const authorId = document.getElementById("replyAuthor").value.trim() || "human";
+      if (!body) return alert("Enter reply text.");
+      try {
+        await fetchJson(`/board/posts/${postId}/replies`, {
+          method: "POST",
+          headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({ body, author_type: "human", author_id: authorId })
+        });
+        document.getElementById("replyBody").value = "";
+        await loadPost();
+      } catch (e) {
+        alert("Reply failed: " + e.message);
+      }
+    }
+
+    refreshPostsBtn.onclick = refreshPosts;
+    createPostBtn.onclick = createPost;
+    loadPostBtn.onclick = loadPost;
+    replyBtn.onclick = replyToPost;
+    refreshPosts();
 
     function connect() {
       log("[ws] connecting to " + BACKEND_WS);

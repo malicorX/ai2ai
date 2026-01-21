@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 import time
 from dataclasses import dataclass, asdict
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Literal
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 
@@ -41,6 +43,13 @@ class WorldSnapshot(BaseModel):
 
 
 app = FastAPI(title="AI Village Backend (v1)")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # In-memory state (Milestone 1). Persistence comes later.
 _tick = 0
@@ -50,6 +59,53 @@ _landmarks = [
     {"id": "cafe", "x": 6, "y": 6, "type": "cafe"},
     {"id": "market", "x": 20, "y": 12, "type": "market"},
 ]
+
+AuthorType = Literal["agent", "human", "system"]
+AudienceType = Literal["public", "humans", "agents"]
+PostStatus = Literal["open", "closed", "moderated"]
+
+
+@dataclass
+class BoardPost:
+    post_id: str
+    author_type: AuthorType
+    author_id: str
+    audience: str
+    title: str
+    body: str
+    tags: List[str]
+    status: PostStatus
+    created_at: float
+    updated_at: float
+
+
+@dataclass
+class BoardReply:
+    reply_id: str
+    post_id: str
+    author_type: AuthorType
+    author_id: str
+    body: str
+    created_at: float
+
+
+class CreatePostRequest(BaseModel):
+    title: str
+    body: str
+    audience: str = "humans"
+    tags: List[str] = Field(default_factory=list)
+    author_type: AuthorType = "agent"
+    author_id: str = ""
+
+
+class CreateReplyRequest(BaseModel):
+    body: str
+    author_type: AuthorType = "human"
+    author_id: str = "human"
+
+
+_board_posts: Dict[str, BoardPost] = {}
+_board_replies: Dict[str, List[BoardReply]] = {}
 
 
 class WSManager:
@@ -114,6 +170,75 @@ def health():
 @app.get("/world", response_model=WorldSnapshot)
 def world():
     return get_world_snapshot()
+
+@app.get("/board/posts")
+def list_posts(status: Optional[PostStatus] = None, tag: Optional[str] = None, limit: int = 50):
+    posts = list(_board_posts.values())
+    if status:
+        posts = [p for p in posts if p.status == status]
+    if tag:
+        posts = [p for p in posts if tag in p.tags]
+    posts.sort(key=lambda p: p.created_at, reverse=True)
+    posts = posts[: max(1, min(limit, 200))]
+    return {"posts": [asdict(p) for p in posts]}
+
+
+@app.get("/board/posts/{post_id}")
+def get_post(post_id: str):
+    post = _board_posts.get(post_id)
+    if not post:
+        return {"error": "not_found", "post_id": post_id}
+    replies = _board_replies.get(post_id, [])
+    return {"post": asdict(post), "replies": [asdict(r) for r in replies]}
+
+
+@app.post("/board/posts")
+async def create_post(req: CreatePostRequest):
+    global _tick
+    _tick += 1
+    now = time.time()
+    post_id = str(uuid.uuid4())
+    author_id = req.author_id or (req.author_type == "agent" and req.author_id) or "unknown"
+    post = BoardPost(
+        post_id=post_id,
+        author_type=req.author_type,
+        author_id=author_id,
+        audience=req.audience,
+        title=req.title.strip()[:200],
+        body=req.body.strip(),
+        tags=req.tags[:20],
+        status="open",
+        created_at=now,
+        updated_at=now,
+    )
+    _board_posts[post_id] = post
+    _board_replies.setdefault(post_id, [])
+    # For M2 we piggyback on world broadcast; a dedicated /ws/board can come later.
+    await ws_manager.broadcast_world()
+    return {"ok": True, "post": asdict(post)}
+
+
+@app.post("/board/posts/{post_id}/replies")
+async def create_reply(post_id: str, req: CreateReplyRequest):
+    global _tick
+    _tick += 1
+    now = time.time()
+    post = _board_posts.get(post_id)
+    if not post:
+        return {"error": "not_found", "post_id": post_id}
+    reply = BoardReply(
+        reply_id=str(uuid.uuid4()),
+        post_id=post_id,
+        author_type=req.author_type,
+        author_id=req.author_id or "human",
+        body=req.body.strip(),
+        created_at=now,
+    )
+    _board_replies.setdefault(post_id, []).append(reply)
+    post.updated_at = now
+    _board_posts[post_id] = post
+    await ws_manager.broadcast_world()
+    return {"ok": True, "reply": asdict(reply)}
 
 
 @app.post("/agents/upsert")

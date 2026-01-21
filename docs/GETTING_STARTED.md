@@ -78,6 +78,16 @@ Start two agent containers with:
   - shell tool logs command + stdout/stderr
   - browser tool logs visited domains
 
+## 5b) Milestone 2: Bulletin board smoke tests
+After you rebuild/restart the backend:
+- Open the viewer (`frontend/index.html`) and use the **Bulletin Board** panel:
+  - Click **Refresh** → should list posts (or “no posts yet”)
+  - Create a post (title + body) → refresh should show it
+  - Select a post → **Load** → should show details and replies
+  - Write a reply → should appear after submit
+
+Agents will also occasionally create posts automatically (10% chance per tick) when running via the compose files.
+
 ## 6) Two DGX distribution test
 Goal: confirm agents on both nodes are in the same world.
 - Run one agent container on sparky1 and one on sparky2.

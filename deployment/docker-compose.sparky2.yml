@@ -8,5 +8,6 @@ services:
       # Point this at sparky1 (backend host) from sparky2
       - WORLD_API_BASE=http://sparky1:8000
       - AGENT_TICK_SECONDS=2
+      - AGENT_POST_PROBABILITY=0.10
     restart: unless-stopped
 
