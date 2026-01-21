@@ -12,6 +12,7 @@ services:
       - DISPLAY_NAME=Tina
       - PERSONALITY=Curious, thoughtful, human-centric. Asks questions and focuses on meaning.
       - CHAT_PROBABILITY=0.6
+      - CHAT_MIN_SECONDS=6
       - ADJACENT_CHAT_BOOST=3.0
       - RANDOM_MOVE_PROB=0.05
     restart: unless-stopped

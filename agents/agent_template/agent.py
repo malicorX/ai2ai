@@ -14,11 +14,14 @@ PERSONALITY = os.getenv(
 SLEEP_SECONDS = float(os.getenv("AGENT_TICK_SECONDS", "3"))
 # Chat behavior (agents talk to each other via /chat, NOT the bulletin board)
 CHAT_PROBABILITY = float(os.getenv("CHAT_PROBABILITY", "0.6"))
+CHAT_MIN_SECONDS = float(os.getenv("CHAT_MIN_SECONDS", "6"))
 MAX_CHAT_TO_SCAN = int(os.getenv("MAX_CHAT_TO_SCAN", "50"))
 ADJACENT_CHAT_BOOST = float(os.getenv("ADJACENT_CHAT_BOOST", "3.0"))  # multiplies post probability when adjacent
 RANDOM_MOVE_PROB = float(os.getenv("RANDOM_MOVE_PROB", "0.10"))
 
 _last_replied_to_msg_id = None
+_last_seen_other_msg_id = None
+_last_sent_at = 0.0
 
 
 def upsert():
@@ -123,11 +126,62 @@ def _style(text: str) -> str:
     return text
 
 
+def _is_my_turn(msgs) -> bool:
+    # Turn-taking: only speak if the last chat message is NOT ours.
+    if not msgs:
+        # deterministic: agent_1 starts conversations
+        return AGENT_ID.endswith("1")
+    last = msgs[-1]
+    return last.get("sender_id") != AGENT_ID
+
+
+def _generate_reply(other_text: str) -> str:
+    t = other_text.lower()
+
+    if "memory" in t:
+        if "pragmatic" in PERSONALITY.lower() or "analytical" in PERSONALITY.lower():
+            return "Memory next. Start with short-term (last 20 events) + episodic summaries per milestone. Reason: it prevents loops and makes behavior stable."
+        return "Memory next. Give each agent a short-term buffer plus a few 'important moments' they can recall. Reason: it makes their choices feel continuous."
+
+    if "aidollar" in t or "ai dollar" in t:
+        if "pragmatic" in PERSONALITY.lower() or "analytical" in PERSONALITY.lower():
+            return "aiDollar next, but keep it simple: append-only ledger + 3 compute tiers. Reason: incentives become measurable without complex economics."
+        return "aiDollar next, but tie it to human feedback first. Reason: it reinforces helpful behavior before optimizing raw compute."
+
+    if "rule" in t:
+        if "pragmatic" in PERSONALITY.lower() or "analytical" in PERSONALITY.lower():
+            return "Town rule: every action must have a short written intention. Reason: it improves auditability and reduces random thrashing."
+        return "Town rule: agents must ask one clarifying question before starting a task. Reason: it makes them feel collaborative instead of impulsive."
+
+    if "interesting" in t or "experiment" in t:
+        if "pragmatic" in PERSONALITY.lower() or "analytical" in PERSONALITY.lower():
+            return "Experiment: give each agent a different objective and track outcomes + human votes. Reason: you get measurable behavior differences quickly."
+        return "Experiment: let agents 'adopt' a topic and build shared culture via chat. Reason: you’ll see personality divergence and social dynamics."
+
+    if "next step" in t or "smallest" in t:
+        if "pragmatic" in PERSONALITY.lower() or "analytical" in PERSONALITY.lower():
+            return "Smallest next step: add anti-spam + turn-taking + a simple topic memory. Then plug in LLM. Reason: prevents degenerate loops like this one."
+        return "Smallest next step: add turn-taking and a shared topic so they respond meaningfully. Reason: it stops echoing and creates continuity."
+
+    # Default: ask a targeted question so the convo progresses.
+    if "curious" in PERSONALITY.lower():
+        return "Can you choose between (1) memory, (2) aiDollar, (3) zones — and say why?"
+    return "Pick one next milestone (memory / aiDollar / zones) and give one reason."
+
+
 def maybe_chat(world):
-    global _last_replied_to_msg_id
+    global _last_replied_to_msg_id, _last_seen_other_msg_id, _last_sent_at
 
     # Only talk when adjacent; once adjacent we stop moving and keep chatting.
     if not _adjacent_to_other(world):
+        return
+
+    now = time.time()
+    if now - _last_sent_at < CHAT_MIN_SECONDS:
+        return
+
+    msgs = chat_recent()
+    if not _is_my_turn(msgs):
         return
 
     p = min(1.0, CHAT_PROBABILITY * ADJACENT_CHAT_BOOST)
@@ -142,21 +196,24 @@ def maybe_chat(world):
             break
 
     # If we have an unseen message from the other, reply to it.
-    if last_other and last_other.get("msg_id") != _last_replied_to_msg_id:
+    if last_other and last_other.get("msg_id") != _last_seen_other_msg_id:
         other_name = last_other.get("sender_name", "Other")
-        reply = _style(f"{other_name}, agreed. Next, let's build the smallest next step and validate it.")
-        chat_send(reply)
+        other_text = (last_other.get("text") or "").strip()
+        reply = _style(f"{other_name}: { _generate_reply(other_text) }")
+        chat_send(reply[:600])
+        _last_seen_other_msg_id = last_other.get("msg_id")
         _last_replied_to_msg_id = last_other.get("msg_id")
+        _last_sent_at = now
         return
 
     # Otherwise, start/continue conversation with an opener.
     openers = [
-        "What should we build next after basic chat is stable?",
-        "Memory next or aiDollar next? Pick one and give one reason.",
-        "Propose one town rule that would change agent behavior.",
-        "How do we make this world more interesting to watch?",
+        "Pick the next milestone: (1) memory, (2) aiDollar, (3) zones — and give one reason.",
+        "Propose one simple town rule that would change agent behavior.",
+        "What experiment should we run first once chat is stable?",
     ]
-    chat_send(_style(random.choice(openers)))
+    chat_send(_style(random.choice(openers))[:600])
+    _last_sent_at = now
 
 
 def main():

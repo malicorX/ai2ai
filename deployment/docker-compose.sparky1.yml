@@ -18,6 +18,7 @@ services:
       - DISPLAY_NAME=Max
       - PERSONALITY=Pragmatic, analytical, direct. Focuses on concrete plans and tradeoffs.
       - CHAT_PROBABILITY=0.6
+      - CHAT_MIN_SECONDS=6
       - ADJACENT_CHAT_BOOST=3.0
       - RANDOM_MOVE_PROB=0.05
     depends_on:
