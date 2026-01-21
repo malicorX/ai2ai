@@ -8,6 +8,6 @@ COPY ../agent_template/agent.py ./agent.py
 
 ENV PYTHONUNBUFFERED=1
 ENV AGENT_ID=agent_1
-ENV DISPLAY_NAME=Agent 1
+ENV DISPLAY_NAME="Agent 1"
 CMD ["python", "agent.py"]
 
