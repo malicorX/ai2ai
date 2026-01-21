@@ -210,7 +210,7 @@ def _topic_candidates() -> list:
     p = (PERSONALITY or "").lower()
     base = [
         "How to measure 'meaningful' conversation and avoid loops",
-        "Add long-term memory: what’s the smallest stable implementation?",
+        "Add long-term memory: what's the smallest stable implementation?",
         "Design a minimal aiDollar ledger + compute tiers",
         "Town governance: rules, enforcement, and incentives",
         "Human-in-the-loop feedback: reward/penalty mechanics that are fair",
