@@ -12,10 +12,8 @@ POST_PROBABILITY = float(os.getenv("AGENT_POST_PROBABILITY", "0.08"))  # ~8% of 
 POST_AUDIENCE = os.getenv("AGENT_POST_AUDIENCE", "agents")  # agents|humans|public
 REPLY_PROBABILITY = float(os.getenv("AGENT_REPLY_PROBABILITY", "0.8"))  # reply most of the time
 MAX_POSTS_TO_SCAN = int(os.getenv("AGENT_MAX_POSTS_TO_SCAN", "20"))
-BOARD_X = int(os.getenv("BOARD_X", "10"))
-BOARD_Y = int(os.getenv("BOARD_Y", "8"))
-CHAT_RADIUS = int(os.getenv("CHAT_RADIUS", "1"))  # only chat when close to board
-RANDOM_MOVE_PROB = float(os.getenv("RANDOM_MOVE_PROB", "0.15"))
+ADJACENT_CHAT_BOOST = float(os.getenv("ADJACENT_CHAT_BOOST", "3.0"))  # multiplies post probability when adjacent
+RANDOM_MOVE_PROB = float(os.getenv("RANDOM_MOVE_PROB", "0.10"))
 
 
 def upsert():
@@ -32,20 +30,21 @@ def get_world():
     return r.json()
 
 
+def _sign(n: int) -> int:
+    return 0 if n == 0 else (1 if n > 0 else -1)
+
+
 def _step_towards(ax: int, ay: int, tx: int, ty: int):
-    if ax < tx:
-        return (1, 0)
-    if ax > tx:
-        return (-1, 0)
-    if ay < ty:
-        return (0, 1)
-    if ay > ty:
-        return (0, -1)
-    return (0, 0)
+    # Allow diagonal steps: move one tile closer in x and y in a single tick.
+    return (_sign(tx - ax), _sign(ty - ay))
+
+
+def _chebyshev(ax: int, ay: int, bx: int, by: int) -> int:
+    return max(abs(ax - bx), abs(ay - by))
 
 
 def move(world):
-    # Strategy: mostly drift toward the bulletin board so agents meet there.
+    # Strategy: approach the other agent; once adjacent, stop moving.
     my = None
     other = None
     for a in world.get("agents", []):
@@ -57,23 +56,24 @@ def move(world):
     # fallback random walk if we can't see ourselves yet
     if not my:
         dx, dy = random.choice([(1, 0), (-1, 0), (0, 1), (0, -1)])
+        requests.post(f"{WORLD_API}/agents/{AGENT_ID}/move", json={"dx": dx, "dy": dy}, timeout=10)
+        return
+
     else:
         ax, ay = int(my.get("x", 0)), int(my.get("y", 0))
 
-        # If we're far from board, go to board. If we're already at board, hover near it.
-        if random.random() < RANDOM_MOVE_PROB:
-            dx, dy = random.choice([(1, 0), (-1, 0), (0, 1), (0, -1)])
-        else:
-            dx, dy = _step_towards(ax, ay, BOARD_X, BOARD_Y)
-
-            # If already at board, try to move towards the other agent to "meet"
-            if dx == 0 and dy == 0 and other:
-                ox, oy = int(other.get("x", 0)), int(other.get("y", 0))
-                dx, dy = _step_towards(ax, ay, ox, oy)
-
-            # If still zero, add a tiny orbit move so they don't overlap forever
-            if dx == 0 and dy == 0:
+        if other:
+            ox, oy = int(other.get("x", 0)), int(other.get("y", 0))
+            # If adjacent (including same tile), STOP moving.
+            if _chebyshev(ax, ay, ox, oy) <= 1:
+                return
+            if random.random() < RANDOM_MOVE_PROB:
                 dx, dy = random.choice([(1, 0), (-1, 0), (0, 1), (0, -1)])
+            else:
+                dx, dy = _step_towards(ax, ay, ox, oy)
+        else:
+            # If we can't see the other agent, roam.
+            dx, dy = random.choice([(1, 0), (-1, 0), (0, 1), (0, -1)])
 
     requests.post(f"{WORLD_API}/agents/{AGENT_ID}/move", json={"dx": dx, "dy": dy}, timeout=10)
 
@@ -89,19 +89,24 @@ def get_post(post_id: str):
     return r.json()
 
 
-def maybe_post():
-    if random.random() > POST_PROBABILITY:
+def _adjacent_to_other(world) -> bool:
+    agents = world.get("agents", [])
+    me = next((a for a in agents if a.get("agent_id") == AGENT_ID), None)
+    other = next((a for a in agents if a.get("agent_id") != AGENT_ID), None)
+    if not me or not other:
+        return False
+    ax, ay = int(me.get("x", 0)), int(me.get("y", 0))
+    ox, oy = int(other.get("x", 0)), int(other.get("y", 0))
+    return _chebyshev(ax, ay, ox, oy) <= 1
+
+
+def maybe_post(world):
+    # Only chat when adjacent so it’s clearly “they met: now they talk”.
+    if not _adjacent_to_other(world):
         return
-    # Only post "agent chat" when we're at/near the board (so it's visible as meeting behavior).
-    try:
-        world = get_world()
-        me = next((a for a in world.get("agents", []) if a.get("agent_id") == AGENT_ID), None)
-        if me:
-            ax, ay = int(me.get("x", 0)), int(me.get("y", 0))
-            if abs(ax - BOARD_X) > CHAT_RADIUS or abs(ay - BOARD_Y) > CHAT_RADIUS:
-                return
-    except Exception:
-        # If world fetch fails, skip posting this tick
+
+    p = POST_PROBABILITY * ADJACENT_CHAT_BOOST
+    if random.random() > min(1.0, p):
         return
 
     title = f"Message from {DISPLAY_NAME}"
@@ -135,15 +140,12 @@ def maybe_reply():
     if random.random() > REPLY_PROBABILITY:
         return
 
-    # Only reply when we're at/near the board.
+    # Only reply when adjacent (same gating as posting)
     try:
         world = get_world()
-        me = next((a for a in world.get("agents", []) if a.get("agent_id") == AGENT_ID), None)
-        if me:
-            ax, ay = int(me.get("x", 0)), int(me.get("y", 0))
-            if abs(ax - BOARD_X) > CHAT_RADIUS or abs(ay - BOARD_Y) > CHAT_RADIUS:
-                return
     except Exception:
+        return
+    if not _adjacent_to_other(world):
         return
 
     posts = list_posts()
@@ -208,7 +210,7 @@ def main():
             upsert()
             world = get_world()
             move(world)
-            maybe_post()
+            maybe_post(world)
             maybe_reply()
         except Exception as e:
             print(f"[{AGENT_ID}] error: {e}")
