@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>AI Village (v1) — Viewer</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+    .row { display: flex; gap: 16px; }
+    canvas { background: white; border: 1px solid #ccc; }
+    #log {
+      width: 420px;
+      height: 640px;
+      background: white;
+      border: 1px solid #ccc;
+      overflow-y: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12px;
+      padding: 10px;
+    }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eee; }
+    .ok { background: #d4edda; }
+    .bad { background: #f8d7da; }
+  </style>
+</head>
+<body>
+  <h2>AI Village (v1) — World Viewer</h2>
+  <div>
+    <span>WebSocket:</span>
+    <span id="wsStatus" class="pill bad">disconnected</span>
+  </div>
+  <p style="max-width: 980px;">
+    This is Milestone 1: a live map viewer that subscribes to <code>/ws/world</code> and renders agents.
+    It expects the backend to run on the same host/port as this page, or you can change <code>BACKEND_WS</code> below.
+  </p>
+
+  <div class="row">
+    <canvas id="world" width="640" height="640"></canvas>
+    <div id="log"></div>
+  </div>
+
+  <script>
+    // If you host this HTML somewhere else, set this to "ws://sparky1:8000/ws/world"
+    const BACKEND_WS = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/world";
+
+    const canvas = document.getElementById("world");
+    const ctx = canvas.getContext("2d");
+    const logBox = document.getElementById("log");
+    const wsStatus = document.getElementById("wsStatus");
+
+    const tile = 20;
+    const worldPx = 32 * tile;
+
+    function log(msg) {
+      const line = document.createElement("div");
+      line.textContent = msg;
+      logBox.appendChild(line);
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function drawGrid() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.strokeStyle = "#eee";
+      for (let x = 0; x <= worldPx; x += tile) {
+        for (let y = 0; y <= worldPx; y += tile) {
+          ctx.strokeRect(x, y, tile, tile);
+        }
+      }
+    }
+
+    function drawLandmarks(landmarks) {
+      for (const lm of (landmarks || [])) {
+        ctx.fillStyle = "#222";
+        ctx.fillRect(lm.x * tile, lm.y * tile, tile, tile);
+        ctx.fillStyle = "#fff";
+        ctx.font = "10px Arial";
+        ctx.fillText(lm.id.slice(0, 3), lm.x * tile + 2, lm.y * tile + 12);
+      }
+    }
+
+    function drawAgents(agents) {
+      const colors = ["#d32f2f", "#1976d2", "#388e3c", "#f57c00", "#7b1fa2", "#00838f"];
+      let i = 0;
+      for (const a of (agents || [])) {
+        ctx.fillStyle = colors[i++ % colors.length];
+        ctx.fillRect(a.x * tile, a.y * tile, tile, tile);
+        ctx.fillStyle = "#000";
+        ctx.font = "10px Arial";
+        ctx.fillText(a.display_name || a.agent_id, a.x * tile + 2, a.y * tile - 2);
+      }
+    }
+
+    drawGrid();
+
+    function connect() {
+      log("[ws] connecting to " + BACKEND_WS);
+      const ws = new WebSocket(BACKEND_WS);
+
+      ws.onopen = () => {
+        wsStatus.textContent = "connected";
+        wsStatus.className = "pill ok";
+        log("[ws] connected");
+        // keepalive ping every 10s
+        setInterval(() => {
+          try { ws.send("ping"); } catch (e) {}
+        }, 10000);
+      };
+
+      ws.onclose = () => {
+        wsStatus.textContent = "disconnected";
+        wsStatus.className = "pill bad";
+        log("[ws] closed; reconnecting in 1s...");
+        setTimeout(connect, 1000);
+      };
+
+      ws.onerror = (e) => {
+        log("[ws] error: " + (e && e.message ? e.message : "unknown"));
+      };
+
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "world_state") {
+            const data = msg.data;
+            drawGrid();
+            drawLandmarks(data.landmarks);
+            drawAgents(data.agents);
+            log("[world] tick=" + data.tick + " agents=" + (data.agents || []).length);
+          }
+        } catch (e) {
+          // ignore
+        }
+      };
+    }
+
+    connect();
+  </script>
+</body>
+</html>
+
