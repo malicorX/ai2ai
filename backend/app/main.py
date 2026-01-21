@@ -136,6 +136,17 @@ class ChatSendRequest(BaseModel):
 _chat: List[ChatMessage] = []
 _chat_max = 200
 
+_topic: str = "getting started"
+_topic_set_at: float = 0.0
+_topic_history: List[dict] = []
+
+
+class TopicSetRequest(BaseModel):
+    topic: str
+    by_agent_id: str
+    by_agent_name: str
+    reason: str = ""
+
 
 class WSManager:
     def __init__(self) -> None:
@@ -219,6 +230,35 @@ def chat_recent(limit: int = 50):
     limit = max(1, min(limit, 200))
     msgs = _chat[-limit:]
     return {"messages": [asdict(m) for m in msgs]}
+
+
+@app.get("/chat/topic")
+def chat_topic():
+    return {"topic": _topic, "set_at": _topic_set_at, "history": _topic_history[-20:]}
+
+
+@app.post("/chat/topic/set")
+async def chat_topic_set(req: TopicSetRequest):
+    global _tick, _topic, _topic_set_at
+    _tick += 1
+    now = time.time()
+    t = req.topic.strip()
+    if not t:
+        return {"error": "invalid_topic"}
+    _topic = t[:140]
+    _topic_set_at = now
+    _topic_history.append(
+        {
+            "topic": _topic,
+            "by_agent_id": req.by_agent_id,
+            "by_agent_name": req.by_agent_name,
+            "reason": (req.reason or "").strip()[:400],
+            "created_at": now,
+        }
+    )
+    # Notify UI + agents
+    await ws_manager.broadcast({"type": "topic", "data": {"topic": _topic, "set_at": _topic_set_at}})
+    return {"ok": True, "topic": _topic, "set_at": _topic_set_at}
 
 
 @app.post("/chat/send")

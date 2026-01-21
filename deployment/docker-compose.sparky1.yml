@@ -16,11 +16,13 @@ services:
       - WORLD_API_BASE=http://backend:8000
       - AGENT_TICK_SECONDS=2
       - DISPLAY_NAME=Max
-      - PERSONALITY=Pragmatic, analytical, direct. Focuses on concrete plans and tradeoffs.
+      - PERSONA_FILE=/app/personalities/max.txt
       - CHAT_PROBABILITY=0.6
       - CHAT_MIN_SECONDS=6
       - ADJACENT_CHAT_BOOST=3.0
       - RANDOM_MOVE_PROB=0.05
+    volumes:
+      - ../agents/personalities:/app/personalities:ro
     depends_on:
       - backend
     restart: unless-stopped

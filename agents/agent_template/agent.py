@@ -7,10 +7,8 @@ import requests
 WORLD_API = os.getenv("WORLD_API_BASE", "http://localhost:8000").rstrip("/")
 AGENT_ID = os.getenv("AGENT_ID", "agent_1")
 DISPLAY_NAME = os.getenv("DISPLAY_NAME", AGENT_ID)
-PERSONALITY = os.getenv(
-    "PERSONALITY",
-    "Concise, pragmatic, and focused on concrete next steps.",
-)
+PERSONA_FILE = os.getenv("PERSONA_FILE", "").strip()
+PERSONALITY = os.getenv("PERSONALITY", "").strip()  # optional fallback
 SLEEP_SECONDS = float(os.getenv("AGENT_TICK_SECONDS", "3"))
 # Chat behavior (agents talk to each other via /chat, NOT the bulletin board)
 CHAT_PROBABILITY = float(os.getenv("CHAT_PROBABILITY", "0.6"))
@@ -18,10 +16,12 @@ CHAT_MIN_SECONDS = float(os.getenv("CHAT_MIN_SECONDS", "6"))
 MAX_CHAT_TO_SCAN = int(os.getenv("MAX_CHAT_TO_SCAN", "50"))
 ADJACENT_CHAT_BOOST = float(os.getenv("ADJACENT_CHAT_BOOST", "3.0"))  # multiplies post probability when adjacent
 RANDOM_MOVE_PROB = float(os.getenv("RANDOM_MOVE_PROB", "0.10"))
+TOPIC_MIN_SECONDS = float(os.getenv("TOPIC_MIN_SECONDS", "120"))
 
 _last_replied_to_msg_id = None
 _last_seen_other_msg_id = None
 _last_sent_at = 0.0
+_last_topic_set_at = 0.0
 
 
 def upsert():
@@ -116,7 +116,7 @@ def chat_send(text: str):
 
 
 def _style(text: str) -> str:
-    p = PERSONALITY.lower()
+    p = (PERSONALITY or "").lower()
     if "sarcast" in p:
         return text + " (sure.)"
     if "formal" in p:
@@ -124,6 +124,24 @@ def _style(text: str) -> str:
     if "curious" in p:
         return text + " What do you think?"
     return text
+
+
+def _load_persona() -> str:
+    global PERSONALITY
+    if PERSONALITY:
+        return PERSONALITY
+    if not PERSONA_FILE:
+        PERSONALITY = "Concise, pragmatic, and focused on concrete next steps."
+        return PERSONALITY
+    try:
+        with open(PERSONA_FILE, "r", encoding="utf-8") as f:
+            PERSONALITY = f.read().strip()
+            if not PERSONALITY:
+                PERSONALITY = "Concise, pragmatic, and focused on concrete next steps."
+            return PERSONALITY
+    except Exception:
+        PERSONALITY = "Concise, pragmatic, and focused on concrete next steps."
+        return PERSONALITY
 
 
 def _is_my_turn(msgs) -> bool:
@@ -139,34 +157,103 @@ def _generate_reply(other_text: str) -> str:
     t = other_text.lower()
 
     if "memory" in t:
-        if "pragmatic" in PERSONALITY.lower() or "analytical" in PERSONALITY.lower():
+        if "pragmatic" in (PERSONALITY or "").lower() or "analytical" in (PERSONALITY or "").lower():
             return "Memory next. Start with short-term (last 20 events) + episodic summaries per milestone. Reason: it prevents loops and makes behavior stable."
         return "Memory next. Give each agent a short-term buffer plus a few 'important moments' they can recall. Reason: it makes their choices feel continuous."
 
     if "aidollar" in t or "ai dollar" in t:
-        if "pragmatic" in PERSONALITY.lower() or "analytical" in PERSONALITY.lower():
+        if "pragmatic" in (PERSONALITY or "").lower() or "analytical" in (PERSONALITY or "").lower():
             return "aiDollar next, but keep it simple: append-only ledger + 3 compute tiers. Reason: incentives become measurable without complex economics."
         return "aiDollar next, but tie it to human feedback first. Reason: it reinforces helpful behavior before optimizing raw compute."
 
     if "rule" in t:
-        if "pragmatic" in PERSONALITY.lower() or "analytical" in PERSONALITY.lower():
+        if "pragmatic" in (PERSONALITY or "").lower() or "analytical" in (PERSONALITY or "").lower():
             return "Town rule: every action must have a short written intention. Reason: it improves auditability and reduces random thrashing."
         return "Town rule: agents must ask one clarifying question before starting a task. Reason: it makes them feel collaborative instead of impulsive."
 
     if "interesting" in t or "experiment" in t:
-        if "pragmatic" in PERSONALITY.lower() or "analytical" in PERSONALITY.lower():
+        if "pragmatic" in (PERSONALITY or "").lower() or "analytical" in (PERSONALITY or "").lower():
             return "Experiment: give each agent a different objective and track outcomes + human votes. Reason: you get measurable behavior differences quickly."
         return "Experiment: let agents 'adopt' a topic and build shared culture via chat. Reason: you’ll see personality divergence and social dynamics."
 
     if "next step" in t or "smallest" in t:
-        if "pragmatic" in PERSONALITY.lower() or "analytical" in PERSONALITY.lower():
+        if "pragmatic" in (PERSONALITY or "").lower() or "analytical" in (PERSONALITY or "").lower():
             return "Smallest next step: add anti-spam + turn-taking + a simple topic memory. Then plug in LLM. Reason: prevents degenerate loops like this one."
         return "Smallest next step: add turn-taking and a shared topic so they respond meaningfully. Reason: it stops echoing and creates continuity."
 
     # Default: ask a targeted question so the convo progresses.
-    if "curious" in PERSONALITY.lower():
+    if "curious" in (PERSONALITY or "").lower():
         return "Can you choose between (1) memory, (2) aiDollar, (3) zones — and say why?"
     return "Pick one next milestone (memory / aiDollar / zones) and give one reason."
+
+
+def chat_topic_get():
+    r = requests.get(f"{WORLD_API}/chat/topic", timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+
+def chat_topic_set(topic: str, reason: str = ""):
+    requests.post(
+        f"{WORLD_API}/chat/topic/set",
+        json={
+            "topic": topic,
+            "by_agent_id": AGENT_ID,
+            "by_agent_name": DISPLAY_NAME,
+            "reason": reason,
+        },
+        timeout=10,
+    )
+
+
+def _topic_candidates() -> list:
+    p = (PERSONALITY or "").lower()
+    base = [
+        "How to measure 'meaningful' conversation and avoid loops",
+        "Add long-term memory: what’s the smallest stable implementation?",
+        "Design a minimal aiDollar ledger + compute tiers",
+        "Town governance: rules, enforcement, and incentives",
+        "Human-in-the-loop feedback: reward/penalty mechanics that are fair",
+        "Interesting world dynamics: jobs, quests, and scarcity",
+        "Safety: tool auditing and permission boundaries for root-in-container agents",
+    ]
+    if "environment" in p or "sustain" in p:
+        base.insert(0, "Ecology in the sim: how should resources renew or collapse?")
+    if "profit" in p or "bank" in p or "investment" in p:
+        base.insert(0, "Market design: pricing compute and preventing runaway spending")
+    if "librarian" in p or "curious" in p:
+        base.insert(0, "Narrative continuity: what makes the village feel alive to a human?")
+    return base
+
+
+def maybe_set_topic(world) -> str:
+    """Rotate topic occasionally when adjacent and it is our turn."""
+    global _last_topic_set_at
+    if not _adjacent_to_other(world):
+        return ""
+    now = time.time()
+    if now - _last_topic_set_at < TOPIC_MIN_SECONDS:
+        return ""
+
+    msgs = chat_recent()
+    if not _is_my_turn(msgs):
+        return ""
+
+    current = ""
+    try:
+        t = chat_topic_get()
+        current = (t.get("topic") or "").strip()
+        set_at = float(t.get("set_at") or 0.0)
+        if current and now - set_at < TOPIC_MIN_SECONDS:
+            return current
+    except Exception:
+        pass
+
+    candidates = _topic_candidates()
+    pick = random.choice([c for c in candidates if c.lower() != current.lower()] or candidates)
+    chat_topic_set(pick, reason="rotate topic to keep conversation meaningful and avoid loops")
+    _last_topic_set_at = now
+    return pick
 
 
 def maybe_chat(world):
@@ -175,6 +262,12 @@ def maybe_chat(world):
     # Only talk when adjacent; once adjacent we stop moving and keep chatting.
     if not _adjacent_to_other(world):
         return
+
+    topic = ""
+    try:
+        topic = maybe_set_topic(world)
+    except Exception:
+        topic = ""
 
     now = time.time()
     if now - _last_sent_at < CHAT_MIN_SECONDS:
@@ -199,7 +292,8 @@ def maybe_chat(world):
     if last_other and last_other.get("msg_id") != _last_seen_other_msg_id:
         other_name = last_other.get("sender_name", "Other")
         other_text = (last_other.get("text") or "").strip()
-        reply = _style(f"{other_name}: { _generate_reply(other_text) }")
+        tprefix = f"[topic: {topic}] " if topic else ""
+        reply = _style(f"{tprefix}{other_name}: {_generate_reply(other_text)}")
         chat_send(reply[:600])
         _last_seen_other_msg_id = last_other.get("msg_id")
         _last_replied_to_msg_id = last_other.get("msg_id")
@@ -212,12 +306,16 @@ def maybe_chat(world):
         "Propose one simple town rule that would change agent behavior.",
         "What experiment should we run first once chat is stable?",
     ]
-    chat_send(_style(random.choice(openers))[:600])
+    tprefix = f"[topic: {topic}] " if topic else ""
+    chat_send((_style(tprefix + random.choice(openers)))[:600])
     _last_sent_at = now
 
 
 def main():
-    print(f"[{AGENT_ID}] starting; WORLD_API={WORLD_API}")
+    _load_persona()
+    print(f"[{AGENT_ID}] starting; WORLD_API={WORLD_API} DISPLAY_NAME={DISPLAY_NAME}")
+    if PERSONA_FILE:
+        print(f"[{AGENT_ID}] persona_file={PERSONA_FILE}")
     while True:
         try:
             upsert()

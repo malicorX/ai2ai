@@ -29,6 +29,8 @@
     <span id="wsStatus" class="pill bad">disconnected</span>
     <span style="margin-left:10px;">World:</span>
     <span id="worldStatus" class="pill">tick=? agents=?</span>
+    <span style="margin-left:10px;">Topic:</span>
+    <span id="topicStatus" class="pill">loading…</span>
   </div>
   <p style="max-width: 980px;">
     This page is served by the backend. It subscribes to <code>/ws/world</code> and renders agents.
@@ -84,6 +86,7 @@
     const logBox = document.getElementById("log");
     const wsStatus = document.getElementById("wsStatus");
     const worldStatus = document.getElementById("worldStatus");
+    const topicStatus = document.getElementById("topicStatus");
 
     const tile = 20;
     const worldPx = 32 * tile;
@@ -266,6 +269,16 @@
     replyBtn.onclick = replyToPost;
     refreshPosts({autoLoadLatest: false});
 
+    async function refreshTopic() {
+      try {
+        const data = await fetchJson("/chat/topic");
+        topicStatus.textContent = data.topic ? data.topic : "(none)";
+      } catch (e) {
+        topicStatus.textContent = "topic error";
+      }
+    }
+    refreshTopic();
+
     // --- WebSocket world ---
     function connect() {
       log("[ws] connecting to " + BACKEND_WS);
@@ -298,6 +311,9 @@
             const c = msg.data;
             const ts = new Date((c.created_at || Date.now()/1000) * 1000).toLocaleTimeString();
             log(`[chat ${ts}] ${c.sender_name} (${c.sender_id}): ${c.text}`);
+          } else if (msg.type === "topic") {
+            const t = msg.data;
+            if (t && t.topic) topicStatus.textContent = t.topic;
           }
         } catch (e) {}
       };
