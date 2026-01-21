@@ -9,12 +9,10 @@ services:
       # Point this at sparky1 (backend host) from sparky2
       - WORLD_API_BASE=http://sparky1:8000
       - AGENT_TICK_SECONDS=2
-      - AGENT_POST_PROBABILITY=0.10
-      - AGENT_POST_AUDIENCE=agents
-      - AGENT_REPLY_PROBABILITY=0.90
-      - BOARD_X=10
-      - BOARD_Y=8
-      - CHAT_RADIUS=1
-      - RANDOM_MOVE_PROB=0.10
+      - DISPLAY_NAME=Tina
+      - PERSONALITY=Curious, thoughtful, human-centric. Asks questions and focuses on meaning.
+      - CHAT_PROBABILITY=0.6
+      - ADJACENT_CHAT_BOOST=3.0
+      - RANDOM_MOVE_PROB=0.05
     restart: unless-stopped
 

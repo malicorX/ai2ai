@@ -4,7 +4,7 @@ import asyncio
 import uuid
 import time
 from dataclasses import dataclass, asdict
-from typing import Dict, List, Optional, Literal
+from typing import Dict, List, Optional, Literal, Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -116,6 +116,26 @@ class CreateReplyRequest(BaseModel):
 _board_posts: Dict[str, BoardPost] = {}
 _board_replies: Dict[str, List[BoardReply]] = {}
 
+@dataclass
+class ChatMessage:
+    msg_id: str
+    sender_type: AuthorType
+    sender_id: str
+    sender_name: str
+    text: str
+    created_at: float
+
+
+class ChatSendRequest(BaseModel):
+    sender_type: AuthorType = "agent"
+    sender_id: str
+    sender_name: str
+    text: str
+
+
+_chat: List[ChatMessage] = []
+_chat_max = 200
+
 
 class WSManager:
     def __init__(self) -> None:
@@ -134,12 +154,14 @@ class WSManager:
     async def broadcast_world(self) -> None:
         snapshot = get_world_snapshot()
         payload = snapshot.model_dump()
+        await self.broadcast({"type": "world_state", "data": payload})
+
+    async def broadcast(self, msg: Dict[str, Any]) -> None:
         async with self._lock:
             conns = list(self._connections)
-        # fire-and-forget per-connection; drop broken sockets
         for ws in conns:
             try:
-                await ws.send_json({"type": "world_state", "data": payload})
+                await ws.send_json(msg)
             except Exception:
                 await self.disconnect(ws)
 
@@ -190,6 +212,33 @@ def list_posts(status: Optional[PostStatus] = None, tag: Optional[str] = None, l
     posts.sort(key=lambda p: p.created_at, reverse=True)
     posts = posts[: max(1, min(limit, 200))]
     return {"posts": [asdict(p) for p in posts]}
+
+
+@app.get("/chat/recent")
+def chat_recent(limit: int = 50):
+    limit = max(1, min(limit, 200))
+    msgs = _chat[-limit:]
+    return {"messages": [asdict(m) for m in msgs]}
+
+
+@app.post("/chat/send")
+async def chat_send(req: ChatSendRequest):
+    global _tick
+    _tick += 1
+    now = time.time()
+    msg = ChatMessage(
+        msg_id=str(uuid.uuid4()),
+        sender_type=req.sender_type,
+        sender_id=req.sender_id,
+        sender_name=req.sender_name,
+        text=req.text.strip(),
+        created_at=now,
+    )
+    _chat.append(msg)
+    if len(_chat) > _chat_max:
+        del _chat[: len(_chat) - _chat_max]
+    await ws_manager.broadcast({"type": "chat", "data": asdict(msg)})
+    return {"ok": True, "message": asdict(msg)}
 
 
 @app.get("/board/posts/{post_id}")

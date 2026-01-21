@@ -259,20 +259,12 @@
       }
     }
 
-    refreshPostsBtn.onclick = refreshPosts;
+    // Agents no longer write to the bulletin board; this is for humans/admin only.
+    refreshPostsBtn.onclick = () => refreshPosts({autoLoadLatest: false});
     createPostBtn.onclick = createPost;
     loadPostBtn.onclick = loadPost;
     replyBtn.onclick = replyToPost;
-    // Auto-refresh board so agent↔agent conversation is visible without clicking.
-    refreshPosts({autoLoadLatest: true});
-    setInterval(async () => {
-      const hadSelection = !!postsSelect.value;
-      await refreshPosts({autoLoadLatest: !hadSelection});
-      // If a post is loaded, refresh its replies periodically.
-      if (lastLoadedPostId) {
-        await loadPost();
-      }
-    }, 3000);
+    refreshPosts({autoLoadLatest: false});
 
     // --- WebSocket world ---
     function connect() {
@@ -302,6 +294,10 @@
             drawLandmarks(data.landmarks);
             drawAgents(data.agents);
             worldStatus.textContent = "tick=" + data.tick + " agents=" + (data.agents || []).length;
+          } else if (msg.type === "chat") {
+            const c = msg.data;
+            const ts = new Date((c.created_at || Date.now()/1000) * 1000).toLocaleTimeString();
+            log(`[chat ${ts}] ${c.sender_name} (${c.sender_id}): ${c.text}`);
           }
         } catch (e) {}
       };
