@@ -3,7 +3,8 @@ version: "3.9"
 services:
   agent_2:
     build:
-      context: ../agents/agent_2
+      context: ../agents
+      dockerfile: agent_2/Dockerfile
     environment:
       # Point this at sparky1 (backend host) from sparky2
       - WORLD_API_BASE=http://sparky1:8000

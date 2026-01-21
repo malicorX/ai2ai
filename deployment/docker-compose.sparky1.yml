@@ -10,7 +10,8 @@ services:
 
   agent_1:
     build:
-      context: ../agents/agent_1
+      context: ../agents
+      dockerfile: agent_1/Dockerfile
     environment:
       - WORLD_API_BASE=http://backend:8000
       - AGENT_TICK_SECONDS=2
