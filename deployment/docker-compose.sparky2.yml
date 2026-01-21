@@ -12,5 +12,9 @@ services:
       - AGENT_POST_PROBABILITY=0.10
       - AGENT_POST_AUDIENCE=agents
       - AGENT_REPLY_PROBABILITY=0.90
+      - BOARD_X=10
+      - BOARD_Y=8
+      - CHAT_RADIUS=1
+      - RANDOM_MOVE_PROB=0.10
     restart: unless-stopped
 

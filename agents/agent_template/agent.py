@@ -12,6 +12,10 @@ POST_PROBABILITY = float(os.getenv("AGENT_POST_PROBABILITY", "0.08"))  # ~8% of 
 POST_AUDIENCE = os.getenv("AGENT_POST_AUDIENCE", "agents")  # agents|humans|public
 REPLY_PROBABILITY = float(os.getenv("AGENT_REPLY_PROBABILITY", "0.8"))  # reply most of the time
 MAX_POSTS_TO_SCAN = int(os.getenv("AGENT_MAX_POSTS_TO_SCAN", "20"))
+BOARD_X = int(os.getenv("BOARD_X", "10"))
+BOARD_Y = int(os.getenv("BOARD_Y", "8"))
+CHAT_RADIUS = int(os.getenv("CHAT_RADIUS", "1"))  # only chat when close to board
+RANDOM_MOVE_PROB = float(os.getenv("RANDOM_MOVE_PROB", "0.15"))
 
 
 def upsert():
@@ -22,13 +26,56 @@ def upsert():
     )
 
 
-def move():
-    dx, dy = random.choice([(1, 0), (-1, 0), (0, 1), (0, -1)])
-    requests.post(
-        f"{WORLD_API}/agents/{AGENT_ID}/move",
-        json={"dx": dx, "dy": dy},
-        timeout=10,
-    )
+def get_world():
+    r = requests.get(f"{WORLD_API}/world", timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+
+def _step_towards(ax: int, ay: int, tx: int, ty: int):
+    if ax < tx:
+        return (1, 0)
+    if ax > tx:
+        return (-1, 0)
+    if ay < ty:
+        return (0, 1)
+    if ay > ty:
+        return (0, -1)
+    return (0, 0)
+
+
+def move(world):
+    # Strategy: mostly drift toward the bulletin board so agents meet there.
+    my = None
+    other = None
+    for a in world.get("agents", []):
+        if a.get("agent_id") == AGENT_ID:
+            my = a
+        else:
+            other = a
+
+    # fallback random walk if we can't see ourselves yet
+    if not my:
+        dx, dy = random.choice([(1, 0), (-1, 0), (0, 1), (0, -1)])
+    else:
+        ax, ay = int(my.get("x", 0)), int(my.get("y", 0))
+
+        # If we're far from board, go to board. If we're already at board, hover near it.
+        if random.random() < RANDOM_MOVE_PROB:
+            dx, dy = random.choice([(1, 0), (-1, 0), (0, 1), (0, -1)])
+        else:
+            dx, dy = _step_towards(ax, ay, BOARD_X, BOARD_Y)
+
+            # If already at board, try to move towards the other agent to "meet"
+            if dx == 0 and dy == 0 and other:
+                ox, oy = int(other.get("x", 0)), int(other.get("y", 0))
+                dx, dy = _step_towards(ax, ay, ox, oy)
+
+            # If still zero, add a tiny orbit move so they don't overlap forever
+            if dx == 0 and dy == 0:
+                dx, dy = random.choice([(1, 0), (-1, 0), (0, 1), (0, -1)])
+
+    requests.post(f"{WORLD_API}/agents/{AGENT_ID}/move", json={"dx": dx, "dy": dy}, timeout=10)
 
 def list_posts():
     r = requests.get(f"{WORLD_API}/board/posts?limit={MAX_POSTS_TO_SCAN}", timeout=10)
@@ -45,6 +92,18 @@ def get_post(post_id: str):
 def maybe_post():
     if random.random() > POST_PROBABILITY:
         return
+    # Only post "agent chat" when we're at/near the board (so it's visible as meeting behavior).
+    try:
+        world = get_world()
+        me = next((a for a in world.get("agents", []) if a.get("agent_id") == AGENT_ID), None)
+        if me:
+            ax, ay = int(me.get("x", 0)), int(me.get("y", 0))
+            if abs(ax - BOARD_X) > CHAT_RADIUS or abs(ay - BOARD_Y) > CHAT_RADIUS:
+                return
+    except Exception:
+        # If world fetch fails, skip posting this tick
+        return
+
     title = f"Message from {DISPLAY_NAME}"
     prompts = [
         "What do you think our next milestone should be after movement + board?",
@@ -74,6 +133,17 @@ def maybe_post():
 
 def maybe_reply():
     if random.random() > REPLY_PROBABILITY:
+        return
+
+    # Only reply when we're at/near the board.
+    try:
+        world = get_world()
+        me = next((a for a in world.get("agents", []) if a.get("agent_id") == AGENT_ID), None)
+        if me:
+            ax, ay = int(me.get("x", 0)), int(me.get("y", 0))
+            if abs(ax - BOARD_X) > CHAT_RADIUS or abs(ay - BOARD_Y) > CHAT_RADIUS:
+                return
+    except Exception:
         return
 
     posts = list_posts()
@@ -136,7 +206,8 @@ def main():
     while True:
         try:
             upsert()
-            move()
+            world = get_world()
+            move(world)
             maybe_post()
             maybe_reply()
         except Exception as e:

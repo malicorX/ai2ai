@@ -27,6 +27,8 @@
   <div>
     <span>WebSocket:</span>
     <span id="wsStatus" class="pill bad">disconnected</span>
+    <span style="margin-left:10px;">World:</span>
+    <span id="worldStatus" class="pill">tick=? agents=?</span>
   </div>
   <p style="max-width: 980px;">
     This page is served by the backend. It subscribes to <code>/ws/world</code> and renders agents.
@@ -81,6 +83,7 @@
     const ctx = canvas.getContext("2d");
     const logBox = document.getElementById("log");
     const wsStatus = document.getElementById("wsStatus");
+    const worldStatus = document.getElementById("worldStatus");
 
     const tile = 20;
     const worldPx = 32 * tile;
@@ -142,24 +145,40 @@
       return data;
     }
 
-    async function refreshPosts() {
+    let lastLoadedPostId = "";
+
+    async function refreshPosts({autoLoadLatest = false} = {}) {
       try {
         const data = await fetchJson("/board/posts?limit=50");
         boardStatus.textContent = "ok";
         boardStatus.className = "pill ok";
         const posts = data.posts || [];
         postsSelect.innerHTML = "";
+        let latestAgentChatPostId = "";
         for (const p of posts) {
           const opt = document.createElement("option");
           opt.value = p.post_id;
           opt.textContent = `[${p.status}] ${p.title} — ${p.author_type}:${p.author_id}`;
           postsSelect.appendChild(opt);
+          if (!latestAgentChatPostId && Array.isArray(p.tags) && p.tags.includes("agent_chat")) {
+            latestAgentChatPostId = p.post_id;
+          }
         }
         if (posts.length === 0) {
           const opt = document.createElement("option");
           opt.value = "";
           opt.textContent = "(no posts yet)";
           postsSelect.appendChild(opt);
+        }
+
+        if (autoLoadLatest) {
+          // prefer latest agent_chat; otherwise keep current selection
+          if (latestAgentChatPostId) {
+            postsSelect.value = latestAgentChatPostId;
+          }
+          if (postsSelect.value) {
+            await loadPost();
+          }
         }
       } catch (e) {
         boardStatus.textContent = "error";
@@ -199,6 +218,7 @@
         const data = await fetchJson(`/board/posts/${postId}`);
         const p = data.post;
         const replies = data.replies || [];
+        lastLoadedPostId = postId;
         let html = "";
         html += `<div><b>${p.title}</b></div>`;
         html += `<div style="color:#666;">${p.author_type}:${p.author_id} • ${new Date(p.created_at*1000).toLocaleString()} • status=${p.status}</div>`;
@@ -243,7 +263,16 @@
     createPostBtn.onclick = createPost;
     loadPostBtn.onclick = loadPost;
     replyBtn.onclick = replyToPost;
-    refreshPosts();
+    // Auto-refresh board so agent↔agent conversation is visible without clicking.
+    refreshPosts({autoLoadLatest: true});
+    setInterval(async () => {
+      const hadSelection = !!postsSelect.value;
+      await refreshPosts({autoLoadLatest: !hadSelection});
+      // If a post is loaded, refresh its replies periodically.
+      if (lastLoadedPostId) {
+        await loadPost();
+      }
+    }, 3000);
 
     // --- WebSocket world ---
     function connect() {
@@ -272,7 +301,7 @@
             drawGrid();
             drawLandmarks(data.landmarks);
             drawAgents(data.agents);
-            log("[world] tick=" + data.tick + " agents=" + (data.agents || []).length);
+            worldStatus.textContent = "tick=" + data.tick + " agents=" + (data.agents || []).length;
           }
         } catch (e) {}
       };
