@@ -17,5 +17,6 @@ services:
       - RANDOM_MOVE_PROB=0.05
     volumes:
       - ../agents/personalities:/app/personalities:ro
+      - ../agents/workspaces/agent_2:/app/workspace
     restart: unless-stopped
 

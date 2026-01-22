@@ -9,6 +9,7 @@ AGENT_ID = os.getenv("AGENT_ID", "agent_1")
 DISPLAY_NAME = os.getenv("DISPLAY_NAME", AGENT_ID)
 PERSONA_FILE = os.getenv("PERSONA_FILE", "").strip()
 PERSONALITY = os.getenv("PERSONALITY", "").strip()  # optional fallback
+WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "/app/workspace").strip()
 SLEEP_SECONDS = float(os.getenv("AGENT_TICK_SECONDS", "3"))
 # Chat behavior (agents talk to each other via /chat, NOT the bulletin board)
 CHAT_PROBABILITY = float(os.getenv("CHAT_PROBABILITY", "0.6"))
@@ -17,11 +18,16 @@ MAX_CHAT_TO_SCAN = int(os.getenv("MAX_CHAT_TO_SCAN", "50"))
 ADJACENT_CHAT_BOOST = float(os.getenv("ADJACENT_CHAT_BOOST", "3.0"))  # multiplies post probability when adjacent
 RANDOM_MOVE_PROB = float(os.getenv("RANDOM_MOVE_PROB", "0.10"))
 TOPIC_MIN_SECONDS = float(os.getenv("TOPIC_MIN_SECONDS", "120"))
+MEMORY_EVERY_SECONDS = float(os.getenv("MEMORY_EVERY_SECONDS", "30"))
+BALANCE_EVERY_SECONDS = float(os.getenv("BALANCE_EVERY_SECONDS", "15"))
 
 _last_replied_to_msg_id = None
 _last_seen_other_msg_id = None
 _last_sent_at = 0.0
 _last_topic_set_at = 0.0
+_last_memory_at = 0.0
+_last_balance_at = 0.0
+_cached_balance = None
 
 
 def upsert():
@@ -144,6 +150,54 @@ def _load_persona() -> str:
         return PERSONALITY
 
 
+def _read_file(path: str, max_bytes: int = 20000) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read(max_bytes)
+    except Exception:
+        return ""
+
+
+def _append_file(path: str, text: str) -> None:
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(text)
+            if not text.endswith("\n"):
+                f.write("\n")
+    except Exception:
+        return
+
+
+def economy_balance() -> float:
+    r = requests.get(f"{WORLD_API}/economy/balance/{AGENT_ID}", timeout=10)
+    r.raise_for_status()
+    return float(r.json().get("balance") or 0.0)
+
+
+def economy_transfer(to_id: str, amount: float, memo: str = "") -> None:
+    requests.post(
+        f"{WORLD_API}/economy/transfer",
+        json={"from_id": AGENT_ID, "to_id": to_id, "amount": float(amount), "memo": memo},
+        timeout=10,
+    )
+
+
+def memory_append(kind: str, text: str, tags=None) -> None:
+    tags = tags or []
+    requests.post(
+        f"{WORLD_API}/memory/{AGENT_ID}/append",
+        json={"kind": kind, "text": text, "tags": tags},
+        timeout=10,
+    )
+
+
+def memory_recent(limit: int = 10):
+    r = requests.get(f"{WORLD_API}/memory/{AGENT_ID}/recent?limit={limit}", timeout=10)
+    r.raise_for_status()
+    return r.json().get("memories", [])
+
+
 def _is_my_turn(msgs) -> bool:
     # Turn-taking: only speak if the last chat message is NOT ours.
     if not msgs:
@@ -155,6 +209,13 @@ def _is_my_turn(msgs) -> bool:
 
 def _generate_reply(other_text: str) -> str:
     t = other_text.lower()
+    persona = (PERSONALITY or "").strip()
+
+    # Economy framing: agents should explicitly care about ai$.
+    if "aidollar" in t or "ai dollar" in t or "money" in t or "balance" in t:
+        if "pragmatic" in persona.lower() or "analytical" in persona.lower():
+            return "ai$ goal: grow balance ethically. Mechanism: earn via human-awarded jobs + trade. Next: implement jobs board -> award -> spend compute. What's our first earning path?"
+        return "ai$ goal: earn by being helpful. Mechanism: ask humans for tasks, then get rewarded. Should we define a 'job' format on the bulletin board?"
 
     if "memory" in t:
         if "pragmatic" in (PERSONALITY or "").lower() or "analytical" in (PERSONALITY or "").lower():
@@ -311,17 +372,71 @@ def maybe_chat(world):
     _last_sent_at = now
 
 
+def maybe_update_balance() -> None:
+    global _last_balance_at, _cached_balance
+    now = time.time()
+    if now - _last_balance_at < BALANCE_EVERY_SECONDS:
+        return
+    try:
+        _cached_balance = economy_balance()
+    except Exception:
+        pass
+    _last_balance_at = now
+
+
+def maybe_write_memory(world) -> None:
+    global _last_memory_at
+    now = time.time()
+    if now - _last_memory_at < MEMORY_EVERY_SECONDS:
+        return
+    if not _adjacent_to_other(world):
+        return
+
+    try:
+        t = chat_topic_get().get("topic", "")
+    except Exception:
+        t = ""
+
+    # store a small reflection + local workspace journal
+    snippet = ""
+    try:
+        recent = chat_recent(limit=6)
+        lines = []
+        for m in recent[-4:]:
+            lines.append(f"{m.get('sender_name')}: {str(m.get('text') or '').strip()[:160]}")
+        snippet = " | ".join(lines)[:600]
+    except Exception:
+        pass
+
+    bal = _cached_balance
+    text = f"Topic={t}. Balance={bal}. Recent={snippet}"
+    try:
+        memory_append("reflection", text, tags=["chat", "topic"])
+    except Exception:
+        pass
+
+    # local file memory (agent has file IO)
+    journal_path = os.path.join(WORKSPACE_DIR, "journal.txt")
+    _append_file(journal_path, f"{time.strftime('%Y-%m-%d %H:%M:%S')} {text}")
+    _last_memory_at = now
+
+
 def main():
     _load_persona()
-    print(f"[{AGENT_ID}] starting; WORLD_API={WORLD_API} DISPLAY_NAME={DISPLAY_NAME}")
+    print(f"[{AGENT_ID}] starting; WORLD_API={WORLD_API} DISPLAY_NAME={DISPLAY_NAME} WORKSPACE_DIR={WORKSPACE_DIR}")
     if PERSONA_FILE:
         print(f"[{AGENT_ID}] persona_file={PERSONA_FILE}")
+    if PERSONA_FILE:
+        # Persist persona into workspace snapshot for debugging/audit
+        _append_file(os.path.join(WORKSPACE_DIR, "persona_snapshot.txt"), _read_file(PERSONA_FILE, max_bytes=20000))
     while True:
         try:
             upsert()
             world = get_world()
             move(world)
+            maybe_update_balance()
             maybe_chat(world)
+            maybe_write_memory(world)
         except Exception as e:
             print(f"[{AGENT_ID}] error: {e}")
         time.sleep(SLEEP_SECONDS)

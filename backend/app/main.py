@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+from pathlib import Path
 import uuid
 import time
 from dataclasses import dataclass, asdict
@@ -14,6 +17,37 @@ from starlette.responses import RedirectResponse
 
 
 WORLD_SIZE = 32
+DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data")).resolve()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+ECONOMY_PATH = DATA_DIR / "economy_ledger.jsonl"
+MEMORY_DIR = DATA_DIR / "memory"
+MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+
+STARTING_AIDOLLARS = float(os.getenv("STARTING_AIDOLLARS", "100"))
+
+
+def _append_jsonl(path: Path, obj: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def _read_jsonl(path: Path, limit: Optional[int] = None) -> List[dict]:
+    if not path.exists():
+        return []
+    out: List[dict] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                continue
+    if limit is not None and limit > 0:
+        return out[-limit:]
+    return out
 
 
 @dataclass
@@ -139,6 +173,165 @@ _chat_max = 200
 _topic: str = "getting started"
 _topic_set_at: float = 0.0
 _topic_history: List[dict] = []
+
+# ---- aiDollar economy (minimal, persistent JSONL ledger) ----
+
+EconomyEntryType = Literal["genesis", "transfer", "award", "spend"]
+
+
+@dataclass
+class EconomyEntry:
+    entry_id: str
+    entry_type: EconomyEntryType
+    amount: float
+    from_id: str
+    to_id: str
+    memo: str
+    created_at: float
+
+
+class TransferRequest(BaseModel):
+    from_id: str
+    to_id: str
+    amount: float
+    memo: str = ""
+
+
+class AwardRequest(BaseModel):
+    to_id: str
+    amount: float
+    reason: str = ""
+    by: str = "system"
+
+
+_economy_ledger: List[EconomyEntry] = []
+_balances: Dict[str, float] = {}
+
+
+def _recompute_balances() -> None:
+    global _balances
+    b: Dict[str, float] = {}
+    for e in _economy_ledger:
+        if e.from_id:
+            b[e.from_id] = float(b.get(e.from_id, 0.0)) - float(e.amount)
+        if e.to_id:
+            b[e.to_id] = float(b.get(e.to_id, 0.0)) + float(e.amount)
+    _balances = b
+
+
+def _load_economy() -> None:
+    global _economy_ledger
+    rows = _read_jsonl(ECONOMY_PATH)
+    ledger: List[EconomyEntry] = []
+    for r in rows:
+        try:
+            ledger.append(
+                EconomyEntry(
+                    entry_id=str(r.get("entry_id") or r.get("id") or uuid.uuid4()),
+                    entry_type=r.get("entry_type") or "award",
+                    amount=float(r.get("amount") or 0.0),
+                    from_id=str(r.get("from_id") or ""),
+                    to_id=str(r.get("to_id") or ""),
+                    memo=str(r.get("memo") or ""),
+                    created_at=float(r.get("created_at") or time.time()),
+                )
+            )
+        except Exception:
+            continue
+    _economy_ledger = ledger
+    _recompute_balances()
+
+
+def ensure_account(agent_id: str) -> None:
+    # If agent has never appeared in balances, create a genesis entry once.
+    if agent_id in _balances:
+        return
+    now = time.time()
+    entry = EconomyEntry(
+        entry_id=str(uuid.uuid4()),
+        entry_type="genesis",
+        amount=float(STARTING_AIDOLLARS),
+        from_id="",
+        to_id=agent_id,
+        memo="starting balance",
+        created_at=now,
+    )
+    _economy_ledger.append(entry)
+    _append_jsonl(ECONOMY_PATH, asdict(entry))
+    _recompute_balances()
+
+
+_load_economy()
+
+# ---- long-term memory (minimal, persistent JSONL per agent) ----
+
+MemoryKind = Literal["note", "event", "reflection", "plan", "summary"]
+
+
+@dataclass
+class MemoryEntry:
+    memory_id: str
+    agent_id: str
+    kind: MemoryKind
+    text: str
+    tags: List[str]
+    created_at: float
+
+
+class MemoryAppendRequest(BaseModel):
+    kind: MemoryKind = "note"
+    text: str
+    tags: List[str] = Field(default_factory=list)
+
+
+def _memory_path(agent_id: str) -> Path:
+    safe = "".join([c for c in agent_id if c.isalnum() or c in ("-", "_")]) or "agent"
+    return MEMORY_DIR / f"{safe}.jsonl"
+
+
+@app.post("/memory/{agent_id}/append")
+async def memory_append(agent_id: str, req: MemoryAppendRequest):
+    global _tick
+    _tick += 1
+    now = time.time()
+    text = (req.text or "").strip()
+    if not text:
+        return {"error": "invalid_text"}
+    entry = MemoryEntry(
+        memory_id=str(uuid.uuid4()),
+        agent_id=agent_id,
+        kind=req.kind,
+        text=text[:4000],
+        tags=[t[:40] for t in (req.tags or [])][:20],
+        created_at=now,
+    )
+    _append_jsonl(_memory_path(agent_id), asdict(entry))
+    return {"ok": True, "memory": asdict(entry)}
+
+
+@app.get("/memory/{agent_id}/recent")
+def memory_recent(agent_id: str, limit: int = 20):
+    limit = max(1, min(limit, 200))
+    rows = _read_jsonl(_memory_path(agent_id), limit=limit)
+    return {"memories": rows}
+
+
+@app.get("/memory/{agent_id}/search")
+def memory_search(agent_id: str, q: str, limit: int = 20):
+    q = (q or "").strip().lower()
+    limit = max(1, min(limit, 200))
+    if not q:
+        return {"memories": []}
+    rows = _read_jsonl(_memory_path(agent_id))
+    hits = []
+    for r in rows:
+        try:
+            txt = str(r.get("text") or "").lower()
+            if q in txt:
+                hits.append(r)
+        except Exception:
+            continue
+    return {"memories": hits[-limit:]}
 
 
 class TopicSetRequest(BaseModel):
@@ -281,6 +474,85 @@ async def chat_send(req: ChatSendRequest):
     return {"ok": True, "message": asdict(msg)}
 
 
+@app.get("/economy/balances")
+def economy_balances():
+    # Ensure all known agents have accounts (so UI doesn't show missing)
+    for aid in list(_agents.keys()):
+        ensure_account(aid)
+    return {"balances": _balances, "starting": STARTING_AIDOLLARS}
+
+
+@app.get("/economy/balance/{agent_id}")
+def economy_balance(agent_id: str):
+    ensure_account(agent_id)
+    return {"agent_id": agent_id, "balance": float(_balances.get(agent_id, 0.0))}
+
+
+@app.get("/economy/ledger")
+def economy_ledger(agent_id: Optional[str] = None, limit: int = 100):
+    limit = max(1, min(limit, 500))
+    rows = _economy_ledger
+    if agent_id:
+        rows = [e for e in rows if e.from_id == agent_id or e.to_id == agent_id]
+    return {"entries": [asdict(e) for e in rows[-limit:]]}
+
+
+@app.post("/economy/transfer")
+async def economy_transfer(req: TransferRequest):
+    global _tick
+    _tick += 1
+    if req.from_id == req.to_id:
+        return {"error": "invalid_transfer"}
+    amount = float(req.amount)
+    if amount <= 0:
+        return {"error": "invalid_amount"}
+    ensure_account(req.from_id)
+    ensure_account(req.to_id)
+    if float(_balances.get(req.from_id, 0.0)) < amount:
+        return {"error": "insufficient_funds"}
+    now = time.time()
+    entry = EconomyEntry(
+        entry_id=str(uuid.uuid4()),
+        entry_type="transfer",
+        amount=amount,
+        from_id=req.from_id,
+        to_id=req.to_id,
+        memo=(req.memo or "").strip()[:400],
+        created_at=now,
+    )
+    _economy_ledger.append(entry)
+    _append_jsonl(ECONOMY_PATH, asdict(entry))
+    _recompute_balances()
+    await ws_manager.broadcast({"type": "balances", "data": {"balances": _balances}})
+    return {"ok": True, "entry": asdict(entry), "balances": _balances}
+
+
+@app.post("/economy/award")
+async def economy_award(req: AwardRequest):
+    """Admin/human/system awards ai$ to an agent. (No auth yet; Milestone 0.)"""
+    global _tick
+    _tick += 1
+    amount = float(req.amount)
+    if amount <= 0:
+        return {"error": "invalid_amount"}
+    ensure_account(req.to_id)
+    now = time.time()
+    entry = EconomyEntry(
+        entry_id=str(uuid.uuid4()),
+        entry_type="award",
+        amount=amount,
+        from_id=str(req.by or "system"),
+        to_id=req.to_id,
+        memo=(req.reason or "").strip()[:400],
+        created_at=now,
+    )
+    _economy_ledger.append(entry)
+    _append_jsonl(ECONOMY_PATH, asdict(entry))
+    _recompute_balances()
+    await ws_manager.broadcast({"type": "balances", "data": {"balances": _balances}})
+    return {"ok": True, "entry": asdict(entry), "balances": _balances}
+
+
 @app.get("/board/posts/{post_id}")
 def get_post(post_id: str):
     post = _board_posts.get(post_id)
@@ -352,6 +624,7 @@ async def upsert_agent(req: UpsertAgentRequest):
             y=0,
             last_seen_at=now,
         )
+        ensure_account(req.agent_id)
     else:
         a = _agents[req.agent_id]
         if req.display_name:

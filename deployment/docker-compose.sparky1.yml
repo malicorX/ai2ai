@@ -6,6 +6,11 @@ services:
       context: ../backend
     ports:
       - "8000:8000"
+    environment:
+      - DATA_DIR=/app/data
+      - STARTING_AIDOLLARS=100
+    volumes:
+      - ../backend_data:/app/data
     restart: unless-stopped
 
   agent_1:
@@ -23,6 +28,7 @@ services:
       - RANDOM_MOVE_PROB=0.05
     volumes:
       - ../agents/personalities:/app/personalities:ro
+      - ../agents/workspaces/agent_1:/app/workspace
     depends_on:
       - backend
     restart: unless-stopped

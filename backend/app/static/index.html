@@ -31,6 +31,8 @@
     <span id="worldStatus" class="pill">tick=? agents=?</span>
     <span style="margin-left:10px;">Topic:</span>
     <span id="topicStatus" class="pill">loading…</span>
+    <span style="margin-left:10px;">Balances:</span>
+    <span id="balancesStatus" class="pill">loading…</span>
   </div>
   <p style="max-width: 980px;">
     This page is served by the backend. It subscribes to <code>/ws/world</code> and renders agents.
@@ -87,6 +89,7 @@
     const wsStatus = document.getElementById("wsStatus");
     const worldStatus = document.getElementById("worldStatus");
     const topicStatus = document.getElementById("topicStatus");
+    const balancesStatus = document.getElementById("balancesStatus");
 
     const tile = 20;
     const worldPx = 32 * tile;
@@ -279,6 +282,19 @@
     }
     refreshTopic();
 
+    async function refreshBalances() {
+      try {
+        const data = await fetchJson("/economy/balances");
+        const b = data.balances || {};
+        const parts = Object.keys(b).sort().map(k => `${k}=${(b[k]||0).toFixed(1)} ai$`);
+        balancesStatus.textContent = parts.length ? parts.join(" | ") : "(none)";
+      } catch (e) {
+        balancesStatus.textContent = "balances error";
+      }
+    }
+    refreshBalances();
+    setInterval(refreshBalances, 5000);
+
     // --- WebSocket world ---
     function connect() {
       log("[ws] connecting to " + BACKEND_WS);
@@ -314,6 +330,12 @@
           } else if (msg.type === "topic") {
             const t = msg.data;
             if (t && t.topic) topicStatus.textContent = t.topic;
+          } else if (msg.type === "balances") {
+            try {
+              const b = (msg.data && msg.data.balances) ? msg.data.balances : {};
+              const parts = Object.keys(b).sort().map(k => `${k}=${(b[k]||0).toFixed(1)} ai$`);
+              balancesStatus.textContent = parts.length ? parts.join(" | ") : "(none)";
+            } catch (e) {}
           }
         } catch (e) {}
       };
