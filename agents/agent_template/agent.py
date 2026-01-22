@@ -25,7 +25,8 @@ HOME_LANDMARK_ID = os.getenv("HOME_LANDMARK_ID", f"home_{AGENT_ID}").strip()
 
 _last_day_planned = None
 _daily_plan = None
-_last_event_proposed_day = None
+_last_event_proposed_day = None  # legacy
+_last_event_proposed_at_total = None
 _last_day_llm_planned = None
 
 
@@ -81,15 +82,19 @@ def _default_plan_from_now(minute_of_day: int) -> DailyPlan:
     def m(off: int) -> int:
         return min(1439, now + off)
 
+    # Keep the agent active for longer than ~3h so it doesn't "sleep" for most of the day.
     return DailyPlan(
         items=[
             PlanItem(minute=m(0), place_id=HOME_LANDMARK_ID, activity="reset: orient myself"),
             PlanItem(minute=m(10), place_id="computer", activity="check messages/jobs; plan next steps"),
             PlanItem(minute=m(40), place_id="cafe", activity="snack + casual chat"),
             PlanItem(minute=m(80), place_id="market", activity="stroll + observe"),
-            PlanItem(minute=m(110), place_id="cafe", activity="social: gossip, invitations"),
-            PlanItem(minute=m(150), place_id="computer", activity="wrap up; reflect"),
-            PlanItem(minute=m(220), place_id=HOME_LANDMARK_ID, activity="rest"),
+            PlanItem(minute=m(120), place_id="cafe", activity="social: gossip, invitations"),
+            PlanItem(minute=m(180), place_id="computer", activity="work/checkpoints"),
+            PlanItem(minute=m(260), place_id="market", activity="walk + observe"),
+            PlanItem(minute=m(320), place_id="cafe", activity="social: events + chat"),
+            PlanItem(minute=m(420), place_id="computer", activity="wrap up; reflect"),
+            PlanItem(minute=m(520), place_id=HOME_LANDMARK_ID, activity="rest"),
         ]
     )
 
@@ -665,7 +670,7 @@ def maybe_social_events(world) -> None:
     During social blocks, sometimes create an event and invite the other agent.
     Also RSVP to invitations addressed to us.
     """
-    global _daily_plan, _last_event_proposed_day
+    global _daily_plan, _last_event_proposed_day, _last_event_proposed_at_total
     if not USE_LANGGRAPH:
         return
     day, minute_of_day = world_time(world)
@@ -685,12 +690,12 @@ def maybe_social_events(world) -> None:
     except Exception:
         evs = []
 
-    # Propose at most one new event per day per agent (reliable, non-spammy).
-    if _last_event_proposed_day == day:
+    # Propose at most one new event per ~6 hours per agent (sim time can be fast).
+    now_total = _total_minutes(day, minute_of_day)
+    if _last_event_proposed_at_total is not None and (now_total - int(_last_event_proposed_at_total)) < 360:
         return
 
-    # If we already have an upcoming event created by us soon (within next 24h), don't create another.
-    now_total = _total_minutes(day, minute_of_day)
+    # If we already have an upcoming event created by us soon (within next 6h), don't create another.
     try:
         for e in evs:
             if (e.get("created_by") != AGENT_ID) or ((e.get("status") or "") != "scheduled"):
@@ -698,8 +703,8 @@ def maybe_social_events(world) -> None:
             sd = int(e.get("start_day") or 0)
             sm = int(e.get("start_minute") or 0)
             st = _total_minutes(sd, sm)
-            if st >= now_total and st <= (now_total + 1440):
-                _last_event_proposed_day = day
+            if st >= now_total and st <= (now_total + 360):
+                _last_event_proposed_at_total = now_total
                 return
     except Exception:
         pass
@@ -740,6 +745,7 @@ def maybe_social_events(world) -> None:
             trace_event("action", "created event + invited", {"event_id": eid, "to": other_id, "title": title})
             memory_append_scored("event", f"Created event '{title}' at {loc} in {start_in} minutes; invited {other_id}.", tags=["event", "invite"], importance=0.7)
             _last_event_proposed_day = day
+            _last_event_proposed_at_total = now_total
     except Exception as e:
         trace_event("error", f"event proposal failed: {e}", {})
 
