@@ -457,7 +457,7 @@ def _generate_reply(other_text: str) -> str:
     if "memory" in t:
         if "pragmatic" in (PERSONALITY or "").lower() or "analytical" in (PERSONALITY or "").lower():
             return "We already have memory persistence; next is *using* it: retrieval triggers (on topic-change, on question, on job-claim) + daily summary. Concrete: store (kind,tags,text) and query by topic keyword."
-        return "We already have long-term memory storage; what’s missing is a habit: when the topic changes, recall 2 relevant memories and weave them into the reply. That’s how it feels continuous."
+        return "We already have long-term memory storage; what's missing is a habit: when the topic changes, recall 2 relevant memories and weave them into the reply. That's how it feels continuous."
 
     if "aidollar" in t or "ai dollar" in t:
         if "pragmatic" in (PERSONALITY or "").lower() or "analytical" in (PERSONALITY or "").lower():
@@ -491,7 +491,7 @@ def _topic_playbook(topic: str) -> dict:
         return {
             "angle": "Concrete safety plan: define tool categories + audit log + allowlist per agent, then add human review hooks for risky actions.",
             "questions": [
-                "Which tool should be Tier-0 safe first: filesystem, web, or shell—and what exactly should we log?",
+                "Which tool should be Tier-0 safe first: filesystem, web, or shell, and what exactly should we log?",
                 "What is the minimum audit event schema (who/when/what/args/result/exitcode)?",
                 "Should penalties be automatic on policy violations, or always human-reviewed?",
             ],
