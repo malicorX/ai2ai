@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Literal, Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -24,6 +24,9 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 ECONOMY_PATH = DATA_DIR / "economy_ledger.jsonl"
 JOBS_PATH = DATA_DIR / "jobs_events.jsonl"
 EVENTS_PATH = DATA_DIR / "events_events.jsonl"
+CHAT_PATH = DATA_DIR / "chat_messages.jsonl"
+TRACE_PATH = DATA_DIR / "trace_events.jsonl"
+AUDIT_PATH = DATA_DIR / "audit_log.jsonl"
 MEMORY_DIR = DATA_DIR / "memory"
 MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 MEMORY_EMBED_DIR = DATA_DIR / "memory_embeddings"
@@ -60,6 +63,73 @@ def _read_jsonl(path: Path, limit: Optional[int] = None) -> List[dict]:
     if limit is not None and limit > 0:
         return out[-limit:]
     return out
+
+
+def _safe_json_preview(body: bytes) -> Optional[dict]:
+    """Best-effort: parse a small JSON body for audit logs (returns dict only)."""
+    try:
+        s = body.decode("utf-8", errors="replace").strip()
+        if not s:
+            return None
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else {"_": obj}
+    except Exception:
+        return None
+
+
+@dataclass
+class AuditEntry:
+    audit_id: str
+    method: str
+    path: str
+    query: str
+    status_code: int
+    duration_ms: float
+    client: str
+    content_type: str
+    body_preview: str
+    body_json: Optional[dict]
+    created_at: float
+
+
+_audit: List[AuditEntry] = []
+_audit_max = 2000
+
+
+def _load_audit() -> None:
+    global _audit
+    rows = _read_jsonl(AUDIT_PATH, limit=_audit_max)
+    out: List[AuditEntry] = []
+    for r in rows:
+        try:
+            out.append(
+                AuditEntry(
+                    audit_id=str(r.get("audit_id") or uuid.uuid4()),
+                    method=str(r.get("method") or ""),
+                    path=str(r.get("path") or ""),
+                    query=str(r.get("query") or ""),
+                    status_code=int(r.get("status_code") or 0),
+                    duration_ms=float(r.get("duration_ms") or 0.0),
+                    client=str(r.get("client") or ""),
+                    content_type=str(r.get("content_type") or ""),
+                    body_preview=str(r.get("body_preview") or ""),
+                    body_json=(r.get("body_json") if isinstance(r.get("body_json"), dict) else None),
+                    created_at=float(r.get("created_at") or time.time()),
+                )
+            )
+        except Exception:
+            continue
+    _audit = out[-_audit_max:]
+
+
+def _append_audit(entry: AuditEntry) -> None:
+    _audit.append(entry)
+    if len(_audit) > _audit_max:
+        del _audit[: len(_audit) - _audit_max]
+    _append_jsonl(AUDIT_PATH, asdict(entry))
+
+
+_load_audit()
 
 
 @dataclass
@@ -102,6 +172,52 @@ app.add_middleware(
 )
 # Serve the viewer UI from the backend so you can open http://sparky1:8000/ui/
 app.mount("/ui", StaticFiles(directory="app/static", html=True), name="ui")
+
+
+@app.middleware("http")
+async def audit_middleware(request: Request, call_next):
+    """
+    Persist a lightweight, structured audit trail to JSONL for later analysis.
+    Notes:
+    - We cap body logging to avoid huge files / secrets leakage.
+    - We re-inject the request body so endpoints still work.
+    """
+    started = time.time()
+    body = b""
+    try:
+        body = await request.body()
+    except Exception:
+        body = b""
+
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    req2 = Request(request.scope, receive)
+    resp = await call_next(req2)
+    dur_ms = (time.time() - started) * 1000.0
+
+    try:
+        preview_bytes = body[:4096]
+        preview = preview_bytes.decode("utf-8", errors="replace")
+        ctype = (request.headers.get("content-type") or "")[:120]
+        parsed = _safe_json_preview(preview_bytes) if "application/json" in ctype.lower() else None
+        entry = AuditEntry(
+            audit_id=str(uuid.uuid4()),
+            method=str(request.method),
+            path=str(request.url.path),
+            query=str(request.url.query or ""),
+            status_code=int(getattr(resp, "status_code", 0) or 0),
+            duration_ms=float(dur_ms),
+            client=str(getattr(request.client, "host", "") or ""),
+            content_type=ctype,
+            body_preview=preview[:2000],
+            body_json=parsed,
+            created_at=time.time(),
+        )
+        _append_audit(entry)
+    except Exception:
+        pass
+    return resp
 
 
 @app.get("/")
@@ -188,6 +304,30 @@ class ChatSendRequest(BaseModel):
 
 _chat: List[ChatMessage] = []
 _chat_max = 200
+
+
+def _load_chat() -> None:
+    global _chat
+    rows = _read_jsonl(CHAT_PATH, limit=_chat_max)
+    out: List[ChatMessage] = []
+    for r in rows:
+        try:
+            out.append(
+                ChatMessage(
+                    msg_id=str(r.get("msg_id") or uuid.uuid4()),
+                    sender_type=r.get("sender_type") or "agent",
+                    sender_id=str(r.get("sender_id") or ""),
+                    sender_name=str(r.get("sender_name") or ""),
+                    text=str(r.get("text") or ""),
+                    created_at=float(r.get("created_at") or time.time()),
+                )
+            )
+        except Exception:
+            continue
+    _chat = out[-_chat_max:]
+
+
+_load_chat()
 
 _topic: str = "getting started"
 _topic_set_at: float = 0.0
@@ -1143,6 +1283,31 @@ _trace: List[TraceEvent] = []
 _trace_max = 600
 
 
+def _load_trace() -> None:
+    global _trace
+    rows = _read_jsonl(TRACE_PATH, limit=_trace_max)
+    out: List[TraceEvent] = []
+    for r in rows:
+        try:
+            out.append(
+                TraceEvent(
+                    event_id=str(r.get("event_id") or uuid.uuid4()),
+                    agent_id=str(r.get("agent_id") or ""),
+                    agent_name=str(r.get("agent_name") or ""),
+                    kind=r.get("kind") or "action",
+                    summary=str(r.get("summary") or ""),
+                    data=dict(r.get("data") or {}),
+                    created_at=float(r.get("created_at") or time.time()),
+                )
+            )
+        except Exception:
+            continue
+    _trace = out[-_trace_max:]
+
+
+_load_trace()
+
+
 def clamp(v: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, v))
 
@@ -1224,6 +1389,7 @@ async def trace_event(req: TraceEventRequest):
     _trace.append(ev)
     if len(_trace) > _trace_max:
         del _trace[: len(_trace) - _trace_max]
+    _append_jsonl(TRACE_PATH, asdict(ev))
     await ws_manager.broadcast({"type": "trace", "data": asdict(ev)})
     return {"ok": True, "event": asdict(ev)}
 
@@ -1279,8 +1445,15 @@ async def chat_send(req: ChatSendRequest):
     _chat.append(msg)
     if len(_chat) > _chat_max:
         del _chat[: len(_chat) - _chat_max]
+    _append_jsonl(CHAT_PATH, asdict(msg))
     await ws_manager.broadcast({"type": "chat", "data": asdict(msg)})
     return {"ok": True, "message": asdict(msg)}
+
+
+@app.get("/audit/recent")
+def audit_recent(limit: int = 100):
+    limit = max(1, min(limit, 500))
+    return {"events": [asdict(e) for e in _audit[-limit:]]}
 
 
 @app.get("/economy/balances")
