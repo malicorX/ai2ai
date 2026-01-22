@@ -5,6 +5,11 @@ import requests
 import re
 from difflib import SequenceMatcher
 
+USE_LANGGRAPH = os.getenv("USE_LANGGRAPH", "0").strip() == "1"
+if USE_LANGGRAPH:
+    # lightweight import; only used when enabled
+    from agent_template.langgraph_runtime import llm_chat
+
 
 WORLD_API = os.getenv("WORLD_API_BASE", "http://localhost:8000").rstrip("/")
 AGENT_ID = os.getenv("AGENT_ID", "agent_1")
@@ -708,7 +713,29 @@ def maybe_chat(world):
         other_name = last_other.get("sender_name", "Other")
         other_text = (last_other.get("text") or "").strip()
         tprefix = f"[topic: {topic}] " if topic else ""
-        reply = _style(f"{tprefix}{_compose_reply(other_name, other_text, topic)}")
+        if USE_LANGGRAPH:
+            # LLM-driven: keep it grounded in tools and current system state.
+            persona = (PERSONALITY or "").strip()
+            bal = _cached_balance
+            sys = (
+                "You are an autonomous agent in a 2D world. You are chatting with another agent.\n"
+                "Rules:\n"
+                "- Be concise and specific (3-8 sentences).\n"
+                "- Do NOT repeat yourself.\n"
+                "- If asked a question, answer it directly.\n"
+                "- Prefer proposing a concrete next action that can be turned into a Job.\n"
+                "- You care about earning ai$ ethically via Jobs; real money transfers are always human-approved.\n"
+            )
+            user = (
+                f"Persona:\n{persona}\n\n"
+                f"State:\n- agent_id={AGENT_ID}\n- display_name={DISPLAY_NAME}\n- balance={bal}\n- topic={topic}\n\n"
+                f"Other said:\n{other_name}: {other_text}\n\n"
+                "Reply as this agent:"
+            )
+            raw = llm_chat(sys, user, max_tokens=260)
+            reply = _style(f"{tprefix}{raw}")
+        else:
+            reply = _style(f"{tprefix}{_compose_reply(other_name, other_text, topic)}")
         if not _too_similar_to_recent(reply):
             chat_send(reply[:600])
             _remember_sent(reply)
