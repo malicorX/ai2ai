@@ -1454,12 +1454,12 @@ def main():
             maybe_reflect(world)
             # plan schedule at the computer once per simulated day
             maybe_plan_new_day(world)
-            # live in the world (schedule-following navigation/activity)
-            perform_scheduled_life_step(world)
-            # Events override other actions while in the attendance window
+            # Events take priority over the normal schedule while in the attendance window
             if maybe_attend_events(world):
                 time.sleep(SLEEP_SECONDS)
                 continue
+            # live in the world (schedule-following navigation/activity)
+            perform_scheduled_life_step(world)
             maybe_social_events(world)
             # Free movement is driven by the schedule; do not force-walk to computer every tick.
             maybe_update_balance()
