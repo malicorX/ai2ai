@@ -25,6 +25,7 @@ HOME_LANDMARK_ID = os.getenv("HOME_LANDMARK_ID", f"home_{AGENT_ID}").strip()
 
 _last_day_planned = None
 _daily_plan = None
+_last_event_proposed_day = None
 
 
 class PlanItem(BaseModel):
@@ -590,6 +591,7 @@ def maybe_social_events(world) -> None:
     During social blocks, sometimes create an event and invite the other agent.
     Also RSVP to invitations addressed to us.
     """
+    global _daily_plan, _last_event_proposed_day
     if not USE_LANGGRAPH:
         return
     day, minute_of_day = world_time(world)
@@ -625,12 +627,6 @@ def maybe_social_events(world) -> None:
         pass
 
     # Propose at most one new event per day per agent (reliable, non-spammy).
-    global _last_day_planned
-    global _daily_plan
-    global _last_event_proposed_day
-    if "_last_event_proposed_day" not in globals():
-        _last_event_proposed_day = None
-
     if _last_event_proposed_day == day:
         return
 
@@ -650,7 +646,7 @@ def maybe_social_events(world) -> None:
     )
     try:
         # If there's already an upcoming event created by us, don't create another today.
-        for e in evs if 'evs' in locals() else []:
+        for e in evs:
             if (e.get("created_by") == AGENT_ID) and (e.get("status") == "scheduled"):
                 _last_event_proposed_day = day
                 return
