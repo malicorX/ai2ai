@@ -17,6 +17,7 @@ DISPLAY_NAME = os.getenv("DISPLAY_NAME", AGENT_ID)
 PERSONA_FILE = os.getenv("PERSONA_FILE", "").strip()
 PERSONALITY = os.getenv("PERSONALITY", "").strip()  # optional fallback
 WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "/app/workspace").strip()
+COMPUTER_LANDMARK_ID = os.getenv("COMPUTER_LANDMARK_ID", "computer").strip()
 SLEEP_SECONDS = float(os.getenv("AGENT_TICK_SECONDS", "3"))
 # Chat behavior (agents talk to each other via /chat, NOT the bulletin board)
 CHAT_PROBABILITY = float(os.getenv("CHAT_PROBABILITY", "0.6"))
@@ -107,6 +108,54 @@ def move(world):
 
     requests.post(f"{WORLD_API}/agents/{AGENT_ID}/move", json={"dx": dx, "dy": dy}, timeout=10)
 
+
+def _get_landmark(world, lm_id: str):
+    for lm in world.get("landmarks", []):
+        if lm.get("id") == lm_id:
+            return lm
+    return None
+
+
+def _at_landmark(world, lm_id: str, radius: int = 0) -> bool:
+    lm = _get_landmark(world, lm_id)
+    if not lm:
+        return False
+    agents = world.get("agents", [])
+    me = next((a for a in agents if a.get("agent_id") == AGENT_ID), None)
+    if not me:
+        return False
+    ax, ay = int(me.get("x", 0)), int(me.get("y", 0))
+    lx, ly = int(lm.get("x", 0)), int(lm.get("y", 0))
+    return _chebyshev(ax, ay, lx, ly) <= radius
+
+
+def _move_towards(world, tx: int, ty: int) -> None:
+    agents = world.get("agents", [])
+    me = next((a for a in agents if a.get("agent_id") == AGENT_ID), None)
+    if not me:
+        dx, dy = random.choice([(1, 0), (-1, 0), (0, 1), (0, -1)])
+    else:
+        ax, ay = int(me.get("x", 0)), int(me.get("y", 0))
+        dx, dy = _step_towards(ax, ay, tx, ty)
+    requests.post(f"{WORLD_API}/agents/{AGENT_ID}/move", json={"dx": dx, "dy": dy}, timeout=10)
+
+
+def trace_event(kind: str, summary: str, data=None) -> None:
+    data = data or {}
+    try:
+        requests.post(
+            f"{WORLD_API}/trace/event",
+            json={
+                "agent_id": AGENT_ID,
+                "agent_name": DISPLAY_NAME,
+                "kind": kind,
+                "summary": summary,
+                "data": data,
+            },
+            timeout=5,
+        )
+    except Exception:
+        return
 def _adjacent_to_other(world) -> bool:
     agents = world.get("agents", [])
     me = next((a for a in agents if a.get("agent_id") == AGENT_ID), None)
@@ -346,6 +395,7 @@ def maybe_work_jobs() -> None:
     if not jobs_claim(job_id):
         _last_jobs_at = now
         return
+    trace_event("action", f"claimed job {job_id}", {"job_id": job_id, "title": job.get("title"), "reward": job.get("reward")})
 
     _active_job_id = job_id
     try:
@@ -353,6 +403,7 @@ def maybe_work_jobs() -> None:
         ok = jobs_submit(job_id, submission)
         if ok:
             memory_append("event", f"Submitted job {job_id}: {job.get('title')}", tags=["job"])
+            trace_event("action", f"submitted job {job_id}", {"job_id": job_id})
             chat_send(_style(f"I claimed a job to earn ai$: '{job.get('title')}'. Submitted deliverable for human review."))
     except Exception:
         pass
@@ -683,6 +734,14 @@ def maybe_chat(world):
     if not _adjacent_to_other(world):
         return
 
+    # Gate "computer work" (LLM/tool usage) behind the computer_access spot.
+    if not _at_landmark(world, COMPUTER_LANDMARK_ID, radius=0):
+        lm = _get_landmark(world, COMPUTER_LANDMARK_ID)
+        if lm:
+            trace_event("action", f"walking to {COMPUTER_LANDMARK_ID} before computer work", {"target": COMPUTER_LANDMARK_ID})
+            _move_towards(world, int(lm.get("x", 0)), int(lm.get("y", 0)))
+        return
+
     topic = ""
     try:
         topic = maybe_set_topic(world)
@@ -732,6 +791,7 @@ def maybe_chat(world):
                 f"Other said:\n{other_name}: {other_text}\n\n"
                 "Reply as this agent:"
             )
+            trace_event("thought", "LLM reply (summary)", {"topic": topic, "balance": bal, "other": other_name, "other_snippet": other_text[:120]})
             raw = llm_chat(sys, user, max_tokens=260)
             reply = _style(f"{tprefix}{raw}")
         else:
@@ -763,6 +823,7 @@ def maybe_chat(world):
             f"State:\n- agent_id={AGENT_ID}\n- display_name={DISPLAY_NAME}\n- balance={bal}\n- topic={topic}\n\n"
             "Write ONE opener message that moves the work forward."
         )
+        trace_event("thought", "LLM opener (summary)", {"topic": topic, "balance": bal})
         raw = llm_chat(sys, user, max_tokens=220)
         msg = (_style(tprefix + raw))[:600]
     else:
@@ -852,6 +913,17 @@ def main():
         try:
             upsert()
             world = get_world()
+            # Navigation test: default behavior is to walk to the computer access spot before doing tool-heavy work.
+            if not _at_landmark(world, COMPUTER_LANDMARK_ID, radius=0):
+                lm = _get_landmark(world, COMPUTER_LANDMARK_ID)
+                if lm:
+                    trace_event("status", f"seeking {COMPUTER_LANDMARK_ID}", {"target": COMPUTER_LANDMARK_ID})
+                    _move_towards(world, int(lm.get("x", 0)), int(lm.get("y", 0)))
+                else:
+                    move(world)
+                time.sleep(SLEEP_SECONDS)
+                continue
+
             move(world)
             maybe_update_balance()
             maybe_work_jobs()
@@ -860,6 +932,7 @@ def main():
             maybe_trade(world)
         except Exception as e:
             print(f"[{AGENT_ID}] error: {e}")
+            trace_event("error", f"loop error: {e}", {})
         time.sleep(SLEEP_SECONDS)
 
 

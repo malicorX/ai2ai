@@ -44,6 +44,11 @@
       <div id="log"></div>
 
       <div style="background:white; border:1px solid #ccc; padding:10px; border-radius:6px; width:420px;">
+        <h3 style="margin:0 0 8px 0;">Agent Trace (thoughts/actions)</h3>
+        <div id="traceLog" style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size:12px; max-height:220px; overflow-y:auto;"></div>
+      </div>
+
+      <div style="background:white; border:1px solid #ccc; padding:10px; border-radius:6px; width:420px;">
         <h3 style="margin:0 0 8px 0;">Bulletin Board</h3>
         <div style="display:flex; gap:8px; margin-bottom:8px;">
           <button id="refreshPostsBtn">Refresh</button>
@@ -101,6 +106,7 @@
     const canvas = document.getElementById("world");
     const ctx = canvas.getContext("2d");
     const logBox = document.getElementById("log");
+    const traceLog = document.getElementById("traceLog");
     const wsStatus = document.getElementById("wsStatus");
     const worldStatus = document.getElementById("worldStatus");
     const topicStatus = document.getElementById("topicStatus");
@@ -116,6 +122,13 @@
       logBox.scrollTop = logBox.scrollHeight;
     }
 
+    function trace(msg) {
+      const line = document.createElement("div");
+      line.textContent = msg;
+      traceLog.appendChild(line);
+      traceLog.scrollTop = traceLog.scrollHeight;
+    }
+
     function drawGrid() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.strokeStyle = "#eee";
@@ -128,7 +141,11 @@
 
     function drawLandmarks(landmarks) {
       for (const lm of (landmarks || [])) {
-        ctx.fillStyle = "#222";
+        if (lm.type === "computer_access") {
+          ctx.fillStyle = "#6a1b9a"; // purple
+        } else {
+          ctx.fillStyle = "#222";
+        }
         ctx.fillRect(lm.x * tile, lm.y * tile, tile, tile);
         ctx.fillStyle = "#fff";
         ctx.font = "10px Arial";
@@ -319,6 +336,21 @@
     refreshBalances();
     setInterval(refreshBalances, 5000);
 
+    async function refreshTrace() {
+      try {
+        const data = await fetchJson("/trace/recent?limit=50");
+        const events = data.events || [];
+        traceLog.innerHTML = "";
+        for (const e of events) {
+          const ts = new Date((e.created_at || Date.now()/1000) * 1000).toLocaleTimeString();
+          trace(`[${ts}] ${e.agent_name} ${e.kind}: ${e.summary}`);
+        }
+      } catch (e) {
+        trace("trace error: " + e.message);
+      }
+    }
+    refreshTrace();
+
     function renderJob(j) {
       const wrap = document.createElement("div");
       wrap.style.borderTop = "1px solid #eee";
@@ -487,6 +519,10 @@
             } catch (e) {}
           } else if (msg.type === "jobs") {
             refreshJobs();
+          } else if (msg.type === "trace") {
+            const e = msg.data;
+            const ts = new Date((e.created_at || Date.now()/1000) * 1000).toLocaleTimeString();
+            trace(`[${ts}] ${e.agent_name} ${e.kind}: ${e.summary}`);
           }
         } catch (e) {}
       };

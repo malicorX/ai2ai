@@ -103,6 +103,7 @@ _landmarks = [
     {"id": "board", "x": 10, "y": 8, "type": "bulletin_board"},
     {"id": "cafe", "x": 6, "y": 6, "type": "cafe"},
     {"id": "market", "x": 20, "y": 12, "type": "market"},
+    {"id": "computer", "x": 16, "y": 16, "type": "computer_access"},
 ]
 
 AuthorType = Literal["agent", "human", "system"]
@@ -652,6 +653,33 @@ class WSManager:
 
 ws_manager = WSManager()
 
+# ---- Trace stream (thought/action summaries; no raw chain-of-thought) ----
+
+TraceKind = Literal["thought", "action", "error", "status"]
+
+
+@dataclass
+class TraceEvent:
+    event_id: str
+    agent_id: str
+    agent_name: str
+    kind: TraceKind
+    summary: str
+    data: dict
+    created_at: float
+
+
+class TraceEventRequest(BaseModel):
+    agent_id: str
+    agent_name: str = ""
+    kind: TraceKind = "action"
+    summary: str
+    data: dict = Field(default_factory=dict)
+
+
+_trace: List[TraceEvent] = []
+_trace_max = 600
+
 
 def clamp(v: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, v))
@@ -703,6 +731,33 @@ def chat_recent(limit: int = 50):
     limit = max(1, min(limit, 200))
     msgs = _chat[-limit:]
     return {"messages": [asdict(m) for m in msgs]}
+
+
+@app.post("/trace/event")
+async def trace_event(req: TraceEventRequest):
+    global _tick
+    _tick += 1
+    now = time.time()
+    ev = TraceEvent(
+        event_id=str(uuid.uuid4()),
+        agent_id=req.agent_id,
+        agent_name=req.agent_name or req.agent_id,
+        kind=req.kind,
+        summary=(req.summary or "").strip()[:400],
+        data=req.data or {},
+        created_at=now,
+    )
+    _trace.append(ev)
+    if len(_trace) > _trace_max:
+        del _trace[: len(_trace) - _trace_max]
+    await ws_manager.broadcast({"type": "trace", "data": asdict(ev)})
+    return {"ok": True, "event": asdict(ev)}
+
+
+@app.get("/trace/recent")
+def trace_recent(limit: int = 50):
+    limit = max(1, min(limit, 300))
+    return {"events": [asdict(e) for e in _trace[-limit:]]}
 
 
 @app.get("/chat/topic")
