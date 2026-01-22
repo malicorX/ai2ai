@@ -709,7 +709,7 @@ def maybe_social_events(world) -> None:
         "Return STRICT JSON: {\"title\":..., \"description\":..., \"location_id\":..., \"start_in_min\":..., \"duration_min\":..., \"invite_message\":...}\n"
         "Constraints:\n"
         "- location_id must be one of: cafe, market\n"
-        "- start_in_min between 30 and 180\n"
+        "- start_in_min between 10 and 60\n"
         "- duration_min between 30 and 120\n"
     )
     user = (
@@ -729,7 +729,7 @@ def maybe_social_events(world) -> None:
         msg = str(obj.get("invite_message") or "Want to join?").strip()[:200]
         if loc not in ("cafe", "market"):
             loc = "cafe"
-        start_in = max(30, min(start_in, 180))
+        start_in = max(10, min(start_in, 60))
         dur = max(30, min(dur, 120))
         start_total = int(minute_of_day) + int(start_in)
         sd = int(day) + (start_total // 1440)
@@ -764,7 +764,10 @@ def maybe_attend_events(world) -> bool:
             if (e.get("status") or "") != "scheduled":
                 continue
             rsvps = e.get("rsvps") or {}
-            if rsvps.get(AGENT_ID) != "yes":
+            invites = e.get("invites") or []
+            invited = any(inv.get("to_agent_id") == AGENT_ID for inv in invites)
+            rsvp_yes = (rsvps.get(AGENT_ID) == "yes")
+            if not (rsvp_yes or invited):
                 continue
             sd = int(e.get("start_day") or 0)
             sm = int(e.get("start_minute") or 0)
@@ -772,8 +775,12 @@ def maybe_attend_events(world) -> bool:
             dur = max(1, int(e.get("duration_min") or 60))
             end = start + dur
 
-            # begin traveling 15 minutes before start
-            if now >= (start - 15) and now <= end:
+            # begin traveling 60 minutes before start (sim time can be fast)
+            if now >= (start - 60) and now <= end:
+                # If we were invited but haven't RSVP'd, RSVP now.
+                if invited and not rsvp_yes:
+                    event_rsvp(e.get("event_id"), "yes", note="On my way.")
+                    trace_event("action", "RSVP yes", {"event_id": e.get("event_id"), "title": e.get("title")})
                 attending = e
                 break
 
