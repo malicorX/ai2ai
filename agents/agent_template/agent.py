@@ -28,7 +28,7 @@ _daily_plan = None
 _last_event_proposed_day = None  # legacy
 _last_event_proposed_at_total = None
 _last_day_llm_planned = None
-_last_event_nav_log_at_total = {}  # event_id -> last total minute we logged travel/attend
+_event_nav_state = {}  # event_id -> {"last_ts": float, "phase": str}
 
 
 class PlanItem(BaseModel):
@@ -830,19 +830,27 @@ def maybe_attend_events(world) -> bool:
         title = str(attending.get("title") or "event")[:120]
 
         eid = str(attending.get("event_id") or "")
-        last_logged = int(_last_event_nav_log_at_total.get(eid, -10**9))
-        should_log = (now - last_logged) >= 10  # at most once per ~10 sim-minutes per event
+        dist = _chebyshev(ax, ay, tx, ty)
 
-        if _chebyshev(ax, ay, tx, ty) > 1:
-            if should_log:
-                _last_event_nav_log_at_total[eid] = now
-                trace_event("action", "traveling to event", {"event_id": eid, "title": title, "to": loc})
+        st = _event_nav_state.get(eid) or {}
+        last_ts = float(st.get("last_ts") or 0.0)
+        last_phase = str(st.get("phase") or "")
+        now_ts = time.time()
+
+        # Throttle: log only when phase changes (travel -> attend) or every ~20s while traveling.
+        def remember(phase: str):
+            _event_nav_state[eid] = {"last_ts": now_ts, "phase": phase}
+
+        if dist > 1:
+            if (last_phase != "travel") or ((now_ts - last_ts) >= 20.0):
+                remember("travel")
+                trace_event("action", "traveling to event", {"event_id": eid, "title": title, "to": loc, "dist": dist})
             _move_towards(world, tx, ty)
             return True
 
         # we're at the venue
-        if should_log:
-            _last_event_nav_log_at_total[eid] = now
+        if last_phase != "attend":
+            remember("attend")
             trace_event("status", "attending event", {"event_id": eid, "title": title, "where": loc})
         return True
     except Exception:
