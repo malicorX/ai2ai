@@ -419,7 +419,8 @@ def memory_retrieve(
             created_at = float(r.get("created_at") or 0.0)
             age = max(0.0, now - created_at)
             rec = 0.5 ** (age / hl)  # halflife decay
-            imp = float(r.get("importance") or 0.0)
+            # Backward compatible default for older memories that predate importance scoring.
+            imp = float(r["importance"]) if ("importance" in r and r["importance"] is not None) else 0.3
             # clamp
             if imp < 0:
                 imp = 0.0
