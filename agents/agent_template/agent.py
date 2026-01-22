@@ -179,13 +179,15 @@ def perform_scheduled_life_step(world) -> None:
     # --- Synchronized meetup window to ensure agents actually interact ---
     # Every MEETUP_PERIOD_MIN, there is a MEETUP_WINDOW_MIN social window where both agents prefer the same place.
     MEETUP_PLACE_ID = os.getenv("MEETUP_PLACE_ID", "cafe").strip() or "cafe"
-    MEETUP_PERIOD_MIN = int(os.getenv("MEETUP_PERIOD_MIN", "240"))  # every 4 hours
-    MEETUP_WINDOW_MIN = int(os.getenv("MEETUP_WINDOW_MIN", "45"))   # for 45 minutes
+    # Debug-friendly defaults (user can override via env): meet often and talk briefly.
+    MEETUP_PERIOD_MIN = int(os.getenv("MEETUP_PERIOD_MIN", "10"))  # every 10 minutes
+    MEETUP_WINDOW_MIN = int(os.getenv("MEETUP_WINDOW_MIN", "5"))   # for 5 minutes
+    MEETUP_DWELL_MIN = int(os.getenv("MEETUP_DWELL_MIN", str(MEETUP_WINDOW_MIN)))  # dwell at least the window
     meetup_mode = (MEETUP_PERIOD_MIN > 0) and ((minute_of_day % MEETUP_PERIOD_MIN) < MEETUP_WINDOW_MIN)
 
     # Goal parameters (prevents "thrashing" when sim time jumps)
     GOAL_MAX_MIN = int(os.getenv("GOAL_MAX_MIN", "180"))     # abandon if stuck too long (sim minutes)
-    GOAL_DWELL_MIN = int(os.getenv("GOAL_DWELL_MIN", "20"))  # stay a bit at destination before switching
+    GOAL_DWELL_MIN = int(os.getenv("GOAL_DWELL_MIN", "20"))  # stay a bit at destination before switching (non-meetup)
 
     # Pick/override goal.
     if meetup_mode and (not _active_goal or _active_goal.get("kind") != "meetup"):
@@ -251,7 +253,8 @@ def perform_scheduled_life_step(world) -> None:
             chat_send(_style(f"[life] {nugget}"))
 
     arrived_at = int(_active_goal.get("arrived_at_total") or now_total)
-    if GOAL_DWELL_MIN > 0 and (now_total - arrived_at) < GOAL_DWELL_MIN:
+    dwell_min = MEETUP_DWELL_MIN if (_active_goal.get("kind") == "meetup") else GOAL_DWELL_MIN
+    if dwell_min > 0 and (now_total - arrived_at) < dwell_min:
         return
 
     # Goal complete; pick next on next tick.
