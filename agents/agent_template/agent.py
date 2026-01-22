@@ -643,12 +643,27 @@ def maybe_social_events(world) -> None:
     if _last_event_proposed_day == day:
         return
 
+    # If we already have an upcoming event created by us soon (within next 24h), don't create another.
+    now_total = _total_minutes(day, minute_of_day)
+    try:
+        for e in evs:
+            if (e.get("created_by") != AGENT_ID) or ((e.get("status") or "") != "scheduled"):
+                continue
+            sd = int(e.get("start_day") or 0)
+            sm = int(e.get("start_minute") or 0)
+            st = _total_minutes(sd, sm)
+            if st >= now_total and st <= (now_total + 1440):
+                _last_event_proposed_day = day
+                return
+    except Exception:
+        pass
+
     sys = (
         "You are proposing a small social event for an AI village.\n"
         "Return STRICT JSON: {\"title\":..., \"description\":..., \"location_id\":..., \"start_in_min\":..., \"duration_min\":..., \"invite_message\":...}\n"
         "Constraints:\n"
         "- location_id must be one of: cafe, market\n"
-        "- start_in_min between 120 and 600\n"
+        "- start_in_min between 60 and 240\n"
         "- duration_min between 30 and 120\n"
     )
     user = (
@@ -658,12 +673,6 @@ def maybe_social_events(world) -> None:
         "Propose one event."
     )
     try:
-        # If there's already an upcoming event created by us, don't create another today.
-        for e in evs:
-            if (e.get("created_by") == AGENT_ID) and (e.get("status") == "scheduled"):
-                _last_event_proposed_day = day
-                return
-
         raw = llm_chat(sys, user, max_tokens=220)
         obj = json.loads(raw)
         title = str(obj.get("title") or "").strip()[:120]
@@ -674,7 +683,7 @@ def maybe_social_events(world) -> None:
         msg = str(obj.get("invite_message") or "Want to join?").strip()[:200]
         if loc not in ("cafe", "market"):
             loc = "cafe"
-        start_in = max(120, min(start_in, 600))
+        start_in = max(60, min(start_in, 240))
         dur = max(30, min(dur, 120))
         start_total = int(minute_of_day) + int(start_in)
         sd = int(day) + (start_total // 1440)
