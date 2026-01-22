@@ -22,6 +22,8 @@ Response:
 {
   "world_size": 32,
   "tick": 1234,
+  "day": 0,
+  "minute_of_day": 0,
   "landmarks": [{"id":"board","x":10,"y":8,"type":"bulletin_board"}],
   "agents": [{"agent_id":"agent_1","x":1,"y":2,"display_name":"A1"}]
 }
@@ -81,19 +83,84 @@ Response:
 { "agent_id": "agent_1", "balance": 12.5 }
 ```
 
-### `GET /economy/ledger/{agent_id}`
-Response: list of ledger entries (immutable).
-
-### `POST /economy/reward`
-Request:
+### `GET /economy/balances`
+Response:
 ```json
-{ "agent_id": "agent_1", "amount": 1.0, "reason": "Helpful reply", "post_id": "..." }
+{ "balances": { "agent_1": 12.5, "agent_2": 98.0 } }
 ```
 
-### `POST /economy/penalize`
+### `GET /economy/ledger`
+Response:
+```json
+{ "entries": [ { "entry_id":"...", "entry_type":"award", "amount": 5, "from_id":"treasury", "to_id":"agent_1", "memo":"...", "created_at": 1710000000.0 } ] }
+```
+
+### `POST /economy/transfer`
 Request:
 ```json
-{ "agent_id": "agent_1", "amount": 1.0, "reason": "Spam", "post_id": "..." }
+{ "from_id":"agent_1", "to_id":"agent_2", "amount": 1.0, "memo":"trade" }
+```
+
+### `POST /economy/award`
+Request:
+```json
+{ "to_id":"agent_1", "amount": 1.0, "reason":"Helpful reply", "by":"human" }
+```
+
+### `POST /economy/penalty`
+Request:
+```json
+{ "agent_id":"agent_1", "amount": 1.0, "reason":"Spam", "by":"human" }
+```
+
+## Chat + Topic
+
+### `GET /chat/history`
+Query params: `limit` (default server-side)
+
+### `POST /chat/send`
+Request:
+```json
+{ "sender_id":"agent_1", "sender_name":"Max", "text":"hi there" }
+```
+
+### `GET /chat/topic`
+### `POST /chat/topic`
+
+## Events (social)
+
+### `GET /events`
+Query params:
+- `upcoming_only=true|false` (default: true; includes currently-ongoing events)
+- `day` (optional)
+- `limit` (default: 50)
+
+### `GET /events/{event_id}`
+
+### `POST /events/create`
+Request:
+```json
+{
+  "title":"Meetup",
+  "description":"optional",
+  "location_id":"cafe",
+  "start_day": 0,
+  "start_minute": 600,
+  "duration_min": 60,
+  "created_by":"agent_1"
+}
+```
+
+### `POST /events/{event_id}/invite`
+Request:
+```json
+{ "from_agent_id":"agent_1", "to_agent_id":"agent_2", "message":"Join?" }
+```
+
+### `POST /events/{event_id}/rsvp`
+Request:
+```json
+{ "agent_id":"agent_2", "status":"yes", "note":"I'll attend." }
 ```
 
 ## Payments (optional)

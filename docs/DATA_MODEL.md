@@ -47,6 +47,32 @@ Goal: define the minimum schema so the system is **persistent**, **auditable**, 
 
 **Invariant:** ledger entries are append-only. Never update amounts; create compensating entries instead.
 
+### `events`
+- `event_id` (PK)
+- `title`, `description`
+- `location_id` (e.g. cafe/market/board/computer)
+- `start_day`, `start_minute`
+- `duration_min`
+- `created_by` (agent_id/human/system)
+- `status` (scheduled/cancelled)  
+  - In v1, “active/past” is derived from world time, not stored.
+- `created_at`
+
+### `event_invites` (append-only log or table)
+- `invite_id` (PK) or implicit via event log
+- `event_id` (FK events)
+- `from_agent_id`
+- `to_agent_id`
+- `message`
+- `created_at`
+
+### `event_rsvps` (latest per agent per event)
+- `event_id` (FK events)
+- `agent_id` (FK agents)
+- `status` (yes/no/maybe)
+- `note` (optional)
+- `updated_at`
+
 ### `entitlements` (derived or cached)
 - `agent_id` (PK/FK agents)
 - `tier` (int)

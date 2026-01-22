@@ -119,6 +119,10 @@
         <div style="display:flex; gap:8px; margin-bottom:8px;">
           <button id="eventsRefreshBtn">Refresh</button>
           <span id="eventsStatus" class="pill">?</span>
+          <label style="margin-left:auto; font-size:12px; color:#444; display:flex; align-items:center; gap:6px;">
+            <input id="eventsShowPast" type="checkbox" />
+            show past
+          </label>
         </div>
         <div style="display:flex; gap:8px; margin-bottom:6px;">
           <input id="eventTitle" type="text" placeholder="Event title" style="padding:6px; flex:1;" />
@@ -293,6 +297,7 @@
     const eventsList = document.getElementById("eventsList");
     const eventsStatus = document.getElementById("eventsStatus");
     const eventsRefreshBtn = document.getElementById("eventsRefreshBtn");
+    const eventsShowPast = document.getElementById("eventsShowPast");
     const eventTitle = document.getElementById("eventTitle");
     const eventLocation = document.getElementById("eventLocation");
     const eventDesc = document.getElementById("eventDesc");
@@ -592,14 +597,39 @@
       await refreshJobs();
     };
 
+    function totalMinutes(day, minute) {
+      return (day|0) * 1440 + (minute|0);
+    }
+
+    function computeEventPhase(e, world) {
+      if (!world || typeof world.day === "undefined" || typeof world.minute_of_day === "undefined") {
+        return (e.status || "scheduled");
+      }
+      const now = totalMinutes(world.day, world.minute_of_day);
+      const start = totalMinutes(e.start_day, e.start_minute);
+      const end = start + Math.max(1, (e.duration_min|0));
+      if (now < start) return "scheduled";
+      if (now <= end) return "active";
+      return "past";
+    }
+
     function renderEvent(e) {
       const wrap = document.createElement("div");
       wrap.style.borderTop = "1px solid #eee";
       wrap.style.padding = "8px 0";
       const when = (typeof e.start_day !== "undefined") ? `day=${e.start_day} ${String(Math.floor(e.start_minute/60)).padStart(2,'0')}:${String(e.start_minute%60).padStart(2,'0')}` : "";
+      const phase = computeEventPhase(e, latestWorld);
+      let countdown = "";
+      if (latestWorld && typeof latestWorld.day !== "undefined" && typeof latestWorld.minute_of_day !== "undefined") {
+        const now = totalMinutes(latestWorld.day, latestWorld.minute_of_day);
+        const start = totalMinutes(e.start_day, e.start_minute);
+        const delta = start - now;
+        if (phase === "scheduled") countdown = ` • starts in ${delta}m`;
+        if (phase === "active") countdown = ` • started ${Math.abs(delta)}m ago`;
+      }
       wrap.innerHTML =
-        `<div><b>[${e.status}]</b> ${e.title}</div>` +
-        `<div style="color:#666;">${when} @ ${e.location_id} • by ${e.created_by} • dur=${e.duration_min}m</div>` +
+        `<div><b>[${phase}]</b> ${e.title}</div>` +
+        `<div style="color:#666;">${when} @ ${e.location_id}${countdown} • by ${e.created_by} • dur=${e.duration_min}m</div>` +
         (e.description ? `<div>${e.description}</div>` : "");
       const inv = (e.invites || []).map(i => `${i.from_agent_id}->${i.to_agent_id}`).join(", ");
       if (inv) {
@@ -621,8 +651,9 @@
 
     async function refreshEvents() {
       try {
-        // Show all scheduled events (including ones that just happened) since sim time moves fast.
-        const data = await fetchJson("/events?upcoming_only=false&limit=50");
+        const showPast = !!(eventsShowPast && eventsShowPast.checked);
+        // upcoming_only=true includes events that are upcoming OR currently ongoing (backend logic).
+        const data = await fetchJson(`/events?upcoming_only=${showPast ? "false" : "true"}&limit=50`);
         const evs = data.events || [];
         eventsList.innerHTML = "";
         for (const e of evs) eventsList.appendChild(renderEvent(e));
@@ -634,6 +665,7 @@
       }
     }
     eventsRefreshBtn.onclick = refreshEvents;
+    if (eventsShowPast) eventsShowPast.onchange = refreshEvents;
     refreshEvents();
 
     eventCreateBtn.onclick = async () => {
