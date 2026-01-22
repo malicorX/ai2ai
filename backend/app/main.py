@@ -294,6 +294,7 @@ class MemoryEntry:
     kind: MemoryKind
     text: str
     tags: List[str]
+    importance: float
     created_at: float
 
 
@@ -301,6 +302,7 @@ class MemoryAppendRequest(BaseModel):
     kind: MemoryKind = "note"
     text: str
     tags: List[str] = Field(default_factory=list)
+    importance: Optional[float] = None
 
 
 def _memory_path(agent_id: str) -> Path:
@@ -322,6 +324,7 @@ async def memory_append(agent_id: str, req: MemoryAppendRequest):
         kind=req.kind,
         text=text[:4000],
         tags=[t[:40] for t in (req.tags or [])][:20],
+        importance=float(req.importance) if req.importance is not None else 0.3,
         created_at=now,
     )
     _append_jsonl(_memory_path(agent_id), asdict(entry))
@@ -351,6 +354,84 @@ def memory_search(agent_id: str, q: str, limit: int = 20):
         except Exception:
             continue
     return {"memories": hits[-limit:]}
+
+
+def _tok(s: str) -> set:
+    s = (s or "").lower()
+    out = []
+    cur = []
+    for ch in s:
+        if ch.isalnum():
+            cur.append(ch)
+        else:
+            if cur:
+                out.append("".join(cur))
+                cur = []
+    if cur:
+        out.append("".join(cur))
+    # filter tiny tokens
+    return {t for t in out if len(t) >= 3}
+
+
+def _jaccard(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    union = len(a | b)
+    return float(inter) / float(union) if union else 0.0
+
+
+@app.get("/memory/{agent_id}/retrieve")
+def memory_retrieve(
+    agent_id: str,
+    q: str,
+    k: int = 8,
+    recency_halflife_minutes: float = 180.0,
+    w_relevance: float = 0.55,
+    w_recency: float = 0.25,
+    w_importance: float = 0.20,
+):
+    """
+    Ranked memory retrieval inspired by Generative Agents:
+    score = w_rel*relevance + w_rec*recency + w_imp*importance
+
+    - relevance: token Jaccard similarity between query and memory text+tags
+    - recency: exponential decay with halflife
+    - importance: stored scalar (0..1 recommended)
+    """
+    q = (q or "").strip()
+    if not q:
+        return {"memories": []}
+
+    k = max(1, min(int(k), 50))
+    now = time.time()
+    qtok = _tok(q)
+    rows = _read_jsonl(_memory_path(agent_id))
+    scored = []
+    hl = max(1.0, float(recency_halflife_minutes)) * 60.0
+
+    for r in rows:
+        try:
+            text = str(r.get("text") or "")
+            tags = r.get("tags") or []
+            itok = _tok(text + " " + " ".join([str(t) for t in tags]))
+            rel = _jaccard(qtok, itok)
+            created_at = float(r.get("created_at") or 0.0)
+            age = max(0.0, now - created_at)
+            rec = 0.5 ** (age / hl)  # halflife decay
+            imp = float(r.get("importance") or 0.0)
+            # clamp
+            if imp < 0:
+                imp = 0.0
+            if imp > 1:
+                imp = 1.0
+            score = float(w_relevance) * rel + float(w_recency) * rec + float(w_importance) * imp
+            scored.append((score, {"score": score, "relevance": rel, "recency": rec, "importance": imp, **r}))
+        except Exception:
+            continue
+
+    scored.sort(key=lambda t: t[0], reverse=True)
+    return {"memories": [x[1] for x in scored[:k]]}
 
 # ---- Jobs Board (persistent event log) ----
 

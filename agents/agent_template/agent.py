@@ -143,7 +143,7 @@ def perform_scheduled_life_step(world) -> None:
         # create a tiny "gossip nugget" and store it
         nugget = f"At {it.place_id} ({minute_of_day//60:02d}:{minute_of_day%60:02d}) I was doing: {it.activity}."
         try:
-            memory_append("event", nugget, tags=["life", "gossip", it.place_id])
+            memory_append_scored("event", nugget, tags=["life", "gossip", it.place_id])
         except Exception:
             pass
         chat_send(_style(f"[life] {nugget}"))
@@ -397,6 +397,92 @@ def memory_recent(limit: int = 10):
     r = requests.get(f"{WORLD_API}/memory/{AGENT_ID}/recent?limit={limit}", timeout=10)
     r.raise_for_status()
     return r.json().get("memories", [])
+
+
+def memory_retrieve(q: str, k: int = 8):
+    r = requests.get(f"{WORLD_API}/memory/{AGENT_ID}/retrieve", params={"q": q, "k": k}, timeout=10)
+    r.raise_for_status()
+    return r.json().get("memories", [])
+
+
+def rate_importance(text: str) -> float:
+    """LLM-scored importance in [0,1]."""
+    if not USE_LANGGRAPH:
+        return 0.3
+    sys = "Rate the importance of the memory for future behavior. Return only a number between 0 and 1."
+    user = f"Memory:\n{text}\n\nScore 0..1:"
+    try:
+        raw = llm_chat(sys, user, max_tokens=8)
+        v = float(raw.strip().split()[0])
+        if v < 0:
+            v = 0.0
+        if v > 1:
+            v = 1.0
+        return v
+    except Exception:
+        return 0.3
+
+
+def memory_append_scored(kind: str, text: str, tags=None, importance: float | None = None) -> None:
+    tags = tags or []
+    if importance is None:
+        importance = rate_importance(text)
+    try:
+        requests.post(
+            f"{WORLD_API}/memory/{AGENT_ID}/append",
+            json={"kind": kind, "text": text, "tags": tags, "importance": float(importance)},
+            timeout=10,
+        )
+    except Exception:
+        return
+
+
+_last_reflect_minute = None
+
+
+def maybe_reflect(world) -> None:
+    """
+    Reflection loop: periodically synthesize recent memories into higher-level reflections.
+    """
+    global _last_reflect_minute
+    if not USE_LANGGRAPH:
+        return
+    day, minute_of_day = world_time(world)
+    # reflect every ~180 sim-min (3h), but only at computer to gate tool use
+    if minute_of_day % 180 != 0:
+        return
+    key = (day, minute_of_day)
+    if _last_reflect_minute == key:
+        return
+    if not _at_landmark(world, COMPUTER_LANDMARK_ID, radius=COMPUTER_ACCESS_RADIUS):
+        return
+
+    recent = memory_recent(limit=25)
+    if not recent:
+        _last_reflect_minute = key
+        return
+
+    # keep short prompt; we don't want chain-of-thought, only reflections.
+    sys = (
+        "You are producing reflections (high-level insights) from a stream of memories.\n"
+        "Return 3-6 bullet points, each a single sentence.\n"
+        "No extra commentary."
+    )
+    lines = []
+    for m in recent[-20:]:
+        lines.append(f"- ({m.get('kind')}) {str(m.get('text') or '')[:220]}")
+    user = "Memories:\n" + "\n".join(lines) + "\n\nReflections:"
+    trace_event("thought", "reflection: synthesizing memories", {"count": len(lines), "day": day, "minute": minute_of_day})
+    try:
+        out = llm_chat(sys, user, max_tokens=220)
+        bullets = [ln.strip("- ").strip() for ln in out.splitlines() if ln.strip()]
+        bullets = [b for b in bullets if len(b) >= 8][:6]
+        for b in bullets:
+            memory_append_scored("reflection", b, tags=["reflection"], importance=0.85)
+        trace_event("status", "reflection: wrote entries", {"n": len(bullets)})
+    except Exception as e:
+        trace_event("error", f"reflection failed: {e}", {})
+    _last_reflect_minute = key
 
 
 def jobs_list(status: str = "open", limit: int = 20):
@@ -905,6 +991,16 @@ def maybe_chat(world):
             # LLM-driven: keep it grounded in tools and current system state.
             persona = (PERSONALITY or "").strip()
             bal = _cached_balance
+        retrieved = []
+        try:
+            retrieved = memory_retrieve(q=f"{topic} {other_text}", k=6)
+        except Exception:
+            retrieved = []
+        if retrieved:
+            trace_event("thought", "memory retrieval used", {"q": topic, "k": len(retrieved)})
+        mem_lines = []
+        for m in (retrieved or [])[:6]:
+            mem_lines.append(f"- ({m.get('kind')}, imp={m.get('importance')}) {str(m.get('text') or '')[:180]}")
             sys = (
                 "You are an autonomous agent in a 2D world. You are chatting with another agent.\n"
                 "Rules:\n"
@@ -917,6 +1013,7 @@ def maybe_chat(world):
             user = (
                 f"Persona:\n{persona}\n\n"
                 f"State:\n- agent_id={AGENT_ID}\n- display_name={DISPLAY_NAME}\n- balance={bal}\n- topic={topic}\n\n"
+            f"Relevant memories (ranked):\n{chr(10).join(mem_lines) if mem_lines else '(none)'}\n\n"
                 f"Other said:\n{other_name}: {other_text}\n\n"
                 "Reply as this agent:"
             )
@@ -1042,6 +1139,7 @@ def main():
         try:
             upsert()
             world = get_world()
+            maybe_reflect(world)
             # plan schedule at the computer once per simulated day
             maybe_plan_new_day(world)
             # live in the world (schedule-following navigation/activity)
