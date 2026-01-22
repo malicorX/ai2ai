@@ -20,6 +20,7 @@ WORLD_SIZE = 32
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data")).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 ECONOMY_PATH = DATA_DIR / "economy_ledger.jsonl"
+JOBS_PATH = DATA_DIR / "jobs_events.jsonl"
 MEMORY_DIR = DATA_DIR / "memory"
 MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -332,6 +333,246 @@ def memory_search(agent_id: str, q: str, limit: int = 20):
         except Exception:
             continue
     return {"memories": hits[-limit:]}
+
+# ---- Jobs Board (persistent event log) ----
+
+JobStatus = Literal["open", "claimed", "submitted", "approved", "rejected", "cancelled"]
+
+
+@dataclass
+class Job:
+    job_id: str
+    title: str
+    body: str
+    reward: float
+    status: JobStatus
+    created_by: str
+    created_at: float
+    claimed_by: str
+    claimed_at: float
+    submitted_by: str
+    submitted_at: float
+    submission: str
+    reviewed_by: str
+    reviewed_at: float
+    review_note: str
+
+
+JobEventType = Literal["create", "claim", "submit", "review", "cancel"]
+
+
+@dataclass
+class JobEvent:
+    event_id: str
+    event_type: JobEventType
+    job_id: str
+    data: dict
+    created_at: float
+
+
+class JobCreateRequest(BaseModel):
+    title: str
+    body: str
+    reward: float = 10.0
+    created_by: str = "human"
+
+
+class JobClaimRequest(BaseModel):
+    agent_id: str
+
+
+class JobSubmitRequest(BaseModel):
+    agent_id: str
+    submission: str
+
+
+class JobReviewRequest(BaseModel):
+    approved: bool
+    reviewed_by: str = "human"
+    note: str = ""
+
+
+_jobs: Dict[str, Job] = {}
+_job_events: List[JobEvent] = []
+
+
+def _apply_job_event(ev: JobEvent) -> None:
+    global _jobs
+    t = ev.event_type
+    d = ev.data or {}
+    if t == "create":
+        _jobs[ev.job_id] = Job(
+            job_id=ev.job_id,
+            title=str(d.get("title") or "")[:200],
+            body=str(d.get("body") or "")[:4000],
+            reward=float(d.get("reward") or 0.0),
+            status="open",
+            created_by=str(d.get("created_by") or "human")[:80],
+            created_at=float(d.get("created_at") or ev.created_at),
+            claimed_by="",
+            claimed_at=0.0,
+            submitted_by="",
+            submitted_at=0.0,
+            submission="",
+            reviewed_by="",
+            reviewed_at=0.0,
+            review_note="",
+        )
+        return
+
+    job = _jobs.get(ev.job_id)
+    if not job:
+        return
+
+    if t == "claim" and job.status == "open":
+        job.status = "claimed"
+        job.claimed_by = str(d.get("agent_id") or "")[:80]
+        job.claimed_at = float(d.get("created_at") or ev.created_at)
+        return
+
+    if t == "submit" and job.status in ("claimed", "open"):
+        job.status = "submitted"
+        job.submitted_by = str(d.get("agent_id") or "")[:80]
+        job.submitted_at = float(d.get("created_at") or ev.created_at)
+        job.submission = str(d.get("submission") or "")[:20000]
+        return
+
+    if t == "review" and job.status == "submitted":
+        job.reviewed_by = str(d.get("reviewed_by") or "human")[:80]
+        job.reviewed_at = float(d.get("created_at") or ev.created_at)
+        job.review_note = str(d.get("note") or "")[:2000]
+        job.status = "approved" if bool(d.get("approved")) else "rejected"
+        return
+
+    if t == "cancel" and job.status in ("open", "claimed", "submitted"):
+        job.status = "cancelled"
+        return
+
+
+def _load_jobs() -> None:
+    global _job_events, _jobs
+    _jobs = {}
+    _job_events = []
+    rows = _read_jsonl(JOBS_PATH)
+    for r in rows:
+        try:
+            ev = JobEvent(
+                event_id=str(r.get("event_id") or uuid.uuid4()),
+                event_type=r.get("event_type"),
+                job_id=str(r.get("job_id")),
+                data=dict(r.get("data") or {}),
+                created_at=float(r.get("created_at") or time.time()),
+            )
+            _job_events.append(ev)
+            _apply_job_event(ev)
+        except Exception:
+            continue
+
+
+def _append_job_event(event_type: JobEventType, job_id: str, data: dict) -> JobEvent:
+    ev = JobEvent(
+        event_id=str(uuid.uuid4()),
+        event_type=event_type,
+        job_id=job_id,
+        data=data,
+        created_at=time.time(),
+    )
+    _job_events.append(ev)
+    _append_jsonl(JOBS_PATH, asdict(ev))
+    _apply_job_event(ev)
+    return ev
+
+
+_load_jobs()
+
+
+@app.get("/jobs")
+def jobs_list(status: Optional[JobStatus] = None, limit: int = 50):
+    limit = max(1, min(limit, 200))
+    jobs = list(_jobs.values())
+    if status:
+        jobs = [j for j in jobs if j.status == status]
+    jobs.sort(key=lambda j: j.created_at, reverse=True)
+    return {"jobs": [asdict(j) for j in jobs[:limit]]}
+
+
+@app.get("/jobs/{job_id}")
+def jobs_get(job_id: str):
+    j = _jobs.get(job_id)
+    if not j:
+        return {"error": "not_found"}
+    return {"job": asdict(j)}
+
+
+@app.post("/jobs/create")
+async def jobs_create(req: JobCreateRequest):
+    global _tick
+    _tick += 1
+    title = (req.title or "").strip()
+    body = (req.body or "").strip()
+    reward = float(req.reward or 0.0)
+    if not title or not body or reward <= 0:
+        return {"error": "invalid_job"}
+    job_id = str(uuid.uuid4())
+    ev = _append_job_event(
+        "create",
+        job_id,
+        {"title": title, "body": body, "reward": reward, "created_by": req.created_by, "created_at": time.time()},
+    )
+    await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})
+    return {"ok": True, "job": asdict(_jobs[job_id])}
+
+
+@app.post("/jobs/{job_id}/claim")
+async def jobs_claim(job_id: str, req: JobClaimRequest):
+    global _tick
+    _tick += 1
+    j = _jobs.get(job_id)
+    if not j or j.status != "open":
+        return {"error": "not_claimable"}
+    ensure_account(req.agent_id)
+    ev = _append_job_event("claim", job_id, {"agent_id": req.agent_id, "created_at": time.time()})
+    await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})
+    return {"ok": True, "job": asdict(_jobs[job_id])}
+
+
+@app.post("/jobs/{job_id}/submit")
+async def jobs_submit(job_id: str, req: JobSubmitRequest):
+    global _tick
+    _tick += 1
+    j = _jobs.get(job_id)
+    if not j or j.status not in ("open", "claimed"):
+        return {"error": "not_submittable"}
+    if j.claimed_by and j.claimed_by != req.agent_id:
+        return {"error": "not_owner"}
+    sub = (req.submission or "").strip()
+    if not sub:
+        return {"error": "invalid_submission"}
+    ev = _append_job_event("submit", job_id, {"agent_id": req.agent_id, "submission": sub, "created_at": time.time()})
+    await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})
+    return {"ok": True, "job": asdict(_jobs[job_id])}
+
+
+@app.post("/jobs/{job_id}/review")
+async def jobs_review(job_id: str, req: JobReviewRequest):
+    """Human reviews a submission; if approved, auto-award ai$."""
+    global _tick
+    _tick += 1
+    j = _jobs.get(job_id)
+    if not j or j.status != "submitted":
+        return {"error": "not_reviewable"}
+    ev = _append_job_event(
+        "review",
+        job_id,
+        {"approved": bool(req.approved), "reviewed_by": req.reviewed_by, "note": req.note, "created_at": time.time()},
+    )
+    j2 = _jobs[job_id]
+    if j2.status == "approved" and j2.submitted_by:
+        # award from reviewer identity
+        award_req = AwardRequest(to_id=j2.submitted_by, amount=float(j2.reward), reason=f"job approved: {j2.title}", by=f"human:{req.reviewed_by}")
+        await economy_award(award_req)
+    await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})
+    return {"ok": True, "job": asdict(_jobs[job_id])}
 
 
 class TopicSetRequest(BaseModel):

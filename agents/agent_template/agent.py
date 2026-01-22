@@ -20,6 +20,8 @@ RANDOM_MOVE_PROB = float(os.getenv("RANDOM_MOVE_PROB", "0.10"))
 TOPIC_MIN_SECONDS = float(os.getenv("TOPIC_MIN_SECONDS", "120"))
 MEMORY_EVERY_SECONDS = float(os.getenv("MEMORY_EVERY_SECONDS", "30"))
 BALANCE_EVERY_SECONDS = float(os.getenv("BALANCE_EVERY_SECONDS", "15"))
+JOBS_EVERY_SECONDS = float(os.getenv("JOBS_EVERY_SECONDS", "10"))
+JOBS_MIN_BALANCE_TARGET = float(os.getenv("JOBS_MIN_BALANCE_TARGET", "150"))
 
 _last_replied_to_msg_id = None
 _last_seen_other_msg_id = None
@@ -28,6 +30,8 @@ _last_topic_set_at = 0.0
 _last_memory_at = 0.0
 _last_balance_at = 0.0
 _cached_balance = None
+_last_jobs_at = 0.0
+_active_job_id = ""
 
 
 def upsert():
@@ -196,6 +200,146 @@ def memory_recent(limit: int = 10):
     r = requests.get(f"{WORLD_API}/memory/{AGENT_ID}/recent?limit={limit}", timeout=10)
     r.raise_for_status()
     return r.json().get("memories", [])
+
+
+def jobs_list(status: str = "open", limit: int = 20):
+    r = requests.get(f"{WORLD_API}/jobs?status={status}&limit={limit}", timeout=10)
+    r.raise_for_status()
+    return r.json().get("jobs", [])
+
+
+def jobs_claim(job_id: str) -> bool:
+    r = requests.post(f"{WORLD_API}/jobs/{job_id}/claim", json={"agent_id": AGENT_ID}, timeout=10)
+    try:
+        data = r.json()
+    except Exception:
+        return False
+    return bool(data.get("ok"))
+
+
+def jobs_submit(job_id: str, submission: str) -> bool:
+    r = requests.post(
+        f"{WORLD_API}/jobs/{job_id}/submit",
+        json={"agent_id": AGENT_ID, "submission": submission},
+        timeout=20,
+    )
+    try:
+        data = r.json()
+    except Exception:
+        return False
+    return bool(data.get("ok"))
+
+
+def _do_job(job: dict) -> str:
+    """
+    Minimal safe executor: produce a deliverable file in workspace and return a submission string.
+    """
+    title = (job.get("title") or "").strip()
+    body = (job.get("body") or "").strip()
+    job_id = job.get("job_id")
+    persona = (PERSONALITY or "").strip()
+    bal = _cached_balance
+
+    deliver_dir = os.path.join(WORKSPACE_DIR, "deliverables")
+    os.makedirs(deliver_dir, exist_ok=True)
+    out_path = os.path.join(deliver_dir, f"{job_id}.md")
+
+    # Use memory as "long-term context"
+    mem = []
+    try:
+        mem = memory_recent(limit=8)
+    except Exception:
+        mem = []
+
+    mem_lines = []
+    for m in mem[-5:]:
+        mem_lines.append(f"- ({m.get('kind')}) {str(m.get('text') or '')[:180]}")
+
+    content = []
+    content.append(f"# Job Deliverable: {title}")
+    content.append("")
+    content.append(f"**Agent**: {DISPLAY_NAME} ({AGENT_ID})")
+    content.append(f"**Balance**: {bal}")
+    content.append("")
+    content.append("## Task")
+    content.append(body)
+    content.append("")
+    content.append("## Persona (excerpt)")
+    content.append((persona[:800] + ("…" if len(persona) > 800 else "")).strip())
+    content.append("")
+    content.append("## Output")
+    # Provide a structured response template the human can judge.
+    content.append("- Summary:")
+    content.append(f"  - I will deliver a concrete response and a file artifact at `{out_path}`.")
+    content.append("- Proposed approach:")
+    content.append("  - Clarify deliverable format")
+    content.append("  - Produce the artifact")
+    content.append("  - Ask for review criteria")
+    content.append("")
+    content.append("## Long-term memory context (recent)")
+    content.extend(mem_lines or ["- (none yet)"])
+    content.append("")
+    content.append("## Questions for reviewer")
+    content.append("- What does 'good' look like for this job (format, length, acceptance criteria)?")
+    content.append("- Any constraints (no web, specific stack, etc.)?")
+
+    _append_file(out_path, "\n".join(content))
+
+    # Submission should be short; point to artifact
+    return f"Delivered `{out_path}`. Summary: created structured deliverable for '{title}'. Please review and approve/reject with criteria."
+
+
+def maybe_work_jobs() -> None:
+    global _last_jobs_at, _active_job_id
+    now = time.time()
+    if now - _last_jobs_at < JOBS_EVERY_SECONDS:
+        return
+
+    # Only chase jobs if we want more ai$.
+    bal = _cached_balance
+    if bal is not None and float(bal) >= JOBS_MIN_BALANCE_TARGET:
+        _last_jobs_at = now
+        return
+
+    # If we're already working on one, don't pick another.
+    if _active_job_id:
+        _last_jobs_at = now
+        return
+
+    try:
+        open_jobs = jobs_list(status="open", limit=20)
+    except Exception:
+        _last_jobs_at = now
+        return
+
+    if not open_jobs:
+        _last_jobs_at = now
+        return
+
+    # Pick highest reward first (simple greedy).
+    open_jobs.sort(key=lambda j: float(j.get("reward") or 0.0), reverse=True)
+    job = open_jobs[0]
+    job_id = job.get("job_id")
+    if not job_id:
+        _last_jobs_at = now
+        return
+
+    if not jobs_claim(job_id):
+        _last_jobs_at = now
+        return
+
+    _active_job_id = job_id
+    try:
+        submission = _do_job(job)
+        ok = jobs_submit(job_id, submission)
+        if ok:
+            memory_append("event", f"Submitted job {job_id}: {job.get('title')}", tags=["job"])
+            chat_send(_style(f"I claimed a job to earn ai$: '{job.get('title')}'. Submitted deliverable for human review."))
+    except Exception:
+        pass
+    finally:
+        _active_job_id = ""
+        _last_jobs_at = now
 
 
 def _is_my_turn(msgs) -> bool:
@@ -435,6 +579,7 @@ def main():
             world = get_world()
             move(world)
             maybe_update_balance()
+            maybe_work_jobs()
             maybe_chat(world)
             maybe_write_memory(world)
         except Exception as e:

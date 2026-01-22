@@ -76,6 +76,21 @@
           </div>
         </div>
       </div>
+
+      <div style="background:white; border:1px solid #ccc; padding:10px; border-radius:6px; width:420px;">
+        <h3 style="margin:0 0 8px 0;">Jobs (earn ai$)</h3>
+        <div style="display:flex; gap:8px; margin-bottom:8px;">
+          <input id="jobTitle" type="text" placeholder="Job title" style="padding:6px; flex:1;" />
+          <input id="jobReward" type="number" value="10" min="0" step="1" style="padding:6px; width:110px;" />
+        </div>
+        <textarea id="jobBody" placeholder="What should the agent deliver? (be specific)" rows="3" style="padding:6px; width:100%;"></textarea>
+        <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
+          <input id="jobReviewer" type="text" value="human" style="padding:6px; flex:1;" />
+          <button id="jobCreateBtn">Create Job</button>
+          <button id="jobsRefreshBtn">Refresh</button>
+        </div>
+        <div id="jobsList" style="margin-top:10px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size:12px; max-height:260px; overflow-y:auto;"></div>
+      </div>
     </div>
   </div>
 
@@ -143,6 +158,15 @@
     const replyBtn = document.getElementById("replyBtn");
     const postsSelect = document.getElementById("postsSelect");
     const postDetails = document.getElementById("postDetails");
+
+    // --- Jobs ---
+    const jobsList = document.getElementById("jobsList");
+    const jobTitle = document.getElementById("jobTitle");
+    const jobBody = document.getElementById("jobBody");
+    const jobReward = document.getElementById("jobReward");
+    const jobReviewer = document.getElementById("jobReviewer");
+    const jobCreateBtn = document.getElementById("jobCreateBtn");
+    const jobsRefreshBtn = document.getElementById("jobsRefreshBtn");
 
     async function fetchJson(path, opts) {
       const res = await fetch(BACKEND_HTTP + path, opts);
@@ -295,6 +319,94 @@
     refreshBalances();
     setInterval(refreshBalances, 5000);
 
+    function renderJob(j) {
+      const wrap = document.createElement("div");
+      wrap.style.borderTop = "1px solid #eee";
+      wrap.style.padding = "8px 0";
+
+      const head = document.createElement("div");
+      head.innerHTML = `<b>[${j.status}]</b> ${j.title} <span style="color:#666;">(reward=${(j.reward||0).toFixed(1)} ai$)</span>`;
+      wrap.appendChild(head);
+
+      const meta = document.createElement("div");
+      meta.style.color = "#666";
+      meta.textContent = `id=${j.job_id} created_by=${j.created_by} claimed_by=${j.claimed_by||"-"} submitted_by=${j.submitted_by||"-"}`;
+      wrap.appendChild(meta);
+
+      if (j.status === "submitted") {
+        const sub = document.createElement("div");
+        const s = (j.submission || "");
+        sub.textContent = `submission: ${s.slice(0, 200)}${s.length > 200 ? "…" : ""}`;
+        wrap.appendChild(sub);
+
+        const btnRow = document.createElement("div");
+        btnRow.style.display = "flex";
+        btnRow.style.gap = "8px";
+        btnRow.style.marginTop = "6px";
+
+        const okBtn = document.createElement("button");
+        okBtn.textContent = "Approve + award";
+        okBtn.onclick = async () => {
+          await fetchJson(`/jobs/${j.job_id}/review`, {
+            method: "POST",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({approved:true, reviewed_by: jobReviewer.value || "human", note:"ok"})
+          });
+          await refreshJobs();
+          await refreshBalances();
+        };
+
+        const noBtn = document.createElement("button");
+        noBtn.textContent = "Reject";
+        noBtn.onclick = async () => {
+          await fetchJson(`/jobs/${j.job_id}/review`, {
+            method: "POST",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({approved:false, reviewed_by: jobReviewer.value || "human", note:"needs improvement"})
+          });
+          await refreshJobs();
+        };
+
+        btnRow.appendChild(okBtn);
+        btnRow.appendChild(noBtn);
+        wrap.appendChild(btnRow);
+      }
+
+      return wrap;
+    }
+
+    async function refreshJobs() {
+      try {
+        const data = await fetchJson("/jobs?limit=50");
+        const jobs = data.jobs || [];
+        jobsList.innerHTML = "";
+        for (const j of jobs) jobsList.appendChild(renderJob(j));
+      } catch (e) {
+        jobsList.textContent = "jobs error: " + e.message;
+      }
+    }
+    refreshJobs();
+    setInterval(refreshJobs, 5000);
+
+    jobsRefreshBtn.onclick = refreshJobs;
+    jobCreateBtn.onclick = async () => {
+      const title = (jobTitle.value || "").trim();
+      const body = (jobBody.value || "").trim();
+      const reward = parseFloat(jobReward.value || "10");
+      if (!title || !body || !isFinite(reward) || reward <= 0) {
+        alert("Enter title, body, and positive reward.");
+        return;
+      }
+      await fetchJson("/jobs/create", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({title, body, reward, created_by: jobReviewer.value || "human"})
+      });
+      jobTitle.value = "";
+      jobBody.value = "";
+      await refreshJobs();
+    };
+
     // --- WebSocket world ---
     function connect() {
       log("[ws] connecting to " + BACKEND_WS);
@@ -336,6 +448,8 @@
               const parts = Object.keys(b).sort().map(k => `${k}=${(b[k]||0).toFixed(1)} ai$`);
               balancesStatus.textContent = parts.length ? parts.join(" | ") : "(none)";
             } catch (e) {}
+          } else if (msg.type === "jobs") {
+            refreshJobs();
           }
         } catch (e) {}
       };
