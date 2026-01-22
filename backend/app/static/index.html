@@ -44,6 +44,8 @@
     <span id="wsStatus" class="pill bad">disconnected</span>
     <span style="margin-left:10px;">World:</span>
     <span id="worldStatus" class="pill">tick=? agents=?</span>
+    <span style="margin-left:10px;">Time:</span>
+    <span id="timeStatus" class="pill">day=? ??:??</span>
     <span style="margin-left:10px;">Topic:</span>
     <span id="topicStatus" class="pill">loading…</span>
     <span style="margin-left:10px;">Balances:</span>
@@ -124,8 +126,17 @@
     const traceLog = document.getElementById("traceLog");
     const wsStatus = document.getElementById("wsStatus");
     const worldStatus = document.getElementById("worldStatus");
+    const timeStatus = document.getElementById("timeStatus");
     const topicStatus = document.getElementById("topicStatus");
     const balancesStatus = document.getElementById("balancesStatus");
+    function fmtTime(day, minuteOfDay) {
+      const mm = Math.max(0, minuteOfDay|0);
+      const h = Math.floor(mm / 60);
+      const m = mm % 60;
+      const hh = String(h).padStart(2, "0");
+      const mi = String(m).padStart(2, "0");
+      return `day=${day} ${hh}:${mi}`;
+    }
 
     const tile = 20;
     const worldPx = 32 * tile;
@@ -619,6 +630,9 @@
             drawAgentsGrouped(data.agents, occ);
             drawOverlaps(occ);
             worldStatus.textContent = "tick=" + data.tick + " agents=" + (data.agents || []).length;
+            if (typeof data.day !== "undefined" && typeof data.minute_of_day !== "undefined") {
+              timeStatus.textContent = fmtTime(data.day, data.minute_of_day);
+            }
           } else if (msg.type === "chat") {
             const c = msg.data;
             const ts = new Date((c.created_at || Date.now()/1000) * 1000).toLocaleTimeString();

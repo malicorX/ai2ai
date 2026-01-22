@@ -4,6 +4,8 @@ import time
 import requests
 import re
 from difflib import SequenceMatcher
+import json
+from pydantic import BaseModel, Field, ValidationError
 
 USE_LANGGRAPH = os.getenv("USE_LANGGRAPH", "0").strip() == "1"
 if USE_LANGGRAPH:
@@ -19,6 +21,132 @@ PERSONALITY = os.getenv("PERSONALITY", "").strip()  # optional fallback
 WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "/app/workspace").strip()
 COMPUTER_LANDMARK_ID = os.getenv("COMPUTER_LANDMARK_ID", "computer").strip()
 COMPUTER_ACCESS_RADIUS = int(os.getenv("COMPUTER_ACCESS_RADIUS", "1"))
+HOME_LANDMARK_ID = os.getenv("HOME_LANDMARK_ID", f"home_{AGENT_ID}").strip()
+
+_last_day_planned = None
+_daily_plan = None
+
+
+class PlanItem(BaseModel):
+    minute: int = Field(ge=0, le=1439)
+    place_id: str
+    activity: str
+
+
+class DailyPlan(BaseModel):
+    items: list[PlanItem]
+
+
+def world_time(world) -> tuple[int, int]:
+    return int(world.get("day", 0)), int(world.get("minute_of_day", 0))
+
+
+def _pick_next_plan_item(day: int, minute_of_day: int) -> PlanItem | None:
+    global _daily_plan
+    if not _daily_plan:
+        return None
+    items = sorted(_daily_plan.items, key=lambda it: it.minute)
+    # next item at/after now, else first item tomorrow
+    for it in items:
+        if it.minute >= minute_of_day:
+            return it
+    return items[0] if items else None
+
+
+def _default_plan() -> DailyPlan:
+    # simple fallback if LLM plan fails
+    return DailyPlan(
+        items=[
+            PlanItem(minute=7 * 60, place_id=HOME_LANDMARK_ID, activity="wake up, hygiene"),
+            PlanItem(minute=8 * 60, place_id="cafe", activity="breakfast, casual chat"),
+            PlanItem(minute=9 * 60, place_id="computer", activity="work: plan jobs and execute"),
+            PlanItem(minute=12 * 60, place_id="cafe", activity="lunch"),
+            PlanItem(minute=14 * 60, place_id="market", activity="explore, observe, trade ideas"),
+            PlanItem(minute=18 * 60, place_id="cafe", activity="social: gossip, invitations"),
+            PlanItem(minute=22 * 60, place_id=HOME_LANDMARK_ID, activity="reflect, sleep"),
+        ]
+    )
+
+
+def plan_day_with_llm(world) -> DailyPlan:
+    persona = (PERSONALITY or "").strip()
+    day, minute_of_day = world_time(world)
+    lm_ids = [lm.get("id") for lm in world.get("landmarks", []) if lm.get("id")]
+    sys = (
+        "You are generating a daily schedule for an agent living in a 2D village.\n"
+        "Return STRICT JSON only.\n"
+        "Schema:\n"
+        "{ \"items\": [ {\"minute\": <0-1439>, \"place_id\": <string>, \"activity\": <short string>} ] }\n"
+        "Rules:\n"
+        "- Use plausible routines (sleep, meals, work, social).\n"
+        "- Choose place_id from the provided list.\n"
+        "- 6 to 10 items.\n"
+    )
+    user = (
+        f"Agent: {DISPLAY_NAME} ({AGENT_ID})\n"
+        f"Persona:\n{persona}\n\n"
+        f"Today is day={day} current minute={minute_of_day}\n"
+        f"Places: {lm_ids}\n\n"
+        "Generate the schedule JSON now."
+    )
+    raw = llm_chat(sys, user, max_tokens=500)
+    try:
+        data = json.loads(raw)
+        plan = DailyPlan.model_validate(data)
+        # basic safety: filter unknown places
+        allowed = set(lm_ids)
+        plan.items = [it for it in plan.items if it.place_id in allowed]
+        if len(plan.items) < 3:
+            return _default_plan()
+        return plan
+    except Exception:
+        return _default_plan()
+
+
+def maybe_plan_new_day(world) -> None:
+    global _last_day_planned, _daily_plan
+    day, _ = world_time(world)
+    if _last_day_planned == day and _daily_plan:
+        return
+    # Plan once per day, while at computer (so it's "computer work")
+    if not _at_landmark(world, COMPUTER_LANDMARK_ID, radius=COMPUTER_ACCESS_RADIUS):
+        return
+    trace_event("thought", "planning daily schedule", {"day": day})
+    _daily_plan = plan_day_with_llm(world) if USE_LANGGRAPH else _default_plan()
+    _last_day_planned = day
+    trace_event("status", "daily schedule ready", {"items": [it.model_dump() for it in _daily_plan.items]})
+
+
+def perform_scheduled_life_step(world) -> None:
+    """
+    Follow the daily plan: move to the next place and do a lightweight activity (trace + optional chat).
+    """
+    day, minute_of_day = world_time(world)
+    it = _pick_next_plan_item(day, minute_of_day)
+    if not it:
+        return
+
+    lm = _get_landmark(world, it.place_id)
+    if not lm:
+        return
+
+    # move toward destination
+    if not _at_landmark(world, it.place_id, radius=1):
+        _move_towards(world, int(lm.get("x", 0)), int(lm.get("y", 0)))
+        trace_event("action", f"walking to {it.place_id}", {"activity": it.activity, "minute": minute_of_day})
+        return
+
+    # at destination: do the activity
+    trace_event("status", f"activity: {it.activity}", {"place": it.place_id, "minute": minute_of_day})
+    # if co-located with other agent, do a short social message + gossip exchange
+    if _adjacent_to_other(world) and random.random() < 0.25:
+        # create a tiny "gossip nugget" and store it
+        nugget = f"At {it.place_id} ({minute_of_day//60:02d}:{minute_of_day%60:02d}) I was doing: {it.activity}."
+        try:
+            memory_append("event", nugget, tags=["life", "gossip", it.place_id])
+        except Exception:
+            pass
+        chat_send(_style(f"[life] {nugget}"))
 SLEEP_SECONDS = float(os.getenv("AGENT_TICK_SECONDS", "3"))
 # Chat behavior (agents talk to each other via /chat, NOT the bulletin board)
 CHAT_PROBABILITY = float(os.getenv("CHAT_PROBABILITY", "0.6"))
@@ -914,6 +1042,10 @@ def main():
         try:
             upsert()
             world = get_world()
+            # plan schedule at the computer once per simulated day
+            maybe_plan_new_day(world)
+            # live in the world (schedule-following navigation/activity)
+            perform_scheduled_life_step(world)
             # Navigation test: default behavior is to walk to the computer access spot before doing tool-heavy work.
             if not _at_landmark(world, COMPUTER_LANDMARK_ID, radius=COMPUTER_ACCESS_RADIUS):
                 lm = _get_landmark(world, COMPUTER_LANDMARK_ID)

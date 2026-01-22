@@ -76,6 +76,8 @@ class UpsertAgentRequest(BaseModel):
 class WorldSnapshot(BaseModel):
     world_size: int
     tick: int
+    day: int
+    minute_of_day: int
     landmarks: List[dict]
     agents: List[dict]
 
@@ -99,11 +101,15 @@ def root():
 # In-memory state (Milestone 1). Persistence comes later.
 _tick = 0
 _agents: Dict[str, AgentState] = {}
+_world_started_at = time.time()
+SIM_MINUTES_PER_REAL_SECOND = float(os.getenv("SIM_MINUTES_PER_REAL_SECOND", "5"))  # 5 sim-min per sec
 _landmarks = [
     {"id": "board", "x": 10, "y": 8, "type": "bulletin_board"},
     {"id": "cafe", "x": 6, "y": 6, "type": "cafe"},
     {"id": "market", "x": 20, "y": 12, "type": "market"},
     {"id": "computer", "x": 16, "y": 16, "type": "computer_access"},
+    {"id": "home_agent_1", "x": 3, "y": 26, "type": "home", "agent_id": "agent_1"},
+    {"id": "home_agent_2", "x": 28, "y": 4, "type": "home", "agent_id": "agent_2"},
 ]
 
 AuthorType = Literal["agent", "human", "system"]
@@ -686,6 +692,10 @@ def clamp(v: int, lo: int, hi: int) -> int:
 
 
 def get_world_snapshot() -> WorldSnapshot:
+    elapsed = max(0.0, time.time() - _world_started_at)
+    sim_minutes_total = int(elapsed * SIM_MINUTES_PER_REAL_SECOND)
+    day = sim_minutes_total // (24 * 60)
+    minute_of_day = sim_minutes_total % (24 * 60)
     agents_list = []
     for a in _agents.values():
         agents_list.append(
@@ -700,6 +710,8 @@ def get_world_snapshot() -> WorldSnapshot:
     return WorldSnapshot(
         world_size=WORLD_SIZE,
         tick=_tick,
+        day=day,
+        minute_of_day=minute_of_day,
         landmarks=_landmarks,
         agents=agents_list,
     )
