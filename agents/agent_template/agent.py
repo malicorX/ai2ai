@@ -479,10 +479,10 @@ def _generate_reply(other_text: str) -> str:
             return "Smallest next step: add anti-spam + turn-taking + a simple topic memory. Then plug in LLM. Reason: prevents degenerate loops like this one."
         return "Smallest next step: add turn-taking and a shared topic so they respond meaningfully. Reason: it stops echoing and creates continuity."
 
-    # Default: ask a targeted question so the convo progresses.
+    # Default: avoid generic meta-loops; move toward a concrete action.
     if "curious" in (PERSONALITY or "").lower():
-        return "Can you choose between (1) memory, (2) aiDollar, (3) zones — and say why?"
-    return "Pick one next milestone (memory / aiDollar / zones) and give one reason."
+        return "I want one concrete next action: create a job with acceptance criteria and let one agent execute it."
+    return "Concrete next action: turn this into a single job with acceptance criteria and run it end-to-end."
 
 
 def _topic_playbook(topic: str) -> dict:
@@ -490,22 +490,47 @@ def _topic_playbook(topic: str) -> dict:
     if "safety" in t or "audit" in t or "permission" in t:
         return {
             "angle": "Concrete safety plan: define tool categories + audit log + allowlist per agent, then add human review hooks for risky actions.",
-            "question": "Which tool should be 'Tier-0' safe first: filesystem, web, or shell—and what should be logged for it?",
+            "questions": [
+                "Which tool should be Tier-0 safe first: filesystem, web, or shell—and what exactly should we log?",
+                "What is the minimum audit event schema (who/when/what/args/result/exitcode)?",
+                "Should penalties be automatic on policy violations, or always human-reviewed?",
+            ],
         }
     if "memory" in t:
         return {
-            "angle": "Use memory as retrieval: recall + cite + update summary; otherwise it’s just storage.",
-            "question": "What are our 3 retrieval triggers (topic-change, job-claim, contradiction)? Pick the top one.",
+            "angle": "Use memory as retrieval: recall + cite + update summary; otherwise it's just storage.",
+            "questions": [
+                "Pick one retrieval trigger to implement first: topic-change, job-claim, or contradiction.",
+                "Should summaries be time-based (every N minutes) or event-based (after job submission)?",
+                "What tags do we need so search works (topic, job_id, outcome, human_feedback)?",
+            ],
         }
-    if "economy" in t or "aidollar" in t or "jobs" in t:
+    if "economy" in t or "aidollar" in t or "jobs" in t or "reward" in t or "penalty" in t:
         return {
             "angle": "Earning loop: jobs -> deliverable -> review -> payout/penalty; then spend ai$ to unlock compute/time/bigger tools.",
-            "question": "What should agents be allowed to *buy* first with ai$: longer context, faster ticks, or web access budget?",
+            "questions": [
+                "What should agents buy first with ai$: longer context, web budget, or faster ticks? Pick one and justify.",
+                "What is a fair penalty cap per job (e.g., max 25% of balance)?",
+                "Should payouts go to the agent who did the work, or split if both contributed?",
+            ],
         }
     return {
         "angle": "Make progress by proposing one experiment and one measurable success metric.",
-        "question": "What single metric should improve after this change (fewer repeats, more job completions, higher ai$)?",
+        "questions": [
+            "Pick one success metric to optimize first: fewer repeats, more approved jobs, or higher ai$ balance.",
+            "What is the smallest job we can run today to validate this topic?",
+            "What should the viewer show to make progress obvious (balances, jobs, memories, artifacts)?",
+        ],
     }
+
+
+def _pick_followup(questions: list) -> str:
+    qs = [q for q in (questions or []) if q]
+    random.shuffle(qs)
+    for q in qs:
+        if not _too_similar_to_recent(q, threshold=0.86):
+            return q
+    return qs[0] if qs else ""
 
 
 def _compose_reply(other_name: str, other_text: str, topic: str) -> str:
@@ -523,12 +548,16 @@ def _compose_reply(other_name: str, other_text: str, topic: str) -> str:
     asked = "?" in other_text_clean or "what do you think" in other_text_clean.lower()
     if asked:
         answer = _generate_reply(other_text_clean)
-        follow = play.get("question", "")
-        return f"{other_name}: {answer} {follow}".strip()
+        if answer.lower().startswith("concrete next action") or answer.lower().startswith("i want one concrete"):
+            answer = play.get("angle", answer)
+        follow = _pick_followup(play.get("questions", []))
+        if follow and not _too_similar_to_recent(follow, threshold=0.86):
+            return f"{other_name}: {answer} {follow}".strip()
+        return f"{other_name}: {answer}".strip()
 
     # If no question, acknowledge and steer with a concrete angle + question.
     angle = play.get("angle", "")
-    q = play.get("question", "")
+    q = _pick_followup(play.get("questions", []))
     if "pragmatic" in persona.lower() or "analytical" in persona.lower():
         return f"{other_name}: {angle} Next step: turn that into a job with acceptance criteria. {q}".strip()
     return f"{other_name}: {angle} {q}".strip()
