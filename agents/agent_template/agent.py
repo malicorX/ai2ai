@@ -619,6 +619,47 @@ def event_rsvp(event_id: str, status: str, note: str = "") -> None:
         return
 
 
+def maybe_process_event_invites(world) -> None:
+    """
+    Always-on invite processing so we don't miss invites due to schedule/location,
+    especially since sim time can move quickly.
+    """
+    global _daily_plan
+    try:
+        day, minute_of_day = world_time(world)
+        now = _total_minutes(day, minute_of_day)
+        evs = events_list(upcoming_only=True, limit=50)
+        for e in evs:
+            if (e.get("status") or "") != "scheduled":
+                continue
+            invites = e.get("invites") or []
+            # Is there an invite for us?
+            if not any(inv.get("to_agent_id") == AGENT_ID for inv in invites):
+                continue
+            rsvps = e.get("rsvps") or {}
+            if rsvps.get(AGENT_ID):
+                continue
+
+            sd = int(e.get("start_day") or 0)
+            sm = int(e.get("start_minute") or 0)
+            start = _total_minutes(sd, sm)
+            dur = max(1, int(e.get("duration_min") or 60))
+            end = start + dur
+            if end < now:
+                continue
+
+            event_rsvp(e.get("event_id"), "yes", note="I'll attend.")
+            trace_event("action", "RSVP yes", {"event_id": e.get("event_id"), "title": e.get("title")})
+
+            # If it's today, insert into schedule so we walk there even if no other cue.
+            if _daily_plan and sd == int(day):
+                _daily_plan.items.append(
+                    PlanItem(minute=sm, place_id=str(e.get("location_id") or "cafe"), activity=f"attend event: {e.get('title')}")
+                )
+    except Exception:
+        return
+
+
 def maybe_social_events(world) -> None:
     """
     During social blocks, sometimes create an event and invite the other agent.
@@ -637,29 +678,12 @@ def maybe_social_events(world) -> None:
     if not other_id:
         return
 
-    # Check for invitations to us and RSVP yes when the event is still upcoming.
+    # (Invite RSVP is handled globally in maybe_process_event_invites)
+    evs = []
     try:
-        evs = events_list(upcoming_only=False, limit=30)
-        for e in evs:
-            invites = e.get("invites") or []
-            for inv in invites:
-                if inv.get("to_agent_id") == AGENT_ID:
-                    # If we haven't RSVP'd, respond
-                    rsvps = e.get("rsvps") or {}
-                    if AGENT_ID not in rsvps:
-                        # Only RSVP if it's in the future (based on current sim clock)
-                        sd = int(e.get("start_day") or 0)
-                        sm = int(e.get("start_minute") or 0)
-                        if (sd, sm) >= (day, minute_of_day):
-                            event_rsvp(e.get("event_id"), "yes", note="I'll attend.")
-                            trace_event("action", "RSVP yes", {"event_id": e.get("event_id"), "title": e.get("title")})
-                            if _daily_plan:
-                                _daily_plan.items.append(
-                                    PlanItem(minute=sm, place_id=str(e.get("location_id") or "cafe"), activity=f"attend event: {e.get('title')}")
-                                )
-                    break
+        evs = events_list(upcoming_only=False, limit=50)
     except Exception:
-        pass
+        evs = []
 
     # Propose at most one new event per day per agent (reliable, non-spammy).
     if _last_event_proposed_day == day:
@@ -685,7 +709,7 @@ def maybe_social_events(world) -> None:
         "Return STRICT JSON: {\"title\":..., \"description\":..., \"location_id\":..., \"start_in_min\":..., \"duration_min\":..., \"invite_message\":...}\n"
         "Constraints:\n"
         "- location_id must be one of: cafe, market\n"
-        "- start_in_min between 60 and 240\n"
+        "- start_in_min between 30 and 180\n"
         "- duration_min between 30 and 120\n"
     )
     user = (
@@ -705,7 +729,7 @@ def maybe_social_events(world) -> None:
         msg = str(obj.get("invite_message") or "Want to join?").strip()[:200]
         if loc not in ("cafe", "market"):
             loc = "cafe"
-        start_in = max(60, min(start_in, 240))
+        start_in = max(30, min(start_in, 180))
         dur = max(30, min(dur, 120))
         start_total = int(minute_of_day) + int(start_in)
         sd = int(day) + (start_total // 1440)
@@ -1411,6 +1435,7 @@ def main():
         try:
             upsert()
             world = get_world()
+            maybe_process_event_invites(world)
             maybe_reflect(world)
             # plan schedule at the computer once per simulated day
             maybe_plan_new_day(world)
