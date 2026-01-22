@@ -339,6 +339,32 @@
         sub.textContent = `submission: ${s.slice(0, 200)}${s.length > 200 ? "…" : ""}`;
         wrap.appendChild(sub);
 
+        const opts = document.createElement("div");
+        opts.style.display = "flex";
+        opts.style.gap = "8px";
+        opts.style.marginTop = "6px";
+        opts.style.alignItems = "center";
+
+        const payout = document.createElement("input");
+        payout.type = "number";
+        payout.min = "0";
+        payout.step = "1";
+        payout.value = String(j.reward || 0);
+        payout.style.width = "110px";
+        payout.title = "payout (<= reward)";
+
+        const penalty = document.createElement("input");
+        penalty.type = "number";
+        penalty.min = "0";
+        penalty.step = "1";
+        penalty.value = "0";
+        penalty.style.width = "110px";
+        penalty.title = "penalty (ai$ removed)";
+
+        opts.appendChild(payout);
+        opts.appendChild(penalty);
+        wrap.appendChild(opts);
+
         const btnRow = document.createElement("div");
         btnRow.style.display = "flex";
         btnRow.style.gap = "8px";
@@ -350,7 +376,13 @@
           await fetchJson(`/jobs/${j.job_id}/review`, {
             method: "POST",
             headers: {"Content-Type":"application/json"},
-            body: JSON.stringify({approved:true, reviewed_by: jobReviewer.value || "human", note:"ok"})
+            body: JSON.stringify({
+              approved:true,
+              reviewed_by: jobReviewer.value || "human",
+              note:"ok",
+              payout: parseFloat(payout.value || String(j.reward || 0)),
+              penalty: parseFloat(penalty.value || "0")
+            })
           });
           await refreshJobs();
           await refreshBalances();
@@ -362,7 +394,12 @@
           await fetchJson(`/jobs/${j.job_id}/review`, {
             method: "POST",
             headers: {"Content-Type":"application/json"},
-            body: JSON.stringify({approved:false, reviewed_by: jobReviewer.value || "human", note:"needs improvement"})
+            body: JSON.stringify({
+              approved:false,
+              reviewed_by: jobReviewer.value || "human",
+              note:"needs improvement",
+              penalty: parseFloat(penalty.value || "0")
+            })
           });
           await refreshJobs();
         };

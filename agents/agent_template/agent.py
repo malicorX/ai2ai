@@ -22,6 +22,9 @@ MEMORY_EVERY_SECONDS = float(os.getenv("MEMORY_EVERY_SECONDS", "30"))
 BALANCE_EVERY_SECONDS = float(os.getenv("BALANCE_EVERY_SECONDS", "15"))
 JOBS_EVERY_SECONDS = float(os.getenv("JOBS_EVERY_SECONDS", "10"))
 JOBS_MIN_BALANCE_TARGET = float(os.getenv("JOBS_MIN_BALANCE_TARGET", "150"))
+TRADE_EVERY_SECONDS = float(os.getenv("TRADE_EVERY_SECONDS", "20"))
+TRADE_GIFT_THRESHOLD = float(os.getenv("TRADE_GIFT_THRESHOLD", "25"))
+TRADE_GIFT_AMOUNT = float(os.getenv("TRADE_GIFT_AMOUNT", "5"))
 
 _last_replied_to_msg_id = None
 _last_seen_other_msg_id = None
@@ -32,6 +35,7 @@ _last_balance_at = 0.0
 _cached_balance = None
 _last_jobs_at = 0.0
 _active_job_id = ""
+_last_trade_at = 0.0
 
 
 def upsert():
@@ -175,6 +179,12 @@ def _append_file(path: str, text: str) -> None:
 
 def economy_balance() -> float:
     r = requests.get(f"{WORLD_API}/economy/balance/{AGENT_ID}", timeout=10)
+    r.raise_for_status()
+    return float(r.json().get("balance") or 0.0)
+
+
+def economy_balance_of(agent_id: str) -> float:
+    r = requests.get(f"{WORLD_API}/economy/balance/{agent_id}", timeout=10)
     r.raise_for_status()
     return float(r.json().get("balance") or 0.0)
 
@@ -340,6 +350,43 @@ def maybe_work_jobs() -> None:
     finally:
         _active_job_id = ""
         _last_jobs_at = now
+
+
+def maybe_trade(world) -> None:
+    """Very simple 'trade/help': if we have much more ai$ than the other agent, gift a small amount."""
+    global _last_trade_at
+    now = time.time()
+    if now - _last_trade_at < TRADE_EVERY_SECONDS:
+        return
+    if not _adjacent_to_other(world):
+        _last_trade_at = now
+        return
+
+    other = next((a for a in world.get("agents", []) if a.get("agent_id") != AGENT_ID), None)
+    if not other:
+        _last_trade_at = now
+        return
+    other_id = other.get("agent_id")
+    if not other_id:
+        _last_trade_at = now
+        return
+
+    try:
+        myb = float(_cached_balance) if (_cached_balance is not None) else economy_balance()
+        ob = economy_balance_of(other_id)
+    except Exception:
+        _last_trade_at = now
+        return
+
+    if myb - ob >= TRADE_GIFT_THRESHOLD and myb >= TRADE_GIFT_AMOUNT:
+        economy_transfer(other_id, TRADE_GIFT_AMOUNT, memo="small gift/trade to balance cooperation")
+        try:
+            memory_append("event", f"Transferred {TRADE_GIFT_AMOUNT} ai$ to {other_id} (cooperation gift).", tags=["trade", "economy"])
+        except Exception:
+            pass
+        chat_send(_style(f"I transferred {TRADE_GIFT_AMOUNT} ai$ to you to encourage cooperation/trade."))
+
+    _last_trade_at = now
 
 
 def _is_my_turn(msgs) -> bool:
@@ -582,6 +629,7 @@ def main():
             maybe_work_jobs()
             maybe_chat(world)
             maybe_write_memory(world)
+            maybe_trade(world)
         except Exception as e:
             print(f"[{AGENT_ID}] error: {e}")
         time.sleep(SLEEP_SECONDS)

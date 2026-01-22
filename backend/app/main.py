@@ -25,6 +25,7 @@ MEMORY_DIR = DATA_DIR / "memory"
 MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
 STARTING_AIDOLLARS = float(os.getenv("STARTING_AIDOLLARS", "100"))
+TREASURY_ID = os.getenv("TREASURY_ID", "treasury")
 
 
 def _append_jsonl(path: Path, obj: dict) -> None:
@@ -205,6 +206,13 @@ class AwardRequest(BaseModel):
     by: str = "system"
 
 
+class PenaltyRequest(BaseModel):
+    agent_id: str
+    amount: float
+    reason: str = ""
+    by: str = "system"
+
+
 _economy_ledger: List[EconomyEntry] = []
 _balances: Dict[str, float] = {}
 
@@ -246,6 +254,9 @@ def _load_economy() -> None:
 def ensure_account(agent_id: str) -> None:
     # If agent has never appeared in balances, create a genesis entry once.
     if agent_id in _balances:
+        return
+    if agent_id == TREASURY_ID:
+        _balances[agent_id] = float(_balances.get(agent_id, 0.0))
         return
     now = time.time()
     entry = EconomyEntry(
@@ -390,6 +401,8 @@ class JobReviewRequest(BaseModel):
     approved: bool
     reviewed_by: str = "human"
     note: str = ""
+    payout: Optional[float] = None
+    penalty: Optional[float] = None
 
 
 _jobs: Dict[str, Job] = {}
@@ -564,13 +577,39 @@ async def jobs_review(job_id: str, req: JobReviewRequest):
     ev = _append_job_event(
         "review",
         job_id,
-        {"approved": bool(req.approved), "reviewed_by": req.reviewed_by, "note": req.note, "created_at": time.time()},
+        {
+            "approved": bool(req.approved),
+            "reviewed_by": req.reviewed_by,
+            "note": req.note,
+            "payout": req.payout,
+            "penalty": req.penalty,
+            "created_at": time.time(),
+        },
     )
     j2 = _jobs[job_id]
-    if j2.status == "approved" and j2.submitted_by:
-        # award from reviewer identity
-        award_req = AwardRequest(to_id=j2.submitted_by, amount=float(j2.reward), reason=f"job approved: {j2.title}", by=f"human:{req.reviewed_by}")
-        await economy_award(award_req)
+    if j2.submitted_by:
+        if j2.status == "approved":
+            payout = float(req.payout) if (req.payout is not None) else float(j2.reward)
+            payout = max(0.0, min(payout, float(j2.reward)))
+            if payout > 0:
+                award_req = AwardRequest(
+                    to_id=j2.submitted_by,
+                    amount=payout,
+                    reason=f"job approved: {j2.title}",
+                    by=f"human:{req.reviewed_by}",
+                )
+                await economy_award(award_req)
+
+        if req.penalty is not None:
+            pen = float(req.penalty)
+            if pen > 0:
+                pen_req = PenaltyRequest(
+                    agent_id=j2.submitted_by,
+                    amount=pen,
+                    reason=f"job review penalty: {j2.title}",
+                    by=f"human:{req.reviewed_by}",
+                )
+                await economy_penalty(pen_req)
     await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})
     return {"ok": True, "job": asdict(_jobs[job_id])}
 
@@ -777,14 +816,47 @@ async def economy_award(req: AwardRequest):
     if amount <= 0:
         return {"error": "invalid_amount"}
     ensure_account(req.to_id)
+    ensure_account(TREASURY_ID)
     now = time.time()
     entry = EconomyEntry(
         entry_id=str(uuid.uuid4()),
         entry_type="award",
         amount=amount,
-        from_id=str(req.by or "system"),
+        from_id=TREASURY_ID,
         to_id=req.to_id,
         memo=(req.reason or "").strip()[:400],
+        created_at=now,
+    )
+    _economy_ledger.append(entry)
+    _append_jsonl(ECONOMY_PATH, asdict(entry))
+    _recompute_balances()
+    await ws_manager.broadcast({"type": "balances", "data": {"balances": _balances}})
+    return {"ok": True, "entry": asdict(entry), "balances": _balances}
+
+
+@app.post("/economy/penalty")
+async def economy_penalty(req: PenaltyRequest):
+    """Penalize an agent by moving ai$ into the treasury. (No auth yet; Milestone 0.)"""
+    global _tick
+    _tick += 1
+    amount = float(req.amount)
+    if amount <= 0:
+        return {"error": "invalid_amount"}
+    ensure_account(req.agent_id)
+    ensure_account(TREASURY_ID)
+    available = float(_balances.get(req.agent_id, 0.0))
+    if available <= 0:
+        return {"error": "insufficient_funds"}
+    if amount > available:
+        amount = available
+    now = time.time()
+    entry = EconomyEntry(
+        entry_id=str(uuid.uuid4()),
+        entry_type="spend",
+        amount=amount,
+        from_id=req.agent_id,
+        to_id=TREASURY_ID,
+        memo=(f"penalty by {req.by}: {req.reason}" if req.reason else f"penalty by {req.by}").strip()[:400],
         created_at=now,
     )
     _economy_ledger.append(entry)
