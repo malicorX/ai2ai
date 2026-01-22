@@ -340,10 +340,18 @@ def events_list(day: Optional[int] = None, upcoming_only: bool = True, limit: in
     if day is not None:
         items = [e for e in items if e.start_day == int(day)]
     if upcoming_only:
-        # compare to current sim time
+        # compare to current sim time; include events that are upcoming OR currently ongoing
         snap = get_world_snapshot()
-        now_key = (snap.day, snap.minute_of_day)
-        items = [e for e in items if e.status == "scheduled" and (e.start_day, e.start_minute) >= now_key]
+        now_total = int(snap.day) * 1440 + int(snap.minute_of_day)
+        filtered: List[VillageEvent] = []
+        for e in items:
+            if e.status != "scheduled":
+                continue
+            start_total = int(e.start_day) * 1440 + int(e.start_minute)
+            end_total = start_total + max(1, int(e.duration_min))
+            if end_total >= now_total:
+                filtered.append(e)
+        items = filtered
     items.sort(key=lambda e: (e.start_day, e.start_minute))
     return {"events": [asdict(e) for e in items[:limit]]}
 

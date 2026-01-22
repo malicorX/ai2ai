@@ -689,6 +689,67 @@ def maybe_social_events(world) -> None:
         trace_event("error", f"event proposal failed: {e}", {})
 
 
+def _total_minutes(day: int, minute_of_day: int) -> int:
+    return int(day) * 1440 + int(minute_of_day)
+
+
+def maybe_attend_events(world) -> bool:
+    """
+    If we RSVP'd yes to an event, attend it:
+    - start traveling shortly before start
+    - stay during the event window
+    Returns True if we are currently attending / traveling to an event (and thus should skip other actions).
+    """
+    try:
+        day, minute_of_day = world_time(world)
+        now = _total_minutes(day, minute_of_day)
+        evs = events_list(upcoming_only=False, limit=30)
+        attending = None
+        for e in evs:
+            if (e.get("status") or "") != "scheduled":
+                continue
+            rsvps = e.get("rsvps") or {}
+            if rsvps.get(AGENT_ID) != "yes":
+                continue
+            sd = int(e.get("start_day") or 0)
+            sm = int(e.get("start_minute") or 0)
+            start = _total_minutes(sd, sm)
+            dur = max(1, int(e.get("duration_min") or 60))
+            end = start + dur
+
+            # begin traveling 15 minutes before start
+            if now >= (start - 15) and now <= end:
+                attending = e
+                break
+
+        if not attending:
+            return False
+
+        loc = str(attending.get("location_id") or "cafe")
+        lm = _get_landmark(world, loc)
+        if not lm:
+            return False
+
+        tx, ty = int(lm.get("x", 0)), int(lm.get("y", 0))
+        me = next((a for a in world.get("agents", []) if a.get("agent_id") == AGENT_ID), None)
+        if not me:
+            return False
+
+        ax, ay = int(me.get("x", 0)), int(me.get("y", 0))
+        title = str(attending.get("title") or "event")[:120]
+
+        if _chebyshev(ax, ay, tx, ty) > 1:
+            trace_event("action", "traveling to event", {"event_id": attending.get("event_id"), "title": title, "to": loc})
+            _move_towards(world, tx, ty)
+            return True
+
+        # we're at the venue
+        trace_event("status", "attending event", {"event_id": attending.get("event_id"), "title": title, "where": loc})
+        return True
+    except Exception:
+        return False
+
+
 def _do_job(job: dict) -> str:
     """
     Minimal safe executor: produce a deliverable file in workspace and return a submission string.
@@ -1324,6 +1385,10 @@ def main():
             maybe_plan_new_day(world)
             # live in the world (schedule-following navigation/activity)
             perform_scheduled_life_step(world)
+            # Events override other actions while in the attendance window
+            if maybe_attend_events(world):
+                time.sleep(SLEEP_SECONDS)
+                continue
             maybe_social_events(world)
             # Free movement is driven by the schedule; do not force-walk to computer every tick.
             maybe_update_balance()
