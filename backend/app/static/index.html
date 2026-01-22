@@ -621,7 +621,8 @@
 
     async function refreshEvents() {
       try {
-        const data = await fetchJson("/events?upcoming_only=true&limit=50");
+        // Show all scheduled events (including ones that just happened) since sim time moves fast.
+        const data = await fetchJson("/events?upcoming_only=false&limit=50");
         const evs = data.events || [];
         eventsList.innerHTML = "";
         for (const e of evs) eventsList.appendChild(renderEvent(e));

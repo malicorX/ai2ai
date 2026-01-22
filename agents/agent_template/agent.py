@@ -615,9 +615,9 @@ def maybe_social_events(world) -> None:
     if not other_id:
         return
 
-    # Check for invitations to us and RSVP "maybe" or "yes"
+    # Check for invitations to us and RSVP yes when the event is still upcoming.
     try:
-        evs = events_list(upcoming_only=True, limit=20)
+        evs = events_list(upcoming_only=False, limit=30)
         for e in evs:
             invites = e.get("invites") or []
             for inv in invites:
@@ -625,14 +625,16 @@ def maybe_social_events(world) -> None:
                     # If we haven't RSVP'd, respond
                     rsvps = e.get("rsvps") or {}
                     if AGENT_ID not in rsvps:
-                        event_rsvp(e.get("event_id"), "yes", note="I'll attend.")
-                        trace_event("action", "RSVP yes", {"event_id": e.get("event_id"), "title": e.get("title")})
-                        # Insert attendance into schedule
-                        global _daily_plan
-                        if _daily_plan:
-                            _daily_plan.items.append(
-                                PlanItem(minute=int(e.get("start_minute") or 0), place_id=str(e.get("location_id") or "cafe"), activity=f"attend event: {e.get('title')}")
-                            )
+                        # Only RSVP if it's in the future (based on current sim clock)
+                        sd = int(e.get("start_day") or 0)
+                        sm = int(e.get("start_minute") or 0)
+                        if (sd, sm) >= (day, minute_of_day):
+                            event_rsvp(e.get("event_id"), "yes", note="I'll attend.")
+                            trace_event("action", "RSVP yes", {"event_id": e.get("event_id"), "title": e.get("title")})
+                            if _daily_plan:
+                                _daily_plan.items.append(
+                                    PlanItem(minute=sm, place_id=str(e.get("location_id") or "cafe"), activity=f"attend event: {e.get('title')}")
+                                )
                     break
     except Exception:
         pass
@@ -646,7 +648,7 @@ def maybe_social_events(world) -> None:
         "Return STRICT JSON: {\"title\":..., \"description\":..., \"location_id\":..., \"start_in_min\":..., \"duration_min\":..., \"invite_message\":...}\n"
         "Constraints:\n"
         "- location_id must be one of: cafe, market\n"
-        "- start_in_min between 30 and 240\n"
+        "- start_in_min between 120 and 600\n"
         "- duration_min between 30 and 120\n"
     )
     user = (
@@ -672,9 +674,12 @@ def maybe_social_events(world) -> None:
         msg = str(obj.get("invite_message") or "Want to join?").strip()[:200]
         if loc not in ("cafe", "market"):
             loc = "cafe"
-        start_in = max(30, min(start_in, 240))
+        start_in = max(120, min(start_in, 600))
         dur = max(30, min(dur, 120))
-        eid = event_create(title, desc, loc, day, (minute_of_day + start_in) % 1440, dur)
+        start_total = int(minute_of_day) + int(start_in)
+        sd = int(day) + (start_total // 1440)
+        sm = start_total % 1440
+        eid = event_create(title, desc, loc, sd, sm, dur)
         if eid:
             event_invite(eid, other_id, msg)
             trace_event("action", "created event + invited", {"event_id": eid, "to": other_id, "title": title})
