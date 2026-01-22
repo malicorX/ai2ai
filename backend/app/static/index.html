@@ -114,6 +114,9 @@
 
     const tile = 20;
     const worldPx = 32 * tile;
+    const trails = {}; // agent_id -> [{x,y,ts}]
+    const lastIntent = {}; // agent_id -> string (latest trace summary)
+    const TRAIL_MAX = 80;
 
     function log(msg) {
       const line = document.createElement("div");
@@ -153,6 +156,37 @@
       }
     }
 
+    function pushTrail(a) {
+      const id = a.agent_id;
+      if (!id) return;
+      const arr = trails[id] || [];
+      const last = arr.length ? arr[arr.length - 1] : null;
+      const x = a.x, y = a.y;
+      if (!last || last.x !== x || last.y !== y) {
+        arr.push({x, y, ts: Date.now()});
+        while (arr.length > TRAIL_MAX) arr.shift();
+        trails[id] = arr;
+      }
+    }
+
+    function drawTrails(agents) {
+      for (const a of (agents || [])) {
+        const id = a.agent_id;
+        const arr = trails[id] || [];
+        if (arr.length < 2) continue;
+        ctx.strokeStyle = "rgba(0,0,0,0.20)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (let i = 0; i < arr.length; i++) {
+          const px = arr[i].x * tile + tile / 2;
+          const py = arr[i].y * tile + tile / 2;
+          if (i === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        }
+        ctx.stroke();
+      }
+    }
+
     function drawAgents(agents) {
       const colors = ["#d32f2f", "#1976d2", "#388e3c", "#f57c00", "#7b1fa2", "#00838f"];
       let i = 0;
@@ -162,6 +196,20 @@
         ctx.fillStyle = "#000";
         ctx.font = "10px Arial";
         ctx.fillText(a.display_name || a.agent_id, a.x * tile + 2, a.y * tile - 2);
+
+        // Intent overlay (latest trace summary)
+        const intent = lastIntent[a.agent_id] || "";
+        if (intent) {
+          ctx.font = "9px Arial";
+          ctx.fillStyle = "rgba(255,255,255,0.9)";
+          const txt = intent.length > 44 ? intent.slice(0, 44) + "…" : intent;
+          const w = ctx.measureText(txt).width;
+          const bx = a.x * tile;
+          const by = a.y * tile - 22;
+          ctx.fillRect(bx, by, Math.min(200, w + 6), 14);
+          ctx.fillStyle = "#111";
+          ctx.fillText(txt, bx + 3, by + 11);
+        }
       }
     }
 
@@ -500,7 +548,9 @@
           const msg = JSON.parse(ev.data);
           if (msg.type === "world_state") {
             const data = msg.data;
+            for (const a of (data.agents || [])) pushTrail(a);
             drawGrid();
+            drawTrails(data.agents);
             drawLandmarks(data.landmarks);
             drawAgents(data.agents);
             worldStatus.textContent = "tick=" + data.tick + " agents=" + (data.agents || []).length;
@@ -523,6 +573,9 @@
             const e = msg.data;
             const ts = new Date((e.created_at || Date.now()/1000) * 1000).toLocaleTimeString();
             trace(`[${ts}] ${e.agent_name} ${e.kind}: ${e.summary}`);
+            if (e && e.agent_id && e.summary) {
+              lastIntent[e.agent_id] = `${e.kind}: ${e.summary}`;
+            }
           }
         } catch (e) {}
       };

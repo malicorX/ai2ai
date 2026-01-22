@@ -18,6 +18,7 @@ PERSONA_FILE = os.getenv("PERSONA_FILE", "").strip()
 PERSONALITY = os.getenv("PERSONALITY", "").strip()  # optional fallback
 WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "/app/workspace").strip()
 COMPUTER_LANDMARK_ID = os.getenv("COMPUTER_LANDMARK_ID", "computer").strip()
+COMPUTER_ACCESS_RADIUS = int(os.getenv("COMPUTER_ACCESS_RADIUS", "1"))
 SLEEP_SECONDS = float(os.getenv("AGENT_TICK_SECONDS", "3"))
 # Chat behavior (agents talk to each other via /chat, NOT the bulletin board)
 CHAT_PROBABILITY = float(os.getenv("CHAT_PROBABILITY", "0.6"))
@@ -735,7 +736,7 @@ def maybe_chat(world):
         return
 
     # Gate "computer work" (LLM/tool usage) behind the computer_access spot.
-    if not _at_landmark(world, COMPUTER_LANDMARK_ID, radius=0):
+    if not _at_landmark(world, COMPUTER_LANDMARK_ID, radius=COMPUTER_ACCESS_RADIUS):
         lm = _get_landmark(world, COMPUTER_LANDMARK_ID)
         if lm:
             trace_event("action", f"walking to {COMPUTER_LANDMARK_ID} before computer work", {"target": COMPUTER_LANDMARK_ID})
@@ -914,7 +915,7 @@ def main():
             upsert()
             world = get_world()
             # Navigation test: default behavior is to walk to the computer access spot before doing tool-heavy work.
-            if not _at_landmark(world, COMPUTER_LANDMARK_ID, radius=0):
+            if not _at_landmark(world, COMPUTER_LANDMARK_ID, radius=COMPUTER_ACCESS_RADIUS):
                 lm = _get_landmark(world, COMPUTER_LANDMARK_ID)
                 if lm:
                     trace_event("status", f"seeking {COMPUTER_LANDMARK_ID}", {"target": COMPUTER_LANDMARK_ID})

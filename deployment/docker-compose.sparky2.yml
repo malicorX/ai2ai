@@ -25,6 +25,7 @@ services:
       - RANDOM_MOVE_PROB=0.05
       - TOPIC_MIN_SECONDS=180
       - WORKSPACE_DIR=/app/workspace
+      - COMPUTER_ACCESS_RADIUS=1
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
