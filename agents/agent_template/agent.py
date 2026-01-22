@@ -606,8 +606,8 @@ def maybe_social_events(world) -> None:
     if not USE_LANGGRAPH:
         return
     day, minute_of_day = world_time(world)
-    # Only do this while at cafe/market (social hubs) and at computer (tool gating)
-    if not _at_landmark(world, COMPUTER_LANDMARK_ID, radius=COMPUTER_ACCESS_RADIUS):
+    # Only do this while at social hubs (cafe/market); events spread by encounters.
+    if not (_at_landmark(world, "cafe", radius=1) or _at_landmark(world, "market", radius=1)):
         return
     # Identify other agent
     other = next((a for a in world.get("agents", []) if a.get("agent_id") != AGENT_ID), None)
@@ -1130,13 +1130,7 @@ def maybe_chat(world):
     if not _adjacent_to_other(world):
         return
 
-    # Gate "computer work" (LLM/tool usage) behind the computer_access spot.
-    if not _at_landmark(world, COMPUTER_LANDMARK_ID, radius=COMPUTER_ACCESS_RADIUS):
-        lm = _get_landmark(world, COMPUTER_LANDMARK_ID)
-        if lm:
-            trace_event("action", f"walking to {COMPUTER_LANDMARK_ID} before computer work", {"target": COMPUTER_LANDMARK_ID})
-            _move_towards(world, int(lm.get("x", 0)), int(lm.get("y", 0)))
-        return
+    # Chat is part of life; do NOT gate it behind the computer location.
 
     topic = ""
     try:
