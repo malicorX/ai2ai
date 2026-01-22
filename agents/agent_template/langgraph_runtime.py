@@ -37,6 +37,8 @@ def llm_chat(
     extra_system: Optional[List[str]] = None,
 ) -> str:
     llm = build_llm()
+    if not max_tokens or max_tokens <= 0:
+        max_tokens = int(os.getenv("LLM_MAX_TOKENS", "400"))
     msgs: List[Any] = [SystemMessage(content=system)]
     for s in (extra_system or []):
         if s.strip():

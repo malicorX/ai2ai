@@ -745,13 +745,34 @@ def maybe_chat(world):
         return
 
     # Otherwise, start/continue conversation with an opener.
-    openers = [
-        "Let's ground this: I'll write a short artifact in my workspace for this topic and summarize it here.",
-        "Propose one experiment + one metric we'll use to judge success.",
-        "Pick one constraint to add (rate-limit, anti-repeat, retrieval trigger) and justify it.",
-    ]
     tprefix = f"[topic: {topic}] " if topic else ""
-    msg = (_style(tprefix + random.choice(openers)))[:600]
+    if USE_LANGGRAPH:
+        persona = (PERSONALITY or "").strip()
+        bal = _cached_balance
+        sys = (
+            "You are an autonomous agent in a 2D world.\n"
+            "You are about to start/advance a conversation with another agent.\n"
+            "Rules:\n"
+            "- Maximize quality; speed is not important.\n"
+            "- Be concrete and non-repetitive.\n"
+            "- Prefer proposing a job-like next action with acceptance criteria.\n"
+            "- You care about earning ai$ ethically via Jobs; real money transfers are always human-approved.\n"
+        )
+        user = (
+            f"Persona:\n{persona}\n\n"
+            f"State:\n- agent_id={AGENT_ID}\n- display_name={DISPLAY_NAME}\n- balance={bal}\n- topic={topic}\n\n"
+            "Write ONE opener message that moves the work forward."
+        )
+        raw = llm_chat(sys, user, max_tokens=220)
+        msg = (_style(tprefix + raw))[:600]
+    else:
+        openers = [
+            "Let's ground this: I'll write a short artifact in my workspace for this topic and summarize it here.",
+            "Propose one experiment + one metric we'll use to judge success.",
+            "Pick one constraint to add (rate-limit, anti-repeat, retrieval trigger) and justify it.",
+        ]
+        msg = (_style(tprefix + random.choice(openers)))[:600]
+
     if not _too_similar_to_recent(msg):
         chat_send(msg)
         _remember_sent(msg)
