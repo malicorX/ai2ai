@@ -11,10 +11,11 @@ services:
       - AGENT_TICK_SECONDS=2
       - DISPLAY_NAME=Tina
       - PERSONA_FILE=/app/personalities/tina.txt
-      - CHAT_PROBABILITY=0.6
-      - CHAT_MIN_SECONDS=6
+      - CHAT_PROBABILITY=0.45
+      - CHAT_MIN_SECONDS=12
       - ADJACENT_CHAT_BOOST=3.0
       - RANDOM_MOVE_PROB=0.05
+      - TOPIC_MIN_SECONDS=180
     volumes:
       - ../agents/personalities:/app/personalities:ro
       - ../agents/workspaces/agent_2:/app/workspace

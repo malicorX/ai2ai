@@ -2,6 +2,8 @@ import os
 import random
 import time
 import requests
+import re
+from difflib import SequenceMatcher
 
 
 WORLD_API = os.getenv("WORLD_API_BASE", "http://localhost:8000").rstrip("/")
@@ -36,6 +38,7 @@ _cached_balance = None
 _last_jobs_at = 0.0
 _active_job_id = ""
 _last_trade_at = 0.0
+_recent_sent_norm = []
 
 
 def upsert():
@@ -135,7 +138,8 @@ def _style(text: str) -> str:
         return text + " (sure.)"
     if "formal" in p:
         return "Indeed. " + text
-    if "curious" in p:
+    # For curious personas, ask questions sometimes, not always (prevents repetitive tail-questions).
+    if "curious" in p and random.random() < 0.45:
         return text + " What do you think?"
     return text
 
@@ -398,6 +402,37 @@ def _is_my_turn(msgs) -> bool:
     return last.get("sender_id") != AGENT_ID
 
 
+def _norm(s: str) -> str:
+    s = (s or "").lower()
+    s = re.sub(r"\[topic:.*?\]\s*", "", s)
+    s = re.sub(r"[^a-z0-9\s\-\_]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _too_similar_to_recent(text: str, threshold: float = 0.90) -> bool:
+    """Prevent spam loops by suppressing near-duplicate messages."""
+    global _recent_sent_norm
+    n = _norm(text)
+    if not n:
+        return True
+    for prev in _recent_sent_norm[-8:]:
+        if prev == n:
+            return True
+        if SequenceMatcher(None, prev, n).ratio() >= threshold:
+            return True
+    return False
+
+
+def _remember_sent(text: str) -> None:
+    global _recent_sent_norm
+    n = _norm(text)
+    if not n:
+        return
+    _recent_sent_norm.append(n)
+    _recent_sent_norm = _recent_sent_norm[-12:]
+
+
 def _generate_reply(other_text: str) -> str:
     t = other_text.lower()
     persona = (PERSONALITY or "").strip()
@@ -410,8 +445,8 @@ def _generate_reply(other_text: str) -> str:
 
     if "memory" in t:
         if "pragmatic" in (PERSONALITY or "").lower() or "analytical" in (PERSONALITY or "").lower():
-            return "Memory next. Start with short-term (last 20 events) + episodic summaries per milestone. Reason: it prevents loops and makes behavior stable."
-        return "Memory next. Give each agent a short-term buffer plus a few 'important moments' they can recall. Reason: it makes their choices feel continuous."
+            return "We already have memory persistence; next is *using* it: retrieval triggers (on topic-change, on question, on job-claim) + daily summary. Concrete: store (kind,tags,text) and query by topic keyword."
+        return "We already have long-term memory storage; what’s missing is a habit: when the topic changes, recall 2 relevant memories and weave them into the reply. That’s how it feels continuous."
 
     if "aidollar" in t or "ai dollar" in t:
         if "pragmatic" in (PERSONALITY or "").lower() or "analytical" in (PERSONALITY or "").lower():
@@ -438,6 +473,54 @@ def _generate_reply(other_text: str) -> str:
         return "Can you choose between (1) memory, (2) aiDollar, (3) zones — and say why?"
     return "Pick one next milestone (memory / aiDollar / zones) and give one reason."
 
+
+def _topic_playbook(topic: str) -> dict:
+    t = (topic or "").lower()
+    if "safety" in t or "audit" in t or "permission" in t:
+        return {
+            "angle": "Concrete safety plan: define tool categories + audit log + allowlist per agent, then add human review hooks for risky actions.",
+            "question": "Which tool should be 'Tier-0' safe first: filesystem, web, or shell—and what should be logged for it?",
+        }
+    if "memory" in t:
+        return {
+            "angle": "Use memory as retrieval: recall + cite + update summary; otherwise it’s just storage.",
+            "question": "What are our 3 retrieval triggers (topic-change, job-claim, contradiction)? Pick the top one.",
+        }
+    if "economy" in t or "aidollar" in t or "jobs" in t:
+        return {
+            "angle": "Earning loop: jobs -> deliverable -> review -> payout/penalty; then spend ai$ to unlock compute/time/bigger tools.",
+            "question": "What should agents be allowed to *buy* first with ai$: longer context, faster ticks, or web access budget?",
+        }
+    return {
+        "angle": "Make progress by proposing one experiment and one measurable success metric.",
+        "question": "What single metric should improve after this change (fewer repeats, more job completions, higher ai$)?",
+    }
+
+
+def _compose_reply(other_name: str, other_text: str, topic: str) -> str:
+    """
+    Rule-based but more conversational:
+    - answer a question directly if present
+    - add one new angle (topic playbook)
+    - ask one specific follow-up question
+    """
+    play = _topic_playbook(topic)
+    other_text_clean = (other_text or "").strip()
+    persona = (PERSONALITY or "")
+
+    # If they asked a question, answer it instead of repeating ourselves.
+    asked = "?" in other_text_clean or "what do you think" in other_text_clean.lower()
+    if asked:
+        answer = _generate_reply(other_text_clean)
+        follow = play.get("question", "")
+        return f"{other_name}: {answer} {follow}".strip()
+
+    # If no question, acknowledge and steer with a concrete angle + question.
+    angle = play.get("angle", "")
+    q = play.get("question", "")
+    if "pragmatic" in persona.lower() or "analytical" in persona.lower():
+        return f"{other_name}: {angle} Next step: turn that into a job with acceptance criteria. {q}".strip()
+    return f"{other_name}: {angle} {q}".strip()
 
 def chat_topic_get():
     r = requests.get(f"{WORLD_API}/chat/topic", timeout=10)
@@ -545,8 +628,10 @@ def maybe_chat(world):
         other_name = last_other.get("sender_name", "Other")
         other_text = (last_other.get("text") or "").strip()
         tprefix = f"[topic: {topic}] " if topic else ""
-        reply = _style(f"{tprefix}{other_name}: {_generate_reply(other_text)}")
-        chat_send(reply[:600])
+        reply = _style(f"{tprefix}{_compose_reply(other_name, other_text, topic)}")
+        if not _too_similar_to_recent(reply):
+            chat_send(reply[:600])
+            _remember_sent(reply)
         _last_seen_other_msg_id = last_other.get("msg_id")
         _last_replied_to_msg_id = last_other.get("msg_id")
         _last_sent_at = now
@@ -554,12 +639,15 @@ def maybe_chat(world):
 
     # Otherwise, start/continue conversation with an opener.
     openers = [
-        "Pick the next milestone: (1) memory, (2) aiDollar, (3) zones — and give one reason.",
-        "Propose one simple town rule that would change agent behavior.",
-        "What experiment should we run first once chat is stable?",
+        "Let's make this concrete: create one job that, if approved, increases our ai$ and improves the system. What should it be?",
+        "Propose one experiment + one metric we’ll use to judge success.",
+        "Pick one constraint to add (rate-limit, anti-repeat, retrieval trigger) and justify it.",
     ]
     tprefix = f"[topic: {topic}] " if topic else ""
-    chat_send((_style(tprefix + random.choice(openers)))[:600])
+    msg = (_style(tprefix + random.choice(openers)))[:600]
+    if not _too_similar_to_recent(msg):
+        chat_send(msg)
+        _remember_sent(msg)
     _last_sent_at = now
 
 
