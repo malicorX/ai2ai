@@ -10,7 +10,7 @@ services:
       - DATA_DIR=/app/data
       - STARTING_AIDOLLARS=100
       - EMBEDDINGS_BASE_URL=http://host.docker.internal:11434
-      - EMBEDDINGS_MODEL=llama3.1:8b
+      - EMBEDDINGS_MODEL=nomic-embed-text
       - EMBEDDINGS_TRUNCATE=256
       - EMBEDDINGS_TIMEOUT_SECONDS=30
     volumes:
