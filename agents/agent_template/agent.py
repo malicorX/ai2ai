@@ -28,6 +28,7 @@ _daily_plan = None
 _last_event_proposed_day = None  # legacy
 _last_event_proposed_at_total = None
 _last_day_llm_planned = None
+_last_event_nav_log_at_total = {}  # event_id -> last total minute we logged travel/attend
 
 
 class PlanItem(BaseModel):
@@ -725,7 +726,10 @@ def maybe_social_events(world) -> None:
     )
     try:
         raw = llm_chat(sys, user, max_tokens=220)
-        obj = json.loads(raw)
+        # LLMs sometimes wrap JSON in prose or code fences; extract the first JSON object.
+        m = re.search(r"\{[\s\S]*\}", raw)
+        json_text = m.group(0) if m else raw.strip()
+        obj = json.loads(json_text)
         title = str(obj.get("title") or "").strip()[:120]
         desc = str(obj.get("description") or "").strip()[:500]
         loc = str(obj.get("location_id") or "cafe").strip()
@@ -747,7 +751,24 @@ def maybe_social_events(world) -> None:
             _last_event_proposed_day = day
             _last_event_proposed_at_total = now_total
     except Exception as e:
-        trace_event("error", f"event proposal failed: {e}", {})
+        # Fallback: deterministic small event so the system keeps progressing.
+        title = "Quick Cafe Meetup"
+        desc = "Short meetup to sync on goals and next actions."
+        loc = "cafe"
+        start_in = 20
+        dur = 45
+        msg = "Meet at the cafe for a quick sync?"
+        start_total = int(minute_of_day) + int(start_in)
+        sd = int(day) + (start_total // 1440)
+        sm = start_total % 1440
+        eid = event_create(title, desc, loc, sd, sm, dur)
+        if eid:
+            event_invite(eid, other_id, msg)
+            trace_event("action", "created event + invited (fallback)", {"event_id": eid, "to": other_id, "title": title, "err": str(e)})
+            _last_event_proposed_day = day
+            _last_event_proposed_at_total = now_total
+        else:
+            trace_event("error", f"event proposal failed: {e}", {})
 
 
 def _total_minutes(day: int, minute_of_day: int) -> int:
@@ -808,13 +829,21 @@ def maybe_attend_events(world) -> bool:
         ax, ay = int(me.get("x", 0)), int(me.get("y", 0))
         title = str(attending.get("title") or "event")[:120]
 
+        eid = str(attending.get("event_id") or "")
+        last_logged = int(_last_event_nav_log_at_total.get(eid, -10**9))
+        should_log = (now - last_logged) >= 10  # at most once per ~10 sim-minutes per event
+
         if _chebyshev(ax, ay, tx, ty) > 1:
-            trace_event("action", "traveling to event", {"event_id": attending.get("event_id"), "title": title, "to": loc})
+            if should_log:
+                _last_event_nav_log_at_total[eid] = now
+                trace_event("action", "traveling to event", {"event_id": eid, "title": title, "to": loc})
             _move_towards(world, tx, ty)
             return True
 
         # we're at the venue
-        trace_event("status", "attending event", {"event_id": attending.get("event_id"), "title": title, "where": loc})
+        if should_log:
+            _last_event_nav_log_at_total[eid] = now
+            trace_event("status", "attending event", {"event_id": eid, "title": title, "where": loc})
         return True
     except Exception:
         return False
