@@ -72,6 +72,27 @@ def _default_plan() -> DailyPlan:
     )
 
 
+def _default_plan_from_now(minute_of_day: int) -> DailyPlan:
+    """
+    When the sim restarts mid-day, a fixed "morning" plan makes agents sit at home forever.
+    This creates a short plan starting near 'now' so life (movement + social) resumes quickly.
+    """
+    now = int(minute_of_day)
+    def m(off: int) -> int:
+        return min(1439, now + off)
+
+    return DailyPlan(
+        items=[
+            PlanItem(minute=m(0), place_id=HOME_LANDMARK_ID, activity="reset: orient myself"),
+            PlanItem(minute=m(10), place_id="computer", activity="check messages/jobs; plan next steps"),
+            PlanItem(minute=m(40), place_id="cafe", activity="snack + casual chat"),
+            PlanItem(minute=m(80), place_id="market", activity="stroll + observe"),
+            PlanItem(minute=m(110), place_id="cafe", activity="social: gossip, invitations"),
+            PlanItem(minute=m(150), place_id="computer", activity="wrap up; reflect"),
+            PlanItem(minute=m(220), place_id=HOME_LANDMARK_ID, activity="rest"),
+        ]
+    )
+
 def plan_day_with_llm(world) -> DailyPlan:
     persona = (PERSONALITY or "").strip()
     day, minute_of_day = world_time(world)
@@ -116,7 +137,8 @@ def maybe_plan_new_day(world) -> None:
 
     # Ensure we always have *some* plan so agents actually move and live.
     if (_last_day_planned != day) or (not _daily_plan):
-        _daily_plan = _default_plan()
+        _, minute_of_day = world_time(world)
+        _daily_plan = _default_plan_from_now(minute_of_day)
         _last_day_planned = day
         trace_event("status", "daily schedule (default) ready", {"items": [it.model_dump() for it in _daily_plan.items]})
 
