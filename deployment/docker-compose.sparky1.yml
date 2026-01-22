@@ -27,6 +27,7 @@ services:
       - ADJACENT_CHAT_BOOST=3.0
       - RANDOM_MOVE_PROB=0.05
       - TOPIC_MIN_SECONDS=180
+      - WORKSPACE_DIR=/app/workspace
     volumes:
       - ../agents/personalities:/app/personalities:ro
       - ../agents/workspaces/agent_1:/app/workspace

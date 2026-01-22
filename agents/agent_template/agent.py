@@ -139,7 +139,7 @@ def _style(text: str) -> str:
     if "formal" in p:
         return "Indeed. " + text
     # For curious personas, ask questions sometimes, not always (prevents repetitive tail-questions).
-    if "curious" in p and random.random() < 0.45:
+    if "curious" in p and ("?" not in text) and random.random() < 0.35:
         return text + " What do you think?"
     return text
 
@@ -437,6 +437,17 @@ def _generate_reply(other_text: str) -> str:
     t = other_text.lower()
     persona = (PERSONALITY or "").strip()
 
+    # Answer common "choice" question explicitly (stops loops).
+    if ("buy" in t or "purchase" in t) and ("longer context" in t or "faster ticks" in t or "web access" in t):
+        if "pragmatic" in persona.lower() or "analytical" in persona.lower():
+            return "Buy order: (1) longer context (better decisions), (2) web access budget (new info), (3) faster ticks (only after quality is stable)."
+        return "Buy order: (1) web access budget (richer grounding), (2) longer context (continuity), (3) faster ticks (avoid rushing into loops)."
+
+    if "experiment" in t and ("metric" in t or "measure" in t or "judge" in t):
+        if "pragmatic" in persona.lower() or "analytical" in persona.lower():
+            return "Experiment: run 10 jobs with fixed rubric. Metric: approval rate + avg payout + duplicate-rate in chat. Success = higher approval, fewer repeats."
+        return "Experiment: ask humans to post 5 diverse jobs. Metric: human rating + how often agents ask clarifying questions before acting."
+
     # Economy framing: agents should explicitly care about ai$.
     if "aidollar" in t or "ai dollar" in t or "money" in t or "balance" in t:
         if "pragmatic" in persona.lower() or "analytical" in persona.lower():
@@ -461,7 +472,7 @@ def _generate_reply(other_text: str) -> str:
     if "interesting" in t or "experiment" in t:
         if "pragmatic" in (PERSONALITY or "").lower() or "analytical" in (PERSONALITY or "").lower():
             return "Experiment: give each agent a different objective and track outcomes + human votes. Reason: you get measurable behavior differences quickly."
-        return "Experiment: let agents 'adopt' a topic and build shared culture via chat. Reason: you’ll see personality divergence and social dynamics."
+        return "Experiment: let agents 'adopt' a topic and build shared culture via chat. Reason: you'll see personality divergence and social dynamics."
 
     if "next step" in t or "smallest" in t:
         if "pragmatic" in (PERSONALITY or "").lower() or "analytical" in (PERSONALITY or "").lower():
@@ -521,6 +532,46 @@ def _compose_reply(other_name: str, other_text: str, topic: str) -> str:
     if "pragmatic" in persona.lower() or "analytical" in persona.lower():
         return f"{other_name}: {angle} Next step: turn that into a job with acceptance criteria. {q}".strip()
     return f"{other_name}: {angle} {q}".strip()
+
+
+def _topic_slug(topic: str) -> str:
+    s = _norm(topic)[:80]
+    s = s.replace(" ", "_")
+    return s or "topic"
+
+
+def maybe_write_artifact(topic: str) -> str:
+    """
+    Create/update a small artifact in workspace so the conversation is grounded in something concrete.
+    Returns path (or "").
+    """
+    if not topic:
+        return ""
+    slug = _topic_slug(topic)
+    path = os.path.join(WORKSPACE_DIR, "artifacts", f"{slug}.md")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if os.path.exists(path) and os.path.getsize(path) > 50:
+        return path
+    persona = (PERSONALITY or "").strip()
+    bal = _cached_balance
+    body = []
+    body.append(f"# Artifact: {topic}")
+    body.append("")
+    body.append(f"- Agent: {DISPLAY_NAME} ({AGENT_ID})")
+    body.append(f"- Balance: {bal}")
+    body.append("")
+    body.append("## Position / proposal")
+    play = _topic_playbook(topic)
+    body.append(play.get("angle", ""))
+    body.append("")
+    body.append("## Next action as a Job")
+    body.append("- Title: (fill in)")
+    body.append("- Acceptance criteria: (fill in)")
+    body.append("")
+    body.append("## Persona excerpt")
+    body.append((persona[:600] + ("…" if len(persona) > 600 else "")).strip())
+    _append_file(path, "\n".join(body))
+    return path
 
 def chat_topic_get():
     r = requests.get(f"{WORLD_API}/chat/topic", timeout=10)
@@ -639,8 +690,8 @@ def maybe_chat(world):
 
     # Otherwise, start/continue conversation with an opener.
     openers = [
-        "Let's make this concrete: create one job that, if approved, increases our ai$ and improves the system. What should it be?",
-        "Propose one experiment + one metric we’ll use to judge success.",
+        "Let's ground this: I'll write a short artifact in my workspace for this topic and summarize it here.",
+        "Propose one experiment + one metric we'll use to judge success.",
         "Pick one constraint to add (rate-limit, anti-repeat, retrieval trigger) and justify it.",
     ]
     tprefix = f"[topic: {topic}] " if topic else ""
@@ -649,6 +700,18 @@ def maybe_chat(world):
         chat_send(msg)
         _remember_sent(msg)
     _last_sent_at = now
+
+    # If we just sent an opener, produce an artifact and announce it (once).
+    try:
+        ap = maybe_write_artifact(topic)
+        if ap:
+            note = _style(f"{tprefix}I wrote an artifact at `{ap}`. I'd like your critique: what should I change to make it job-ready?")
+            if not _too_similar_to_recent(note):
+                chat_send(note[:600])
+                _remember_sent(note)
+                _last_sent_at = time.time()
+    except Exception:
+        pass
 
 
 def maybe_update_balance() -> None:
