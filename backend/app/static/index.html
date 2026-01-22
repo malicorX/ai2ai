@@ -20,6 +20,21 @@
     .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eee; }
     .ok { background: #d4edda; }
     .bad { background: #f8d7da; }
+    #tooltip {
+      position: fixed;
+      display: none;
+      z-index: 9999;
+      max-width: 360px;
+      background: rgba(20, 20, 20, 0.92);
+      color: #fff;
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12px;
+      pointer-events: none;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.25);
+      white-space: pre-wrap;
+    }
   </style>
 </head>
 <body>
@@ -117,6 +132,12 @@
     const trails = {}; // agent_id -> [{x,y,ts}]
     const lastIntent = {}; // agent_id -> string (latest trace summary)
     const TRAIL_MAX = 80;
+    let latestBalances = {}; // agent_id -> number
+    let latestWorld = null; // last world_state payload
+    const tooltip = document.createElement("div");
+    tooltip.id = "tooltip";
+    document.body.appendChild(tooltip);
+    let lastHoverKey = "";
 
     function log(msg) {
       const line = document.createElement("div");
@@ -375,6 +396,7 @@
       try {
         const data = await fetchJson("/economy/balances");
         const b = data.balances || {};
+        latestBalances = b;
         const parts = Object.keys(b).sort().map(k => `${k}=${(b[k]||0).toFixed(1)} ai$`);
         balancesStatus.textContent = parts.length ? parts.join(" | ") : "(none)";
       } catch (e) {
@@ -525,6 +547,46 @@
     };
 
     // --- WebSocket world ---
+    function buildOccupancy(world) {
+      const occ = {}; // "x,y" -> {agents:[], landmarks:[]}
+      if (!world) return occ;
+      for (const lm of (world.landmarks || [])) {
+        const k = `${lm.x},${lm.y}`;
+        if (!occ[k]) occ[k] = {agents: [], landmarks: []};
+        occ[k].landmarks.push(lm);
+      }
+      for (const a of (world.agents || [])) {
+        const k = `${a.x},${a.y}`;
+        if (!occ[k]) occ[k] = {agents: [], landmarks: []};
+        occ[k].agents.push(a);
+      }
+      return occ;
+    }
+
+    function drawBadge(x, y, count) {
+      // small badge in top-right corner
+      const cx = x * tile + tile - 5;
+      const cy = y * tile + 5;
+      ctx.fillStyle = "rgba(0,0,0,0.65)";
+      ctx.beginPath();
+      ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#fff";
+      ctx.font = "9px Arial";
+      ctx.fillText(String(count), cx - 3, cy + 3);
+    }
+
+    function drawOverlaps(occ) {
+      for (const k of Object.keys(occ)) {
+        const parts = k.split(",");
+        const x = parseInt(parts[0], 10);
+        const y = parseInt(parts[1], 10);
+        const e = occ[k];
+        const total = (e.agents?.length || 0) + (e.landmarks?.length || 0);
+        if (total > 1) drawBadge(x, y, total);
+      }
+    }
+
     function connect() {
       log("[ws] connecting to " + BACKEND_WS);
       const ws = new WebSocket(BACKEND_WS);
@@ -548,11 +610,14 @@
           const msg = JSON.parse(ev.data);
           if (msg.type === "world_state") {
             const data = msg.data;
+            latestWorld = data;
             for (const a of (data.agents || [])) pushTrail(a);
             drawGrid();
+            const occ = buildOccupancy(data);
             drawTrails(data.agents);
             drawLandmarks(data.landmarks);
-            drawAgents(data.agents);
+            drawAgentsGrouped(data.agents, occ);
+            drawOverlaps(occ);
             worldStatus.textContent = "tick=" + data.tick + " agents=" + (data.agents || []).length;
           } else if (msg.type === "chat") {
             const c = msg.data;
@@ -564,6 +629,7 @@
           } else if (msg.type === "balances") {
             try {
               const b = (msg.data && msg.data.balances) ? msg.data.balances : {};
+              latestBalances = b;
               const parts = Object.keys(b).sort().map(k => `${k}=${(b[k]||0).toFixed(1)} ai$`);
               balancesStatus.textContent = parts.length ? parts.join(" | ") : "(none)";
             } catch (e) {}
@@ -582,6 +648,115 @@
     }
 
     connect();
+
+    function drawAgentsGrouped(agents, occ) {
+      // draw agents, splitting tiles when multiple agents share a tile
+      const colors = ["#d32f2f", "#1976d2", "#388e3c", "#f57c00", "#7b1fa2", "#00838f"];
+      const byTile = {};
+      for (const a of (agents || [])) {
+        const k = `${a.x},${a.y}`;
+        (byTile[k] = byTile[k] || []).push(a);
+      }
+
+      let colorIdx = 0;
+      for (const k of Object.keys(byTile)) {
+        const list = byTile[k];
+        const [xs, ys] = k.split(",");
+        const x = parseInt(xs, 10), y = parseInt(ys, 10);
+
+        // reserve base tile; landmarks already drawn
+        if (list.length === 1) {
+          const a = list[0];
+          ctx.fillStyle = colors[colorIdx++ % colors.length];
+          ctx.fillRect(x * tile, y * tile, tile, tile);
+          drawAgentLabel(a);
+        } else {
+          // split into 2x2 mini-squares
+          const mini = Math.floor(tile / 2);
+          const slots = [
+            {dx: 0, dy: 0},
+            {dx: mini, dy: 0},
+            {dx: 0, dy: mini},
+            {dx: mini, dy: mini},
+          ];
+          for (let i = 0; i < Math.min(list.length, 4); i++) {
+            const a = list[i];
+            const s = slots[i];
+            ctx.fillStyle = colors[colorIdx++ % colors.length];
+            ctx.fillRect(x * tile + s.dx, y * tile + s.dy, mini, mini);
+          }
+          // label the first agent; hover tooltip gives full detail
+          drawAgentLabel(list[0]);
+        }
+      }
+    }
+
+    function drawAgentLabel(a) {
+      ctx.fillStyle = "#000";
+      ctx.font = "10px Arial";
+      ctx.fillText(a.display_name || a.agent_id, a.x * tile + 2, a.y * tile - 2);
+
+      const intent = lastIntent[a.agent_id] || "";
+      if (intent) {
+        ctx.font = "9px Arial";
+        ctx.fillStyle = "rgba(255,255,255,0.9)";
+        const txt = intent.length > 44 ? intent.slice(0, 44) + "…" : intent;
+        const w = ctx.measureText(txt).width;
+        const bx = a.x * tile;
+        const by = a.y * tile - 22;
+        ctx.fillRect(bx, by, Math.min(200, w + 6), 14);
+        ctx.fillStyle = "#111";
+        ctx.fillText(txt, bx + 3, by + 11);
+      }
+    }
+
+    // Hover tooltip for tile details
+    canvas.addEventListener("mousemove", (ev) => {
+      const rect = canvas.getBoundingClientRect();
+      const mx = ev.clientX - rect.left;
+      const my = ev.clientY - rect.top;
+      const x = Math.floor(mx / tile);
+      const y = Math.floor(my / tile);
+      const key = `${x},${y}`;
+      if (key === lastHoverKey && tooltip.style.display === "block") {
+        tooltip.style.left = (ev.clientX + 12) + "px";
+        tooltip.style.top = (ev.clientY + 12) + "px";
+        return;
+      }
+      lastHoverKey = key;
+      const occ = buildOccupancy(latestWorld);
+      const entry = occ[key];
+      if (!entry) {
+        tooltip.style.display = "none";
+        return;
+      }
+
+      let text = `tile (${x},${y})\n`;
+      if (entry.landmarks && entry.landmarks.length) {
+        text += `landmarks:\n`;
+        for (const lm of entry.landmarks) {
+          text += `- ${lm.id} (${lm.type})\n`;
+        }
+      }
+      if (entry.agents && entry.agents.length) {
+        text += `agents:\n`;
+        for (const a of entry.agents) {
+          const bal = (latestBalances && (a.agent_id in latestBalances)) ? latestBalances[a.agent_id] : null;
+          const intent = lastIntent[a.agent_id] || "";
+          text += `- ${a.display_name || a.agent_id} id=${a.agent_id} bal=${bal === null ? "?" : (bal || 0).toFixed(1)}\n`;
+          if (intent) text += `  intent: ${intent}\n`;
+        }
+      }
+      tooltip.textContent = text.trimEnd();
+      tooltip.style.display = "block";
+      tooltip.style.left = (ev.clientX + 12) + "px";
+      tooltip.style.top = (ev.clientY + 12) + "px";
+    });
+
+    canvas.addEventListener("mouseleave", () => {
+      tooltip.style.display = "none";
+      lastHoverKey = "";
+    });
   </script>
 </body>
 </html>
