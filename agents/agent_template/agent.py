@@ -57,13 +57,15 @@ def _default_plan() -> DailyPlan:
     # simple fallback if LLM plan fails
     return DailyPlan(
         items=[
-            PlanItem(minute=7 * 60, place_id=HOME_LANDMARK_ID, activity="wake up, hygiene"),
-            PlanItem(minute=8 * 60, place_id="cafe", activity="breakfast, casual chat"),
-            PlanItem(minute=9 * 60, place_id="computer", activity="work: plan jobs and execute"),
-            PlanItem(minute=12 * 60, place_id="cafe", activity="lunch"),
-            PlanItem(minute=14 * 60, place_id="market", activity="explore, observe, trade ideas"),
-            PlanItem(minute=18 * 60, place_id="cafe", activity="social: gossip, invitations"),
-            PlanItem(minute=22 * 60, place_id=HOME_LANDMARK_ID, activity="reflect, sleep"),
+            # Start immediately: go to the computer early so the agent can plan/work.
+            PlanItem(minute=10, place_id=HOME_LANDMARK_ID, activity="wake up, hygiene"),
+            PlanItem(minute=30, place_id="computer", activity="plan the day; check balance/jobs"),
+            PlanItem(minute=60, place_id="cafe", activity="breakfast, casual chat"),
+            PlanItem(minute=120, place_id="computer", activity="work block: jobs, research, writing"),
+            PlanItem(minute=240, place_id="market", activity="errands, observe, gather ideas"),
+            PlanItem(minute=360, place_id="cafe", activity="social: gossip, invitations"),
+            PlanItem(minute=420, place_id="computer", activity="wrap up work; reflect"),
+            PlanItem(minute=540, place_id=HOME_LANDMARK_ID, activity="rest"),
         ]
     )
 
@@ -81,6 +83,8 @@ def plan_day_with_llm(world) -> DailyPlan:
         "- Use plausible routines (sleep, meals, work, social).\n"
         "- Choose place_id from the provided list.\n"
         "- 6 to 10 items.\n"
+        "- IMPORTANT: include a computer visit within the next 120 minutes so the agent can do tool-heavy work.\n"
+        "- Prefer the first item to start within the next 30 minutes.\n"
     )
     user = (
         f"Agent: {DISPLAY_NAME} ({AGENT_ID})\n"
