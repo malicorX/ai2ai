@@ -764,7 +764,9 @@ def maybe_attend_events(world) -> bool:
     try:
         day, minute_of_day = world_time(world)
         now = _total_minutes(day, minute_of_day)
-        evs = events_list(upcoming_only=False, limit=30)
+        # Only consider upcoming/ongoing events so we don't miss newly-created near-future events
+        # due to old historical events crowding out the list.
+        evs = events_list(upcoming_only=True, limit=80)
         attending = None
         for e in evs:
             if (e.get("status") or "") != "scheduled":
