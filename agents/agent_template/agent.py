@@ -29,6 +29,10 @@ _last_event_proposed_day = None  # legacy
 _last_event_proposed_at_total = None
 _last_day_llm_planned = None
 _event_nav_state = {}  # event_id -> {"last_ts": float, "phase": str}
+_active_goal = None  # dict: {kind, place_id, activity, chosen_at_total, arrived_at_total}
+_last_walk_trace_total = -10**9
+_last_walk_trace_place = ""
+_last_social_touch_total = -10**9
 
 
 class PlanItem(BaseModel):
@@ -43,6 +47,9 @@ class DailyPlan(BaseModel):
 
 def world_time(world) -> tuple[int, int]:
     return int(world.get("day", 0)), int(world.get("minute_of_day", 0))
+
+def _total_minutes(day: int, minute_of_day: int) -> int:
+    return int(day) * 1440 + int(minute_of_day)
 
 
 def _pick_next_plan_item(day: int, minute_of_day: int) -> PlanItem | None:
@@ -165,32 +172,90 @@ def perform_scheduled_life_step(world) -> None:
     """
     Follow the daily plan: move to the next place and do a lightweight activity (trace + optional chat).
     """
+    global _active_goal, _last_walk_trace_total, _last_walk_trace_place, _last_social_touch_total
     day, minute_of_day = world_time(world)
-    it = _pick_next_plan_item(day, minute_of_day)
-    if not it:
+    now_total = _total_minutes(day, minute_of_day)
+
+    # --- Synchronized meetup window to ensure agents actually interact ---
+    # Every MEETUP_PERIOD_MIN, there is a MEETUP_WINDOW_MIN social window where both agents prefer the same place.
+    MEETUP_PLACE_ID = os.getenv("MEETUP_PLACE_ID", "cafe").strip() or "cafe"
+    MEETUP_PERIOD_MIN = int(os.getenv("MEETUP_PERIOD_MIN", "240"))  # every 4 hours
+    MEETUP_WINDOW_MIN = int(os.getenv("MEETUP_WINDOW_MIN", "45"))   # for 45 minutes
+    meetup_mode = (MEETUP_PERIOD_MIN > 0) and ((minute_of_day % MEETUP_PERIOD_MIN) < MEETUP_WINDOW_MIN)
+
+    # Goal parameters (prevents "thrashing" when sim time jumps)
+    GOAL_MAX_MIN = int(os.getenv("GOAL_MAX_MIN", "180"))     # abandon if stuck too long (sim minutes)
+    GOAL_DWELL_MIN = int(os.getenv("GOAL_DWELL_MIN", "20"))  # stay a bit at destination before switching
+
+    # Pick/override goal.
+    if meetup_mode and (not _active_goal or _active_goal.get("kind") != "meetup"):
+        _active_goal = {
+            "kind": "meetup",
+            "place_id": MEETUP_PLACE_ID,
+            "activity": "social meetup: find the other agent and chat",
+            "chosen_at_total": now_total,
+            "arrived_at_total": None,
+        }
+    if not _active_goal:
+        it = _pick_next_plan_item(day, minute_of_day)
+        if not it:
+            return
+        _active_goal = {
+            "kind": "plan",
+            "place_id": it.place_id,
+            "activity": it.activity,
+            "chosen_at_total": now_total,
+            "arrived_at_total": None,
+        }
+
+    # Safety: abandon stale goal if we've been chasing it for too long (e.g., blocked by time jumps).
+    if GOAL_MAX_MIN > 0 and (now_total - int(_active_goal.get("chosen_at_total") or now_total)) > GOAL_MAX_MIN:
+        _active_goal = None
         return
 
-    lm = _get_landmark(world, it.place_id)
+    place_id = str(_active_goal.get("place_id") or "").strip()
+    activity = str(_active_goal.get("activity") or "").strip()
+    if not place_id:
+        _active_goal = None
+        return
+
+    lm = _get_landmark(world, place_id)
     if not lm:
+        _active_goal = None
         return
 
-    # move toward destination
-    if not _at_landmark(world, it.place_id, radius=1):
+    # Move toward destination, but don't spam trace every tick.
+    if not _at_landmark(world, place_id, radius=1):
         _move_towards(world, int(lm.get("x", 0)), int(lm.get("y", 0)))
-        trace_event("action", f"walking to {it.place_id}", {"activity": it.activity, "minute": minute_of_day})
+        if (_last_walk_trace_place != place_id) or ((now_total - _last_walk_trace_total) >= 30):
+            _last_walk_trace_place = place_id
+            _last_walk_trace_total = now_total
+            trace_event("action", f"walking to {place_id}", {"activity": activity, "minute": minute_of_day})
         return
 
-    # at destination: do the activity
-    trace_event("status", f"activity: {it.activity}", {"place": it.place_id, "minute": minute_of_day})
-    # if co-located with other agent, do a short social message + gossip exchange
-    if _adjacent_to_other(world) and random.random() < 0.25:
-        # create a tiny "gossip nugget" and store it
-        nugget = f"At {it.place_id} ({minute_of_day//60:02d}:{minute_of_day%60:02d}) I was doing: {it.activity}."
-        try:
-            memory_append_scored("event", nugget, tags=["life", "gossip", it.place_id])
-        except Exception:
-            pass
-        chat_send(_style(f"[life] {nugget}"))
+    # At destination: dwell a bit so we don't instantly switch to the next place as time advances.
+    if _active_goal.get("arrived_at_total") is None:
+        _active_goal["arrived_at_total"] = now_total
+
+    trace_event("status", f"activity: {activity}", {"place": place_id, "minute": minute_of_day})
+
+    # If adjacent, treat as an interaction moment (prevents immediate rescheduling away during meetup).
+    if _adjacent_to_other(world):
+        _last_social_touch_total = now_total
+        if random.random() < 0.40:
+            nugget = f"At {place_id} ({minute_of_day//60:02d}:{minute_of_day%60:02d}) I was doing: {activity}."
+            try:
+                memory_append_scored("event", nugget, tags=["life", "gossip", place_id])
+            except Exception:
+                pass
+            chat_send(_style(f"[life] {nugget}"))
+
+    arrived_at = int(_active_goal.get("arrived_at_total") or now_total)
+    if GOAL_DWELL_MIN > 0 and (now_total - arrived_at) < GOAL_DWELL_MIN:
+        return
+
+    # Goal complete; pick next on next tick.
+    _active_goal = None
 SLEEP_SECONDS = float(os.getenv("AGENT_TICK_SECONDS", "3"))
 # Chat behavior (agents talk to each other via /chat, NOT the bulletin board)
 CHAT_PROBABILITY = float(os.getenv("CHAT_PROBABILITY", "0.6"))

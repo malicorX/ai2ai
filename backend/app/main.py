@@ -1201,6 +1201,12 @@ def chat_recent(limit: int = 50):
     return {"messages": [asdict(m) for m in msgs]}
 
 
+# Backwards-compatible alias (some clients call this "history").
+@app.get("/chat/history")
+def chat_history(limit: int = 50):
+    return chat_recent(limit=limit)
+
+
 @app.post("/trace/event")
 async def trace_event(req: TraceEventRequest):
     global _tick
