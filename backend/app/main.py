@@ -4,6 +4,8 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import math
+import urllib.request
 import uuid
 import time
 from dataclasses import dataclass, asdict
@@ -23,9 +25,16 @@ ECONOMY_PATH = DATA_DIR / "economy_ledger.jsonl"
 JOBS_PATH = DATA_DIR / "jobs_events.jsonl"
 MEMORY_DIR = DATA_DIR / "memory"
 MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+MEMORY_EMBED_DIR = DATA_DIR / "memory_embeddings"
+MEMORY_EMBED_DIR.mkdir(parents=True, exist_ok=True)
 
 STARTING_AIDOLLARS = float(os.getenv("STARTING_AIDOLLARS", "100"))
 TREASURY_ID = os.getenv("TREASURY_ID", "treasury")
+
+EMBEDDINGS_BASE_URL = os.getenv("EMBEDDINGS_BASE_URL", "").rstrip("/")
+EMBEDDINGS_MODEL = os.getenv("EMBEDDINGS_MODEL", "llama3.1:8b")
+EMBEDDINGS_TRUNCATE = int(os.getenv("EMBEDDINGS_TRUNCATE", "256"))
+EMBEDDINGS_TIMEOUT_SECONDS = float(os.getenv("EMBEDDINGS_TIMEOUT_SECONDS", "30"))
 
 
 def _append_jsonl(path: Path, obj: dict) -> None:
@@ -310,6 +319,61 @@ def _memory_path(agent_id: str) -> Path:
     return MEMORY_DIR / f"{safe}.jsonl"
 
 
+def _memory_embed_path(agent_id: str) -> Path:
+    safe = "".join([c for c in agent_id if c.isalnum() or c in ("-", "_")]) or "agent"
+    return MEMORY_EMBED_DIR / f"{safe}.jsonl"
+
+
+def _get_embedding(text: str) -> Optional[List[float]]:
+    """
+    Compute a semantic embedding using Ollama's embeddings API:
+      POST {EMBEDDINGS_BASE_URL}/api/embeddings {model, prompt}
+    """
+    if not EMBEDDINGS_BASE_URL:
+        return None
+    payload = {"model": EMBEDDINGS_MODEL, "prompt": text}
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url=f"{EMBEDDINGS_BASE_URL}/api/embeddings",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=EMBEDDINGS_TIMEOUT_SECONDS) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            obj = json.loads(raw)
+            emb = obj.get("embedding")
+            if not isinstance(emb, list) or not emb:
+                return None
+            out = [float(x) for x in emb]
+            if EMBEDDINGS_TRUNCATE > 0 and len(out) > EMBEDDINGS_TRUNCATE:
+                out = out[:EMBEDDINGS_TRUNCATE]
+            return out
+    except Exception:
+        return None
+
+
+def _cosine(a: List[float], b: List[float]) -> float:
+    if not a or not b:
+        return 0.0
+    n = min(len(a), len(b))
+    if n <= 0:
+        return 0.0
+    dot = 0.0
+    na = 0.0
+    nb = 0.0
+    for i in range(n):
+        x = float(a[i])
+        y = float(b[i])
+        dot += x * y
+        na += x * x
+        nb += y * y
+    if na <= 0 or nb <= 0:
+        return 0.0
+    return max(0.0, min(1.0, dot / (math.sqrt(na) * math.sqrt(nb))))
+
+
 @app.post("/memory/{agent_id}/append")
 async def memory_append(agent_id: str, req: MemoryAppendRequest):
     global _tick
@@ -328,6 +392,20 @@ async def memory_append(agent_id: str, req: MemoryAppendRequest):
         created_at=now,
     )
     _append_jsonl(_memory_path(agent_id), asdict(entry))
+
+    # Store embedding separately (append-only index) so we don't rewrite memory JSONL.
+    emb = _get_embedding(text)
+    if emb is not None:
+        _append_jsonl(
+            _memory_embed_path(agent_id),
+            {
+                "memory_id": entry.memory_id,
+                "embedding": emb,
+                "model": EMBEDDINGS_MODEL,
+                "dim": len(emb),
+                "created_at": now,
+            },
+        )
     return {"ok": True, "memory": asdict(entry)}
 
 
@@ -354,6 +432,42 @@ def memory_search(agent_id: str, q: str, limit: int = 20):
         except Exception:
             continue
     return {"memories": hits[-limit:]}
+
+
+@app.post("/memory/{agent_id}/embeddings/backfill")
+def memory_embeddings_backfill(agent_id: str, limit: int = 200):
+    """
+    Create embeddings for older memories that predate embedding storage.
+    """
+    if not EMBEDDINGS_BASE_URL:
+        return {"error": "embeddings_disabled"}
+
+    limit = max(1, min(limit, 500))
+    mems = _read_jsonl(_memory_path(agent_id), limit=limit)
+
+    # existing index ids
+    idx_rows = _read_jsonl(_memory_embed_path(agent_id))
+    existing = {r.get("memory_id") for r in idx_rows if r.get("memory_id")}
+
+    wrote = 0
+    for r in mems:
+        mid = r.get("memory_id")
+        if not mid or mid in existing:
+            continue
+        txt = str(r.get("text") or "").strip()
+        if not txt:
+            continue
+        emb = _get_embedding(txt)
+        if emb is None:
+            continue
+        _append_jsonl(
+            _memory_embed_path(agent_id),
+            {"memory_id": mid, "embedding": emb, "model": EMBEDDINGS_MODEL, "dim": len(emb), "created_at": time.time()},
+        )
+        wrote += 1
+        existing.add(mid)
+
+    return {"ok": True, "wrote": wrote, "scanned": len(mems)}
 
 
 def _tok(s: str) -> set:
@@ -406,7 +520,20 @@ def memory_retrieve(
     k = max(1, min(int(k), 50))
     now = time.time()
     qtok = _tok(q)
+    qemb = _get_embedding(q)
     rows = _read_jsonl(_memory_path(agent_id))
+
+    # load embedding index
+    embed_rows = _read_jsonl(_memory_embed_path(agent_id))
+    emb_by_id: Dict[str, List[float]] = {}
+    for r in embed_rows:
+        mid = r.get("memory_id")
+        emb = r.get("embedding")
+        if isinstance(mid, str) and isinstance(emb, list) and emb:
+            try:
+                emb_by_id[mid] = [float(x) for x in emb]
+            except Exception:
+                continue
     scored = []
     hl = max(1.0, float(recency_halflife_minutes)) * 60.0
 
@@ -415,7 +542,12 @@ def memory_retrieve(
             text = str(r.get("text") or "")
             tags = r.get("tags") or []
             itok = _tok(text + " " + " ".join([str(t) for t in tags]))
-            rel = _jaccard(qtok, itok)
+            rel_tok = _jaccard(qtok, itok)
+            rel_emb = 0.0
+            mid = r.get("memory_id")
+            if qemb is not None and isinstance(mid, str) and mid in emb_by_id:
+                rel_emb = _cosine(qemb, emb_by_id[mid])
+            rel = max(rel_tok, rel_emb)
             created_at = float(r.get("created_at") or 0.0)
             age = max(0.0, now - created_at)
             rec = 0.5 ** (age / hl)  # halflife decay
@@ -427,7 +559,20 @@ def memory_retrieve(
             if imp > 1:
                 imp = 1.0
             score = float(w_relevance) * rel + float(w_recency) * rec + float(w_importance) * imp
-            scored.append((score, {"score": score, "relevance": rel, "recency": rec, "importance": imp, **r}))
+            scored.append(
+                (
+                    score,
+                    {
+                        "score": score,
+                        "relevance": rel,
+                        "recency": rec,
+                        "importance": imp,
+                        "relevance_token": rel_tok,
+                        "relevance_embed": rel_emb,
+                        **r,
+                    },
+                )
+            )
         except Exception:
             continue
 
