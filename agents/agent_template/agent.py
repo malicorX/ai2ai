@@ -540,7 +540,7 @@ def events_list(upcoming_only: bool = True, limit: int = 20):
     return r.json().get("events", [])
 
 
-def event_create(title: str, description: str, location_id: str, start_day: int, start_minute: int, duration_min: int) -> Optional[str]:
+def event_create(title: str, description: str, location_id: str, start_day: int, start_minute: int, duration_min: int) -> str | None:
     r = requests.post(
         f"{WORLD_API}/events/create",
         json={
