@@ -457,8 +457,23 @@ def maybe_reflect(world) -> None:
     if not _at_landmark(world, COMPUTER_LANDMARK_ID, radius=COMPUTER_ACCESS_RADIUS):
         return
 
-    recent = memory_recent(limit=25)
-    if not recent:
+    # Use semantic retrieval instead of "last N" so reflections focus on salient memories.
+    place = ""
+    try:
+        # infer current place by nearest landmark within 1 tile
+        me = next((a for a in world.get("agents", []) if a.get("agent_id") == AGENT_ID), None)
+        if me:
+            ax, ay = int(me.get("x", 0)), int(me.get("y", 0))
+            for lm in world.get("landmarks", []):
+                if _chebyshev(ax, ay, int(lm.get("x", 0)), int(lm.get("y", 0))) <= 1:
+                    place = str(lm.get("id") or "")
+                    break
+    except Exception:
+        place = ""
+
+    query = f"day {day} reflections topic {world.get('topic','')} place {place} social relationships jobs events ai$"
+    retrieved = memory_retrieve(query, k=16)
+    if not retrieved:
         _last_reflect_minute = key
         return
 
@@ -469,10 +484,10 @@ def maybe_reflect(world) -> None:
         "No extra commentary."
     )
     lines = []
-    for m in recent[-20:]:
-        lines.append(f"- ({m.get('kind')}) {str(m.get('text') or '')[:220]}")
-    user = "Memories:\n" + "\n".join(lines) + "\n\nReflections:"
-    trace_event("thought", "reflection: synthesizing memories", {"count": len(lines), "day": day, "minute": minute_of_day})
+    for m in retrieved[:16]:
+        lines.append(f"- ({m.get('kind')}, imp={m.get('importance')}, score={m.get('score')}) {str(m.get('text') or '')[:220]}")
+    user = "Memories (ranked):\n" + "\n".join(lines) + "\n\nReflections:"
+    trace_event("thought", "reflection: synthesizing memories", {"count": len(lines), "day": day, "minute": minute_of_day, "q": query})
     try:
         out = llm_chat(sys, user, max_tokens=220)
         bullets = [ln.strip("- ").strip() for ln in out.splitlines() if ln.strip()]
@@ -511,6 +526,137 @@ def jobs_submit(job_id: str, submission: str) -> bool:
     except Exception:
         return False
     return bool(data.get("ok"))
+
+
+def events_list(upcoming_only: bool = True, limit: int = 20):
+    r = requests.get(f"{WORLD_API}/events", params={"upcoming_only": str(upcoming_only).lower(), "limit": limit}, timeout=10)
+    r.raise_for_status()
+    return r.json().get("events", [])
+
+
+def event_create(title: str, description: str, location_id: str, start_day: int, start_minute: int, duration_min: int) -> Optional[str]:
+    r = requests.post(
+        f"{WORLD_API}/events/create",
+        json={
+            "title": title,
+            "description": description,
+            "location_id": location_id,
+            "start_day": int(start_day),
+            "start_minute": int(start_minute),
+            "duration_min": int(duration_min),
+            "created_by": AGENT_ID,
+        },
+        timeout=10,
+    )
+    try:
+        data = r.json()
+    except Exception:
+        return None
+    if not data.get("ok"):
+        return None
+    ev = data.get("event") or {}
+    return ev.get("event_id")
+
+
+def event_invite(event_id: str, to_agent_id: str, message: str) -> None:
+    try:
+        requests.post(
+            f"{WORLD_API}/events/{event_id}/invite",
+            json={"from_agent_id": AGENT_ID, "to_agent_id": to_agent_id, "message": message},
+            timeout=10,
+        )
+    except Exception:
+        return
+
+
+def event_rsvp(event_id: str, status: str, note: str = "") -> None:
+    try:
+        requests.post(
+            f"{WORLD_API}/events/{event_id}/rsvp",
+            json={"agent_id": AGENT_ID, "status": status, "note": note},
+            timeout=10,
+        )
+    except Exception:
+        return
+
+
+def maybe_social_events(world) -> None:
+    """
+    During social blocks, sometimes create an event and invite the other agent.
+    Also RSVP to invitations addressed to us.
+    """
+    if not USE_LANGGRAPH:
+        return
+    day, minute_of_day = world_time(world)
+    # Only do this while at cafe/market (social hubs) and at computer (tool gating)
+    if not _at_landmark(world, COMPUTER_LANDMARK_ID, radius=COMPUTER_ACCESS_RADIUS):
+        return
+    # Identify other agent
+    other = next((a for a in world.get("agents", []) if a.get("agent_id") != AGENT_ID), None)
+    other_id = other.get("agent_id") if other else ""
+    if not other_id:
+        return
+
+    # Check for invitations to us and RSVP "maybe" or "yes"
+    try:
+        evs = events_list(upcoming_only=True, limit=20)
+        for e in evs:
+            invites = e.get("invites") or []
+            for inv in invites:
+                if inv.get("to_agent_id") == AGENT_ID:
+                    # If we haven't RSVP'd, respond
+                    rsvps = e.get("rsvps") or {}
+                    if AGENT_ID not in rsvps:
+                        event_rsvp(e.get("event_id"), "yes", note="I'll attend.")
+                        trace_event("action", "RSVP yes", {"event_id": e.get("event_id"), "title": e.get("title")})
+                        # Insert attendance into schedule
+                        global _daily_plan
+                        if _daily_plan:
+                            _daily_plan.items.append(
+                                PlanItem(minute=int(e.get("start_minute") or 0), place_id=str(e.get("location_id") or "cafe"), activity=f"attend event: {e.get('title')}")
+                            )
+                    break
+    except Exception:
+        pass
+
+    # Occasionally propose a new event (once in a while)
+    if random.random() > 0.06:
+        return
+
+    sys = (
+        "You are proposing a small social event for an AI village.\n"
+        "Return STRICT JSON: {\"title\":..., \"description\":..., \"location_id\":..., \"start_in_min\":..., \"duration_min\":..., \"invite_message\":...}\n"
+        "Constraints:\n"
+        "- location_id must be one of: cafe, market\n"
+        "- start_in_min between 30 and 240\n"
+        "- duration_min between 30 and 120\n"
+    )
+    user = (
+        f"Persona:\n{(PERSONALITY or '').strip()}\n\n"
+        f"Time: day={day} minute={minute_of_day}\n"
+        f"Other agent: {other_id}\n"
+        "Propose one event."
+    )
+    try:
+        raw = llm_chat(sys, user, max_tokens=220)
+        obj = json.loads(raw)
+        title = str(obj.get("title") or "").strip()[:120]
+        desc = str(obj.get("description") or "").strip()[:500]
+        loc = str(obj.get("location_id") or "cafe").strip()
+        start_in = int(obj.get("start_in_min") or 60)
+        dur = int(obj.get("duration_min") or 60)
+        msg = str(obj.get("invite_message") or "Want to join?").strip()[:200]
+        if loc not in ("cafe", "market"):
+            loc = "cafe"
+        start_in = max(30, min(start_in, 240))
+        dur = max(30, min(dur, 120))
+        eid = event_create(title, desc, loc, day, (minute_of_day + start_in) % 1440, dur)
+        if eid:
+            event_invite(eid, other_id, msg)
+            trace_event("action", "created event + invited", {"event_id": eid, "to": other_id, "title": title})
+            memory_append_scored("event", f"Created event '{title}' at {loc} in {start_in} minutes; invited {other_id}.", tags=["event", "invite"], importance=0.7)
+    except Exception as e:
+        trace_event("error", f"event proposal failed: {e}", {})
 
 
 def _do_job(job: dict) -> str:
@@ -1144,6 +1290,7 @@ def main():
             maybe_plan_new_day(world)
             # live in the world (schedule-following navigation/activity)
             perform_scheduled_life_step(world)
+            maybe_social_events(world)
             # Navigation test: default behavior is to walk to the computer access spot before doing tool-heavy work.
             if not _at_landmark(world, COMPUTER_LANDMARK_ID, radius=COMPUTER_ACCESS_RADIUS):
                 lm = _get_landmark(world, COMPUTER_LANDMARK_ID)

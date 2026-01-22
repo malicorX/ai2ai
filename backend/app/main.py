@@ -23,6 +23,7 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data")).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 ECONOMY_PATH = DATA_DIR / "economy_ledger.jsonl"
 JOBS_PATH = DATA_DIR / "jobs_events.jsonl"
+EVENTS_PATH = DATA_DIR / "events_events.jsonl"
 MEMORY_DIR = DATA_DIR / "memory"
 MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 MEMORY_EMBED_DIR = DATA_DIR / "memory_embeddings"
@@ -191,6 +192,226 @@ _chat_max = 200
 _topic: str = "getting started"
 _topic_set_at: float = 0.0
 _topic_history: List[dict] = []
+
+# ---- Events / Invitations (persistent event log) ----
+
+EventStatus = Literal["scheduled", "cancelled", "completed"]
+RsvpStatus = Literal["yes", "no", "maybe"]
+EventEventType = Literal["create", "invite", "rsvp", "cancel"]
+
+
+@dataclass
+class VillageEvent:
+    event_id: str
+    title: str
+    description: str
+    location_id: str
+    start_day: int
+    start_minute: int
+    duration_min: int
+    status: EventStatus
+    created_by: str
+    created_at: float
+    invites: List[dict]
+    rsvps: Dict[str, str]
+
+
+@dataclass
+class EventLogEntry:
+    log_id: str
+    event_type: EventEventType
+    event_id: str
+    data: dict
+    created_at: float
+
+
+class CreateEventRequest(BaseModel):
+    title: str
+    description: str = ""
+    location_id: str
+    start_day: int
+    start_minute: int
+    duration_min: int = 60
+    created_by: str = "human"
+
+
+class InviteRequest(BaseModel):
+    from_agent_id: str
+    to_agent_id: str
+    message: str = ""
+
+
+class RsvpRequest(BaseModel):
+    agent_id: str
+    status: RsvpStatus
+    note: str = ""
+
+
+_events: Dict[str, VillageEvent] = {}
+_event_log: List[EventLogEntry] = []
+
+
+def _apply_event_log(ev: EventLogEntry) -> None:
+    d = ev.data or {}
+    if ev.event_type == "create":
+        _events[ev.event_id] = VillageEvent(
+            event_id=ev.event_id,
+            title=str(d.get("title") or "")[:200],
+            description=str(d.get("description") or "")[:4000],
+            location_id=str(d.get("location_id") or "")[:80],
+            start_day=int(d.get("start_day") or 0),
+            start_minute=int(d.get("start_minute") or 0),
+            duration_min=int(d.get("duration_min") or 60),
+            status="scheduled",
+            created_by=str(d.get("created_by") or "human")[:80],
+            created_at=float(d.get("created_at") or ev.created_at),
+            invites=[],
+            rsvps={},
+        )
+        return
+
+    e = _events.get(ev.event_id)
+    if not e:
+        return
+
+    if ev.event_type == "invite" and e.status == "scheduled":
+        inv = {
+            "from_agent_id": str(d.get("from_agent_id") or "")[:80],
+            "to_agent_id": str(d.get("to_agent_id") or "")[:80],
+            "message": str(d.get("message") or "")[:400],
+            "created_at": float(d.get("created_at") or ev.created_at),
+        }
+        e.invites.append(inv)
+        return
+
+    if ev.event_type == "rsvp" and e.status == "scheduled":
+        agent_id = str(d.get("agent_id") or "")[:80]
+        status = str(d.get("status") or "maybe")
+        if agent_id:
+            e.rsvps[agent_id] = status
+        return
+
+    if ev.event_type == "cancel" and e.status == "scheduled":
+        e.status = "cancelled"
+        return
+
+
+def _load_events() -> None:
+    global _events, _event_log
+    _events = {}
+    _event_log = []
+    rows = _read_jsonl(EVENTS_PATH)
+    for r in rows:
+        try:
+            ev = EventLogEntry(
+                log_id=str(r.get("log_id") or uuid.uuid4()),
+                event_type=r.get("event_type"),
+                event_id=str(r.get("event_id")),
+                data=dict(r.get("data") or {}),
+                created_at=float(r.get("created_at") or time.time()),
+            )
+            _event_log.append(ev)
+            _apply_event_log(ev)
+        except Exception:
+            continue
+
+
+def _append_event_log(event_type: EventEventType, event_id: str, data: dict) -> EventLogEntry:
+    ev = EventLogEntry(
+        log_id=str(uuid.uuid4()),
+        event_type=event_type,
+        event_id=event_id,
+        data=data,
+        created_at=time.time(),
+    )
+    _event_log.append(ev)
+    _append_jsonl(EVENTS_PATH, asdict(ev))
+    _apply_event_log(ev)
+    return ev
+
+
+_load_events()
+
+
+@app.get("/events")
+def events_list(day: Optional[int] = None, upcoming_only: bool = True, limit: int = 50):
+    limit = max(1, min(limit, 200))
+    items = list(_events.values())
+    if day is not None:
+        items = [e for e in items if e.start_day == int(day)]
+    if upcoming_only:
+        # compare to current sim time
+        snap = get_world_snapshot()
+        now_key = (snap.day, snap.minute_of_day)
+        items = [e for e in items if e.status == "scheduled" and (e.start_day, e.start_minute) >= now_key]
+    items.sort(key=lambda e: (e.start_day, e.start_minute))
+    return {"events": [asdict(e) for e in items[:limit]]}
+
+
+@app.get("/events/{event_id}")
+def events_get(event_id: str):
+    e = _events.get(event_id)
+    if not e:
+        return {"error": "not_found"}
+    return {"event": asdict(e)}
+
+
+@app.post("/events/create")
+async def events_create(req: CreateEventRequest):
+    global _tick
+    _tick += 1
+    title = (req.title or "").strip()
+    if not title or not req.location_id:
+        return {"error": "invalid_event"}
+    event_id = str(uuid.uuid4())
+    ev = _append_event_log(
+        "create",
+        event_id,
+        {
+            "title": title,
+            "description": (req.description or "").strip(),
+            "location_id": req.location_id,
+            "start_day": int(req.start_day),
+            "start_minute": int(req.start_minute),
+            "duration_min": int(req.duration_min or 60),
+            "created_by": req.created_by,
+            "created_at": time.time(),
+        },
+    )
+    await ws_manager.broadcast({"type": "events", "data": {"log": asdict(ev), "event": asdict(_events[event_id])}})
+    return {"ok": True, "event": asdict(_events[event_id])}
+
+
+@app.post("/events/{event_id}/invite")
+async def events_invite(event_id: str, req: InviteRequest):
+    global _tick
+    _tick += 1
+    e = _events.get(event_id)
+    if not e or e.status != "scheduled":
+        return {"error": "not_invitable"}
+    ev = _append_event_log(
+        "invite",
+        event_id,
+        {"from_agent_id": req.from_agent_id, "to_agent_id": req.to_agent_id, "message": req.message, "created_at": time.time()},
+    )
+    await ws_manager.broadcast({"type": "events", "data": {"log": asdict(ev), "event": asdict(_events[event_id])}})
+    return {"ok": True, "event": asdict(_events[event_id])}
+
+
+@app.post("/events/{event_id}/rsvp")
+async def events_rsvp(event_id: str, req: RsvpRequest):
+    global _tick
+    _tick += 1
+    e = _events.get(event_id)
+    if not e or e.status != "scheduled":
+        return {"error": "not_rsvpable"}
+    ev = _append_event_log(
+        "rsvp",
+        event_id,
+        {"agent_id": req.agent_id, "status": req.status, "note": req.note, "created_at": time.time()},
+    )
+    await ws_manager.broadcast({"type": "events", "data": {"log": asdict(ev), "event": asdict(_events[event_id])}})
+    return {"ok": True, "event": asdict(_events[event_id])}
 
 # ---- aiDollar economy (minimal, persistent JSONL ledger) ----
 

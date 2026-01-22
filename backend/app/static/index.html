@@ -113,6 +113,30 @@
         </div>
         <div id="jobsList" style="margin-top:10px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size:12px; max-height:260px; overflow-y:auto;"></div>
       </div>
+
+      <div style="background:white; border:1px solid #ccc; padding:10px; border-radius:6px; width:420px;">
+        <h3 style="margin:0 0 8px 0;">Events (invitations, parties, etc.)</h3>
+        <div style="display:flex; gap:8px; margin-bottom:8px;">
+          <button id="eventsRefreshBtn">Refresh</button>
+          <span id="eventsStatus" class="pill">?</span>
+        </div>
+        <div style="display:flex; gap:8px; margin-bottom:6px;">
+          <input id="eventTitle" type="text" placeholder="Event title" style="padding:6px; flex:1;" />
+          <select id="eventLocation" style="padding:6px; width:140px;">
+            <option value="cafe">cafe</option>
+            <option value="market">market</option>
+            <option value="board">board</option>
+            <option value="computer">computer</option>
+          </select>
+        </div>
+        <textarea id="eventDesc" placeholder="Description (optional)" rows="2" style="padding:6px; width:100%;"></textarea>
+        <div style="display:flex; gap:8px; margin-top:6px;">
+          <input id="eventStartIn" type="number" value="60" min="5" step="5" style="padding:6px; width:120px;" />
+          <input id="eventDuration" type="number" value="60" min="10" step="10" style="padding:6px; width:120px;" />
+          <button id="eventCreateBtn">Create</button>
+        </div>
+        <div id="eventsList" style="margin-top:10px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size:12px; max-height:220px; overflow-y:auto;"></div>
+      </div>
     </div>
   </div>
 
@@ -264,6 +288,17 @@
     const jobReviewer = document.getElementById("jobReviewer");
     const jobCreateBtn = document.getElementById("jobCreateBtn");
     const jobsRefreshBtn = document.getElementById("jobsRefreshBtn");
+
+    // --- Events ---
+    const eventsList = document.getElementById("eventsList");
+    const eventsStatus = document.getElementById("eventsStatus");
+    const eventsRefreshBtn = document.getElementById("eventsRefreshBtn");
+    const eventTitle = document.getElementById("eventTitle");
+    const eventLocation = document.getElementById("eventLocation");
+    const eventDesc = document.getElementById("eventDesc");
+    const eventStartIn = document.getElementById("eventStartIn");
+    const eventDuration = document.getElementById("eventDuration");
+    const eventCreateBtn = document.getElementById("eventCreateBtn");
 
     async function fetchJson(path, opts) {
       const res = await fetch(BACKEND_HTTP + path, opts);
@@ -557,6 +592,75 @@
       await refreshJobs();
     };
 
+    function renderEvent(e) {
+      const wrap = document.createElement("div");
+      wrap.style.borderTop = "1px solid #eee";
+      wrap.style.padding = "8px 0";
+      const when = (typeof e.start_day !== "undefined") ? `day=${e.start_day} ${String(Math.floor(e.start_minute/60)).padStart(2,'0')}:${String(e.start_minute%60).padStart(2,'0')}` : "";
+      wrap.innerHTML =
+        `<div><b>[${e.status}]</b> ${e.title}</div>` +
+        `<div style="color:#666;">${when} @ ${e.location_id} • by ${e.created_by} • dur=${e.duration_min}m</div>` +
+        (e.description ? `<div>${e.description}</div>` : "");
+      const inv = (e.invites || []).map(i => `${i.from_agent_id}->${i.to_agent_id}`).join(", ");
+      if (inv) {
+        const d = document.createElement("div");
+        d.style.color = "#666";
+        d.textContent = `invites: ${inv}`;
+        wrap.appendChild(d);
+      }
+      const rsvps = e.rsvps || {};
+      const ks = Object.keys(rsvps);
+      if (ks.length) {
+        const d = document.createElement("div");
+        d.style.color = "#666";
+        d.textContent = `rsvps: ` + ks.map(k => `${k}=${rsvps[k]}`).join(", ");
+        wrap.appendChild(d);
+      }
+      return wrap;
+    }
+
+    async function refreshEvents() {
+      try {
+        const data = await fetchJson("/events?upcoming_only=true&limit=50");
+        const evs = data.events || [];
+        eventsList.innerHTML = "";
+        for (const e of evs) eventsList.appendChild(renderEvent(e));
+        eventsStatus.textContent = "ok";
+        eventsStatus.className = "pill ok";
+      } catch (e) {
+        eventsStatus.textContent = "error";
+        eventsStatus.className = "pill bad";
+      }
+    }
+    eventsRefreshBtn.onclick = refreshEvents;
+    refreshEvents();
+
+    eventCreateBtn.onclick = async () => {
+      if (!latestWorld) return alert("Wait for world state.");
+      const title = (eventTitle.value||"").trim();
+      if (!title) return alert("Title required");
+      const startIn = parseInt(eventStartIn.value||"60", 10);
+      const dur = parseInt(eventDuration.value||"60", 10);
+      const day = latestWorld.day || 0;
+      const startMinute = (latestWorld.minute_of_day || 0) + Math.max(5, startIn);
+      await fetchJson("/events/create", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({
+          title,
+          description: (eventDesc.value||"").trim(),
+          location_id: eventLocation.value,
+          start_day: day + Math.floor(startMinute/1440),
+          start_minute: startMinute % 1440,
+          duration_min: Math.max(10, dur),
+          created_by: (jobReviewer && jobReviewer.value) ? jobReviewer.value : "human"
+        })
+      });
+      eventTitle.value = "";
+      eventDesc.value = "";
+      await refreshEvents();
+    };
+
     // --- WebSocket world ---
     function buildOccupancy(world) {
       const occ = {}; // "x,y" -> {agents:[], landmarks:[]}
@@ -649,6 +753,8 @@
             } catch (e) {}
           } else if (msg.type === "jobs") {
             refreshJobs();
+          } else if (msg.type === "events") {
+            refreshEvents();
           } else if (msg.type === "trace") {
             const e = msg.data;
             const ts = new Date((e.created_at || Date.now()/1000) * 1000).toLocaleTimeString();
