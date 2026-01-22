@@ -26,6 +26,7 @@ HOME_LANDMARK_ID = os.getenv("HOME_LANDMARK_ID", f"home_{AGENT_ID}").strip()
 _last_day_planned = None
 _daily_plan = None
 _last_event_proposed_day = None
+_last_day_llm_planned = None
 
 
 class PlanItem(BaseModel):
@@ -111,15 +112,25 @@ def plan_day_with_llm(world) -> DailyPlan:
 def maybe_plan_new_day(world) -> None:
     global _last_day_planned, _daily_plan
     day, _ = world_time(world)
-    if _last_day_planned == day and _daily_plan:
+    global _last_day_llm_planned
+
+    # Ensure we always have *some* plan so agents actually move and live.
+    if (_last_day_planned != day) or (not _daily_plan):
+        _daily_plan = _default_plan()
+        _last_day_planned = day
+        trace_event("status", "daily schedule (default) ready", {"items": [it.model_dump() for it in _daily_plan.items]})
+
+    # Upgrade the plan with LLM once per day, but only from computer access zone.
+    if not USE_LANGGRAPH:
         return
-    # Plan once per day, while at computer (so it's "computer work")
+    if _last_day_llm_planned == day:
+        return
     if not _at_landmark(world, COMPUTER_LANDMARK_ID, radius=COMPUTER_ACCESS_RADIUS):
         return
-    trace_event("thought", "planning daily schedule", {"day": day})
-    _daily_plan = plan_day_with_llm(world) if USE_LANGGRAPH else _default_plan()
-    _last_day_planned = day
-    trace_event("status", "daily schedule ready", {"items": [it.model_dump() for it in _daily_plan.items]})
+    trace_event("thought", "planning daily schedule (LLM)", {"day": day})
+    _daily_plan = plan_day_with_llm(world)
+    _last_day_llm_planned = day
+    trace_event("status", "daily schedule (LLM) ready", {"items": [it.model_dump() for it in _daily_plan.items]})
 
 
 def perform_scheduled_life_step(world) -> None:
