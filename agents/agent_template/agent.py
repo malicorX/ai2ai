@@ -407,6 +407,7 @@ def memory_retrieve(q: str, k: int = 8):
 
 def rate_importance(text: str) -> float:
     """LLM-scored importance in [0,1]."""
+    # Only score with LLM when LangGraph is enabled AND we're at the computer access zone
     if not USE_LANGGRAPH:
         return 0.3
     sys = "Rate the importance of the memory for future behavior. Return only a number between 0 and 1."
@@ -619,8 +620,14 @@ def maybe_social_events(world) -> None:
     except Exception:
         pass
 
-    # Occasionally propose a new event (once in a while)
-    if random.random() > 0.06:
+    # Propose at most one new event per day per agent (reliable, non-spammy).
+    global _last_day_planned
+    global _daily_plan
+    global _last_event_proposed_day
+    if "_last_event_proposed_day" not in globals():
+        _last_event_proposed_day = None
+
+    if _last_event_proposed_day == day:
         return
 
     sys = (
@@ -638,6 +645,12 @@ def maybe_social_events(world) -> None:
         "Propose one event."
     )
     try:
+        # If there's already an upcoming event created by us, don't create another today.
+        for e in evs if 'evs' in locals() else []:
+            if (e.get("created_by") == AGENT_ID) and (e.get("status") == "scheduled"):
+                _last_event_proposed_day = day
+                return
+
         raw = llm_chat(sys, user, max_tokens=220)
         obj = json.loads(raw)
         title = str(obj.get("title") or "").strip()[:120]
@@ -655,6 +668,7 @@ def maybe_social_events(world) -> None:
             event_invite(eid, other_id, msg)
             trace_event("action", "created event + invited", {"event_id": eid, "to": other_id, "title": title})
             memory_append_scored("event", f"Created event '{title}' at {loc} in {start_in} minutes; invited {other_id}.", tags=["event", "invite"], importance=0.7)
+            _last_event_proposed_day = day
     except Exception as e:
         trace_event("error", f"event proposal failed: {e}", {})
 
@@ -723,6 +737,16 @@ def maybe_work_jobs() -> None:
     now = time.time()
     if now - _last_jobs_at < JOBS_EVERY_SECONDS:
         return
+
+    # Only do job tool-work from the computer access zone (navigation test + safety).
+    # If not at the computer, just wait until schedule brings us there.
+    try:
+        w = get_world()
+        if not _at_landmark(w, COMPUTER_LANDMARK_ID, radius=COMPUTER_ACCESS_RADIUS):
+            _last_jobs_at = now
+            return
+    except Exception:
+        pass
 
     # Only chase jobs if we want more ai$.
     bal = _cached_balance
@@ -1291,18 +1315,7 @@ def main():
             # live in the world (schedule-following navigation/activity)
             perform_scheduled_life_step(world)
             maybe_social_events(world)
-            # Navigation test: default behavior is to walk to the computer access spot before doing tool-heavy work.
-            if not _at_landmark(world, COMPUTER_LANDMARK_ID, radius=COMPUTER_ACCESS_RADIUS):
-                lm = _get_landmark(world, COMPUTER_LANDMARK_ID)
-                if lm:
-                    trace_event("status", f"seeking {COMPUTER_LANDMARK_ID}", {"target": COMPUTER_LANDMARK_ID})
-                    _move_towards(world, int(lm.get("x", 0)), int(lm.get("y", 0)))
-                else:
-                    move(world)
-                time.sleep(SLEEP_SECONDS)
-                continue
-
-            move(world)
+            # Free movement is driven by the schedule; do not force-walk to computer every tick.
             maybe_update_balance()
             maybe_work_jobs()
             maybe_chat(world)
