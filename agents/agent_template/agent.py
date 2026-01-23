@@ -46,6 +46,7 @@ _active_conv_last_total = -10**9
 _active_conv_turns = 0
 _active_conv_job_id = ""
 _pending_claim_job_id = ""
+_force_computer_until_total = -10**9
 
 
 class PlanItem(BaseModel):
@@ -186,8 +187,23 @@ def perform_scheduled_life_step(world) -> None:
     Follow the daily plan: move to the next place and do a lightweight activity (trace + optional chat).
     """
     global _active_goal, _last_walk_trace_total, _last_walk_trace_place, _last_social_touch_total
+    global _force_computer_until_total
     day, minute_of_day = world_time(world)
     now_total = _total_minutes(day, minute_of_day)
+
+    # If we have a pending conversation-created job to execute, force travel to computer until it's done.
+    if _force_computer_until_total and _force_computer_until_total > now_total:
+        try:
+            if not _at_landmark(world, COMPUTER_LANDMARK_ID, radius=COMPUTER_ACCESS_RADIUS):
+                _active_goal = {
+                    "kind": "forced_computer",
+                    "place_id": COMPUTER_LANDMARK_ID,
+                    "activity": "execute conversation job at computer",
+                    "chosen_at_total": now_total,
+                    "arrived_at_total": None,
+                }
+        except Exception:
+            pass
 
     # --- Synchronized meetup window to ensure agents actually interact ---
     # Every MEETUP_PERIOD_MIN, there is a MEETUP_WINDOW_MIN social window where both agents prefer the same place.
@@ -333,7 +349,7 @@ def maybe_reset_on_new_run() -> None:
     global _last_replied_to_msg_id, _last_seen_other_msg_id, _last_sent_at, _recent_sent_norm
     global _last_forced_meetup_msg_at_total, _last_meetup_id_sent
     global _active_conv_id, _active_conv_other_id, _active_conv_started_total, _active_conv_last_total, _active_conv_turns
-    global _active_conv_job_id, _pending_claim_job_id
+    global _active_conv_job_id, _pending_claim_job_id, _force_computer_until_total
 
     now = time.time()
     if now - _last_run_check_at < 5.0:
@@ -360,6 +376,7 @@ def maybe_reset_on_new_run() -> None:
         _active_conv_turns = 0
         _active_conv_job_id = ""
         _pending_claim_job_id = ""
+        _force_computer_until_total = -10**9
     _last_run_id = rid
 
 
@@ -1608,7 +1625,7 @@ def maybe_chat(world):
     global _last_forced_meetup_msg_at_total
     global _last_meetup_id_sent
     global _active_conv_id, _active_conv_other_id, _active_conv_started_total, _active_conv_last_total, _active_conv_turns
-    global _active_conv_job_id, _pending_claim_job_id
+    global _active_conv_job_id, _pending_claim_job_id, _force_computer_until_total
 
     # Only talk when adjacent.
     # During meetup windows (or when a meetup opener is pending), we actively close distance so chat reliably happens.
@@ -1788,6 +1805,7 @@ def maybe_chat(world):
             _active_conv_id = None
             _active_conv_other_id = None
             _active_conv_turns = 0
+            _active_conv_job_id = ""
             return
 
     # If we have an unseen message from the other, reply to it.
@@ -1896,10 +1914,26 @@ def maybe_chat(world):
                         if jid:
                             _active_conv_job_id = jid
                             _pending_claim_job_id = jid
+                            _force_computer_until_total = now_total + 240  # 4h sim time should be plenty
                             trace_event("action", "created job from conversation", {"job_id": jid, "title": jtitle, "reward": jreward})
                             # Tell the other agent and end cleanly.
                             say = (say + f"\n\nI created a real backend Job `{jid}` (reward {jreward:.1f} ai$). I'll claim+submit it when I reach the computer. Goodbye. [bye]").strip()
                             end_flag = True
+                # Fallback: if we still don't have a job after a few turns, create a default one.
+                if (not _active_conv_job_id) and int(_active_conv_turns) >= 3:
+                    jtitle = "Execute one concrete earning task"
+                    jbody = (
+                        "Create a short, concrete deliverable file in /app/workspace/deliverables explaining ONE way the agent can earn ai$ next, "
+                        "with acceptance criteria that a human can verify quickly."
+                    )
+                    jid = jobs_create(jtitle, jbody, 15.0)
+                    if jid:
+                        _active_conv_job_id = jid
+                        _pending_claim_job_id = jid
+                        _force_computer_until_total = now_total + 240
+                        trace_event("action", "created fallback job from conversation", {"job_id": jid, "title": jtitle})
+                        say = (say + f"\n\nI created a real backend Job `{jid}` (reward 15 ai$). I'll claim+submit it when I reach the computer. Goodbye. [bye]").strip()
+                        end_flag = True
 
             reply = _style(f"{tprefix}{say}".strip())
             # Hard fallback if the model output is too vague.
@@ -1920,6 +1954,10 @@ def maybe_chat(world):
             # In conversations/meetups, always send (don't let similarity heuristics suppress it).
             if AGENT_ID == "agent_2":
                 trace_event("action", "chat_send attempt", {"mid": mid, "mode": "reply"})
+            # Only agent_1 may proactively end; agent_2 should end only when agent_1 ends or when replying to a goodbye.
+            if (AGENT_ID == "agent_2") and end_flag and (not _is_goodbye(other_text if last_other else "")):
+                end_flag = False
+
             if in_conv and (end_flag or (conv_max_turns > 0 and int(_active_conv_turns) >= max(0, conv_max_turns - 1))):
                 if "[bye]" not in reply.lower() and "goodbye" not in reply.lower():
                     reply = (reply.rstrip() + "\nGoodbye. [bye]")[:600]
