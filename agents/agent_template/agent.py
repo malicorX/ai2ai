@@ -1411,13 +1411,33 @@ def maybe_chat(world):
     global _last_meetup_id_sent
 
     # Only talk when adjacent.
-    # During meetup windows we actively close distance so chat reliably happens.
+    # During meetup windows (or when a meetup opener is pending), we actively close distance so chat reliably happens.
     day, minute_of_day = world_time(world)
     MEETUP_PERIOD_MIN = int(os.getenv("MEETUP_PERIOD_MIN", "10"))
     MEETUP_WINDOW_MIN = int(os.getenv("MEETUP_WINDOW_MIN", "5"))
     meetup_mode = (MEETUP_PERIOD_MIN > 0) and ((minute_of_day % MEETUP_PERIOD_MIN) < MEETUP_WINDOW_MIN)
     now_total = _total_minutes(day, minute_of_day)
     mid = _meetup_id(now_total, MEETUP_PERIOD_MIN) if meetup_mode else None
+
+    # If the other agent already posted a meetup-tagged opener, allow replying even outside the strict window.
+    pending_mid = None
+    try:
+        recent = chat_recent(limit=MAX_CHAT_TO_SCAN)
+        for m in reversed(recent):
+            mtxt = str(m.get("text") or "")
+            mmid = _extract_meetup_id(mtxt)
+            if mmid is None:
+                continue
+            if m.get("sender_id") != AGENT_ID:
+                pending_mid = mmid
+                break
+    except Exception:
+        pending_mid = None
+
+    if pending_mid is not None and _last_meetup_id_sent != pending_mid:
+        # Treat as an active meetup reply even if we're outside the window.
+        mid = pending_mid
+        meetup_mode = True
 
     if not _adjacent_to_other(world):
         if meetup_mode:
