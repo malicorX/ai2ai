@@ -479,16 +479,20 @@ def chat_recent(limit: int = MAX_CHAT_TO_SCAN):
 
 
 def chat_send(text: str):
-    requests.post(
-        f"{WORLD_API}/chat/send",
-        json={
-            "sender_type": "agent",
-            "sender_id": AGENT_ID,
-            "sender_name": DISPLAY_NAME,
-            "text": text,
-        },
-        timeout=10,
-    )
+    payload = {
+        "sender_type": "agent",
+        "sender_id": AGENT_ID,
+        "sender_name": DISPLAY_NAME,
+        "text": text,
+    }
+    try:
+        r = requests.post(f"{WORLD_API}/chat/send", json=payload, timeout=10)
+        # Explicitly log failures so missing chat isn't silent.
+        if int(getattr(r, "status_code", 0) or 0) >= 400:
+            trace_event("error", "chat_send failed", {"status": r.status_code, "body": (r.text or "")[:200]})
+    except Exception as e:
+        trace_event("error", "chat_send exception", {"error": str(e)[:200]})
+        return
 
 
 def _style(text: str) -> str:
