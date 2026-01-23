@@ -1706,7 +1706,19 @@ def maybe_chat(world):
     if last_other and last_other.get("msg_id") != _last_seen_other_msg_id:
         other_name = last_other.get("sender_name", "Other")
         other_text = (last_other.get("text") or "").strip()
-        cprefix = f"[conv:{_active_conv_id}] " if in_conv and _active_conv_id else ""
+        # If the other message carries a conversation id, adopt it immediately (even if we haven't
+        # yet attached via the top-of-function discovery).
+        cid_from_other = _extract_conv_id(other_text)
+        if cid_from_other and cid_from_other != _active_conv_id:
+            _active_conv_id = cid_from_other
+            _active_conv_other_id = str(last_other.get("sender_id") or "")
+            _active_conv_started_total = now_total
+            _active_conv_last_total = now_total
+            _active_conv_turns = 0
+            in_conv = True
+            trace_event("status", "conversation started (adopt reply)", {"conv": _active_conv_id, "with": _active_conv_other_id})
+
+        cprefix = f"[conv:{_active_conv_id}] " if _active_conv_id else ""
         mprefix = f"[meetup:{mid}] " if (not in_conv) and period_active and (mid is not None) else ""
         tprefix = f"{cprefix}{mprefix}[topic: {topic}] " if topic else f"{cprefix}{mprefix}"
         reply = None
