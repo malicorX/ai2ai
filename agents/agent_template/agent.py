@@ -466,7 +466,7 @@ def _meetup_id(now_total: int, period_min: int) -> int:
 
 def _extract_meetup_id(text: str):
     try:
-        m = re.search(r"\\[meetup:(\\d+)\\]", text or "")
+        m = re.search(r"\[meetup:(\d+)\]", text or "")
         return int(m.group(1)) if m else None
     except Exception:
         return None
