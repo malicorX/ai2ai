@@ -1457,9 +1457,12 @@ def maybe_chat(world):
     day, minute_of_day = world_time(world)
     MEETUP_PERIOD_MIN = int(os.getenv("MEETUP_PERIOD_MIN", "10"))
     MEETUP_WINDOW_MIN = int(os.getenv("MEETUP_WINDOW_MIN", "5"))
-    meetup_mode = (MEETUP_PERIOD_MIN > 0) and ((minute_of_day % MEETUP_PERIOD_MIN) < MEETUP_WINDOW_MIN)
+    period_active = MEETUP_PERIOD_MIN > 0
+    meetup_mode = period_active and ((minute_of_day % MEETUP_PERIOD_MIN) < MEETUP_WINDOW_MIN)
     now_total = _total_minutes(day, minute_of_day)
-    mid = _meetup_id(now_total, MEETUP_PERIOD_MIN) if meetup_mode else None
+    # Use a stable "meetup/period id" for tagging + alternation even if the actual adjacency happens slightly
+    # outside the strict meetup window (sim time can step fast).
+    mid = _meetup_id(now_total, MEETUP_PERIOD_MIN) if period_active else None
 
     # Determine if there's an in-progress meetup exchange (one side spoke, the other hasn't).
     # This lets us continue/complete the 2-turn exchange even outside the strict window.
@@ -1494,6 +1497,7 @@ def maybe_chat(world):
         # Treat as an active meetup reply even if we're outside the window.
         mid = pending_mid
         meetup_mode = True
+        period_active = True
 
     if not _adjacent_to_other(world):
         if meetup_mode:
@@ -1520,7 +1524,7 @@ def maybe_chat(world):
         return
 
     p = min(1.0, CHAT_PROBABILITY * ADJACENT_CHAT_BOOST)
-    if meetup_mode:
+    if period_active:
         # Deterministic alternation per meetup window:
         # - agent_1 opens once per meetup_id
         # - agent_2 replies once per meetup_id
@@ -1555,7 +1559,7 @@ def maybe_chat(world):
     if last_other and last_other.get("msg_id") != _last_seen_other_msg_id:
         other_name = last_other.get("sender_name", "Other")
         other_text = (last_other.get("text") or "").strip()
-        mprefix = f"[meetup:{mid}] " if meetup_mode and (mid is not None) else ""
+        mprefix = f"[meetup:{mid}] " if period_active and (mid is not None) else ""
         tprefix = f"{mprefix}[topic: {topic}] " if topic else mprefix
         if USE_LANGGRAPH:
             # LLM-driven: keep it grounded in tools and current system state.
@@ -1595,7 +1599,13 @@ def maybe_chat(world):
             )
             dbg = None
             if AGENT_ID == "agent_2":
-                dbg = {"meetup_mode": meetup_mode, "mid": mid, "pending_mid": pending_mid, "last_mid_sent": _last_meetup_id_sent}
+                dbg = {
+                    "period_active": period_active,
+                    "meetup_window": meetup_mode,
+                    "mid": mid,
+                    "pending_mid": pending_mid,
+                    "last_mid_sent": _last_meetup_id_sent,
+                }
             trace_event("thought", "LLM reply (summary)", {"topic": topic, "balance": bal, "other": other_name, "other_snippet": other_text[:120], "dbg": dbg})
             raw = llm_chat(sys, user, max_tokens=260)
             reply = _style(f"{tprefix}{raw}")
@@ -1609,14 +1619,14 @@ def maybe_chat(world):
                 )
         else:
             reply = _style(f"{tprefix}{_compose_reply(other_name, other_text, topic)}")
-        if meetup_mode:
+        if period_active:
             # In meetups, always send the one allowed message for the window (don't let similarity heuristics suppress it).
             chat_send(reply[:600])
         else:
             if not _too_similar_to_recent(reply):
                 chat_send(reply[:600])
                 _remember_sent(reply)
-        if meetup_mode and (mid is not None):
+        if period_active and (mid is not None):
             _last_meetup_id_sent = mid
         _last_seen_other_msg_id = last_other.get("msg_id")
         _last_replied_to_msg_id = last_other.get("msg_id")
@@ -1624,7 +1634,7 @@ def maybe_chat(world):
         return
 
     # Otherwise, start/continue conversation with an opener (still purposeful).
-    mprefix = f"[meetup:{mid}] " if meetup_mode and (mid is not None) else ""
+    mprefix = f"[meetup:{mid}] " if period_active and (mid is not None) else ""
     tprefix = f"{mprefix}[topic: {topic}] " if topic else mprefix
     if USE_LANGGRAPH:
         persona = (PERSONALITY or "").strip()
@@ -1657,14 +1667,14 @@ def maybe_chat(world):
         ]
         msg = (_style(tprefix + random.choice(openers)))[:600]
 
-    if meetup_mode:
+    if period_active:
         chat_send(msg)
     else:
         if not _too_similar_to_recent(msg):
             chat_send(msg)
             _remember_sent(msg)
     _last_sent_at = now
-    if meetup_mode:
+    if period_active:
         _last_forced_meetup_msg_at_total = now_total
         if mid is not None:
             _last_meetup_id_sent = mid
