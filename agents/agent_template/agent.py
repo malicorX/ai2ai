@@ -34,6 +34,7 @@ _last_walk_trace_total = -10**9
 _last_walk_trace_place = ""
 _last_social_touch_total = -10**9
 _last_forced_meetup_msg_at_total = -10**9
+_last_meetup_id_sent = None
 
 
 class PlanItem(BaseModel):
@@ -418,6 +419,19 @@ def _other_agent_coords(world):
     if not other:
         return None
     return int(other.get("x", 0)), int(other.get("y", 0))
+
+
+def _meetup_id(now_total: int, period_min: int) -> int:
+    period_min = max(1, int(period_min))
+    return int(now_total) // period_min
+
+
+def _extract_meetup_id(text: str):
+    try:
+        m = re.search(r"\\[meetup:(\\d+)\\]", text or "")
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
 
 
 def chat_recent(limit: int = MAX_CHAT_TO_SCAN):
@@ -1394,6 +1408,7 @@ def maybe_set_topic(world) -> str:
 def maybe_chat(world):
     global _last_replied_to_msg_id, _last_seen_other_msg_id, _last_sent_at
     global _last_forced_meetup_msg_at_total
+    global _last_meetup_id_sent
 
     # Only talk when adjacent.
     # During meetup windows we actively close distance so chat reliably happens.
@@ -1401,6 +1416,8 @@ def maybe_chat(world):
     MEETUP_PERIOD_MIN = int(os.getenv("MEETUP_PERIOD_MIN", "10"))
     MEETUP_WINDOW_MIN = int(os.getenv("MEETUP_WINDOW_MIN", "5"))
     meetup_mode = (MEETUP_PERIOD_MIN > 0) and ((minute_of_day % MEETUP_PERIOD_MIN) < MEETUP_WINDOW_MIN)
+    now_total = _total_minutes(day, minute_of_day)
+    mid = _meetup_id(now_total, MEETUP_PERIOD_MIN) if meetup_mode else None
 
     if not _adjacent_to_other(world):
         if meetup_mode:
@@ -1418,7 +1435,6 @@ def maybe_chat(world):
     except Exception:
         topic = ""
 
-    now_total = _total_minutes(day, minute_of_day)
     now = time.time()
     if now - _last_sent_at < CHAT_MIN_SECONDS:
         return
@@ -1428,9 +1444,26 @@ def maybe_chat(world):
         return
 
     p = min(1.0, CHAT_PROBABILITY * ADJACENT_CHAT_BOOST)
-    if meetup_mode and (now_total - _last_forced_meetup_msg_at_total) >= MEETUP_WINDOW_MIN:
-        # Guarantee at least one message per agent per meetup window (still respects turn-taking above).
-        pass
+    if meetup_mode:
+        # Deterministic alternation per meetup window:
+        # - agent_1 opens once per meetup_id
+        # - agent_2 replies once per meetup_id
+        # - each agent sends at most 1 message tagged with [meetup:<id>] per meetup_id
+        if _last_meetup_id_sent == mid:
+            return
+
+        recent = chat_recent(limit=MAX_CHAT_TO_SCAN)
+        window_msgs = [m for m in recent if _extract_meetup_id(str(m.get("text") or "")) == mid]
+        me_sent = any((m.get("sender_id") == AGENT_ID) for m in window_msgs)
+        if me_sent:
+            _last_meetup_id_sent = mid
+            return
+
+        other_sent = any((m.get("sender_id") != AGENT_ID) for m in window_msgs)
+        if not other_sent and AGENT_ID != "agent_1":
+            # wait for opener from agent_1
+            return
+        # Otherwise proceed (agent_1 opener, or agent_2 reply)
     else:
         if random.random() > p:
             return
@@ -1446,7 +1479,8 @@ def maybe_chat(world):
     if last_other and last_other.get("msg_id") != _last_seen_other_msg_id:
         other_name = last_other.get("sender_name", "Other")
         other_text = (last_other.get("text") or "").strip()
-        tprefix = f"[topic: {topic}] " if topic else ""
+        mprefix = f"[meetup:{mid}] " if meetup_mode and (mid is not None) else ""
+        tprefix = f"{mprefix}[topic: {topic}] " if topic else mprefix
         if USE_LANGGRAPH:
             # LLM-driven: keep it grounded in tools and current system state.
             persona = (PERSONALITY or "").strip()
@@ -1499,13 +1533,16 @@ def maybe_chat(world):
         if not _too_similar_to_recent(reply):
             chat_send(reply[:600])
             _remember_sent(reply)
+            if meetup_mode and (mid is not None):
+                _last_meetup_id_sent = mid
         _last_seen_other_msg_id = last_other.get("msg_id")
         _last_replied_to_msg_id = last_other.get("msg_id")
         _last_sent_at = now
         return
 
     # Otherwise, start/continue conversation with an opener (still purposeful).
-    tprefix = f"[topic: {topic}] " if topic else ""
+    mprefix = f"[meetup:{mid}] " if meetup_mode and (mid is not None) else ""
+    tprefix = f"{mprefix}[topic: {topic}] " if topic else mprefix
     if USE_LANGGRAPH:
         persona = (PERSONALITY or "").strip()
         bal = _cached_balance
@@ -1543,6 +1580,8 @@ def maybe_chat(world):
     _last_sent_at = now
     if meetup_mode:
         _last_forced_meetup_msg_at_total = now_total
+        if mid is not None:
+            _last_meetup_id_sent = mid
 
     # Optional: write an artifact, but do NOT spam chat unless explicitly enabled.
     try:
