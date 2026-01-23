@@ -44,6 +44,8 @@ _active_conv_other_id = None
 _active_conv_started_total = -10**9
 _active_conv_last_total = -10**9
 _active_conv_turns = 0
+_active_conv_job_id = ""
+_pending_claim_job_id = ""
 
 
 class PlanItem(BaseModel):
@@ -331,6 +333,7 @@ def maybe_reset_on_new_run() -> None:
     global _last_replied_to_msg_id, _last_seen_other_msg_id, _last_sent_at, _recent_sent_norm
     global _last_forced_meetup_msg_at_total, _last_meetup_id_sent
     global _active_conv_id, _active_conv_other_id, _active_conv_started_total, _active_conv_last_total, _active_conv_turns
+    global _active_conv_job_id, _pending_claim_job_id
 
     now = time.time()
     if now - _last_run_check_at < 5.0:
@@ -355,6 +358,8 @@ def maybe_reset_on_new_run() -> None:
         _active_conv_started_total = -10**9
         _active_conv_last_total = -10**9
         _active_conv_turns = 0
+        _active_conv_job_id = ""
+        _pending_claim_job_id = ""
     _last_run_id = rid
 
 
@@ -1120,6 +1125,7 @@ def _do_job(job: dict) -> str:
 
 def maybe_work_jobs() -> None:
     global _last_jobs_at, _active_job_id
+    global _pending_claim_job_id
     now = time.time()
     if now - _last_jobs_at < JOBS_EVERY_SECONDS:
         return
@@ -1133,6 +1139,33 @@ def maybe_work_jobs() -> None:
             return
     except Exception:
         pass
+
+    # If we created a job during a conversation, claim+submit it as soon as we reach the computer.
+    if _pending_claim_job_id and not _active_job_id:
+        job_id = _pending_claim_job_id
+        try:
+            if jobs_claim(job_id):
+                trace_event("action", f"claimed job {job_id}", {"job_id": job_id, "source": "conversation"})
+                _active_job_id = job_id
+                # Fetch the job details
+                job = {}
+                try:
+                    job = requests.get(f"{WORLD_API}/jobs/{job_id}", timeout=10).json().get("job") or {}
+                except Exception:
+                    job = {"job_id": job_id, "title": "conversation job", "body": "(missing)"}
+                submission = _do_job(job)
+                ok = jobs_submit(job_id, submission)
+                if ok:
+                    memory_append("event", f"Submitted job {job_id}: {job.get('title')}", tags=["job"])
+                    trace_event("action", f"submitted job {job_id}", {"job_id": job_id, "source": "conversation"})
+                    chat_send(_style(f"I executed our agreed job and submitted deliverable `{job_id}` for human review."))
+        except Exception:
+            pass
+        finally:
+            _pending_claim_job_id = ""
+            _active_job_id = ""
+            _last_jobs_at = now
+        return
 
     # Only chase jobs if we want more ai$.
     bal = _cached_balance
@@ -1249,6 +1282,28 @@ def _too_similar_to_recent(text: str, threshold: float = 0.90) -> bool:
         if SequenceMatcher(None, prev, n).ratio() >= threshold:
             return True
     return False
+
+
+def jobs_create(title: str, body: str, reward: float) -> str:
+    """Create a job on the backend. Returns job_id or empty string."""
+    title = (title or "").strip()
+    body = (body or "").strip()
+    reward = float(reward or 0.0)
+    if not title or not body or reward <= 0:
+        return ""
+    r = requests.post(
+        f"{WORLD_API}/jobs/create",
+        json={"title": title, "body": body, "reward": reward, "created_by": AGENT_ID},
+        timeout=10,
+    )
+    try:
+        data = r.json()
+    except Exception:
+        return ""
+    if not data.get("ok"):
+        return ""
+    job = data.get("job") or {}
+    return str(job.get("job_id") or "")
 
 
 def _remember_sent(text: str) -> None:
@@ -1553,6 +1608,7 @@ def maybe_chat(world):
     global _last_forced_meetup_msg_at_total
     global _last_meetup_id_sent
     global _active_conv_id, _active_conv_other_id, _active_conv_started_total, _active_conv_last_total, _active_conv_turns
+    global _active_conv_job_id, _pending_claim_job_id
 
     # Only talk when adjacent.
     # During meetup windows (or when a meetup opener is pending), we actively close distance so chat reliably happens.
@@ -1774,15 +1830,16 @@ def maybe_chat(world):
                 "You are an autonomous agent in a 2D world. You are chatting with another agent.\n"
                 "IMPORTANT: separate internal thoughts from spoken output.\n"
                 "Return STRICT JSON ONLY with this schema:\n"
-                "{\"think\": <string>, \"say\": <string>, \"end\": <true|false>}\n"
+                "{\"think\": <string>, \"say\": <string>, \"end\": <true|false>, \"job\": {\"title\": <string>, \"body\": <string>, \"reward\": <number>} | null}\n"
                 "Rules:\n"
                 "- 'think' can include planning and private reasoning.\n"
                 "- 'say' must be ONLY what you would say out loud to the other agent.\n"
                 "- In 'say', do NOT include meta like '1) ...', 'Summary:', or 'Here is my response'.\n"
                 "- In 'say', do NOT describe what you are doing; just do it.\n"
                 "- Be concise, concrete, and non-repetitive.\n"
-                "- Prefer proposing a concrete next action as a Job with acceptance criteria.\n"
-                "- If the conversation is complete, set end=true and include a short goodbye in 'say'.\n"
+                "- To avoid endless planning loops, you MUST converge to ONE concrete job.\n"
+                "- If you propose a job, also fill the 'job' object with a job that can be executed locally and produces a file under /app/workspace/deliverables.\n"
+                "- If you agree on a job and want to finish, set end=true and include a short goodbye in 'say'.\n"
             )
             user = (
                 f"Persona:\n{persona}\n\n"
@@ -1813,18 +1870,37 @@ def maybe_chat(world):
             think = ""
             say = ""
             end_flag = False
+            job_obj = None
             try:
                 m = re.search(r"\{[\s\S]*\}", raw)
                 obj = json.loads(m.group(0) if m else raw)
                 think = str(obj.get("think") or "").strip()
                 say = str(obj.get("say") or "").strip()
                 end_flag = bool(obj.get("end") or False)
+                job_obj = obj.get("job")
             except Exception:
                 # Fallback: treat raw as spoken text
                 say = str(raw or "").strip()
             if think:
                 trace_event("thought", "chat_thought", {"conv": _active_conv_id, "think": think[:800]})
             say = _sanitize_say(say)
+
+            # Convergence: if agent_1 has no job yet in this conversation, allow it to create one and end the convo.
+            if in_conv and (AGENT_ID == "agent_1") and (not _active_conv_job_id):
+                if isinstance(job_obj, dict):
+                    jtitle = str(job_obj.get("title") or "").strip()[:120]
+                    jbody = str(job_obj.get("body") or "").strip()[:2000]
+                    jreward = float(job_obj.get("reward") or 15.0)
+                    if jtitle and jbody and jreward > 0:
+                        jid = jobs_create(jtitle, jbody, jreward)
+                        if jid:
+                            _active_conv_job_id = jid
+                            _pending_claim_job_id = jid
+                            trace_event("action", "created job from conversation", {"job_id": jid, "title": jtitle, "reward": jreward})
+                            # Tell the other agent and end cleanly.
+                            say = (say + f"\n\nI created a real backend Job `{jid}` (reward {jreward:.1f} ai$). I'll claim+submit it when I reach the computer. Goodbye. [bye]").strip()
+                            end_flag = True
+
             reply = _style(f"{tprefix}{say}".strip())
             # Hard fallback if the model output is too vague.
             low = reply.lower()
@@ -1860,6 +1936,7 @@ def maybe_chat(world):
                 _active_conv_id = None
                 _active_conv_other_id = None
                 _active_conv_turns = 0
+                _active_conv_job_id = ""
         elif period_active and (mid is not None):
             _last_meetup_id_sent = mid
         _last_seen_other_msg_id = last_other.get("msg_id")
