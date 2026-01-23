@@ -33,6 +33,7 @@ _active_goal = None  # dict: {kind, place_id, activity, chosen_at_total, arrived
 _last_walk_trace_total = -10**9
 _last_walk_trace_place = ""
 _last_social_touch_total = -10**9
+_last_forced_meetup_msg_at_total = -10**9
 
 
 class PlanItem(BaseModel):
@@ -1383,6 +1384,7 @@ def maybe_set_topic(world) -> str:
 
 def maybe_chat(world):
     global _last_replied_to_msg_id, _last_seen_other_msg_id, _last_sent_at
+    global _last_forced_meetup_msg_at_total
 
     # Only talk when adjacent; once adjacent we stop moving and keep chatting.
     if not _adjacent_to_other(world):
@@ -1396,6 +1398,8 @@ def maybe_chat(world):
     except Exception:
         topic = ""
 
+    day, minute_of_day = world_time(world)
+    now_total = _total_minutes(day, minute_of_day)
     now = time.time()
     if now - _last_sent_at < CHAT_MIN_SECONDS:
         return
@@ -1404,9 +1408,18 @@ def maybe_chat(world):
     if not _is_my_turn(msgs):
         return
 
+    # During meetup windows, force a minimal amount of real conversation so it doesn't feel "dead".
+    MEETUP_PERIOD_MIN = int(os.getenv("MEETUP_PERIOD_MIN", "10"))
+    MEETUP_WINDOW_MIN = int(os.getenv("MEETUP_WINDOW_MIN", "5"))
+    meetup_mode = (MEETUP_PERIOD_MIN > 0) and ((minute_of_day % MEETUP_PERIOD_MIN) < MEETUP_WINDOW_MIN)
+
     p = min(1.0, CHAT_PROBABILITY * ADJACENT_CHAT_BOOST)
-    if random.random() > p:
-        return
+    if meetup_mode and (now_total - _last_forced_meetup_msg_at_total) >= MEETUP_WINDOW_MIN:
+        # Guarantee at least one message per agent per meetup window.
+        pass
+    else:
+        if random.random() > p:
+            return
 
     msgs = chat_recent()
     last_other = None
@@ -1514,6 +1527,8 @@ def maybe_chat(world):
         chat_send(msg)
         _remember_sent(msg)
     _last_sent_at = now
+    if meetup_mode:
+        _last_forced_meetup_msg_at_total = now_total
 
     # If we just sent an opener, produce an artifact and announce it (once).
     try:
