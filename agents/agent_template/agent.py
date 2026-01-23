@@ -1602,9 +1602,13 @@ def maybe_chat(world):
                 )
         else:
             reply = _style(f"{tprefix}{_compose_reply(other_name, other_text, topic)}")
-        if not _too_similar_to_recent(reply):
+        if meetup_mode:
+            # In meetups, always send the one allowed message for the window (don't let similarity heuristics suppress it).
             chat_send(reply[:600])
-            _remember_sent(reply)
+        else:
+            if not _too_similar_to_recent(reply):
+                chat_send(reply[:600])
+                _remember_sent(reply)
             if meetup_mode and (mid is not None):
                 _last_meetup_id_sent = mid
         _last_seen_other_msg_id = last_other.get("msg_id")
@@ -1646,9 +1650,12 @@ def maybe_chat(world):
         ]
         msg = (_style(tprefix + random.choice(openers)))[:600]
 
-    if not _too_similar_to_recent(msg):
+    if meetup_mode:
         chat_send(msg)
-        _remember_sent(msg)
+    else:
+        if not _too_similar_to_recent(msg):
+            chat_send(msg)
+            _remember_sent(msg)
     _last_sent_at = now
     if meetup_mode:
         _last_forced_meetup_msg_at_total = now_total
