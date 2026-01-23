@@ -1140,8 +1140,18 @@ def _do_job(job: dict) -> str:
 
     _append_file(out_path, "\n".join(content))
 
-    # Submission should be short; point to artifact
-    return f"Delivered `{out_path}`. Summary: created structured deliverable for '{title}'. Please review and approve/reject with criteria."
+    # Submission should be human-reviewable from the backend UI/API (don't just point to a container-local file path).
+    # Embed the deliverable markdown (bounded by backend's 20k cap).
+    md = _read_file(out_path, max_bytes=18000).strip()
+    if not md:
+        md = "(failed to read deliverable file content)"
+    submission = (
+        f"Deliverable path: `{out_path}`\n\n"
+        f"## Deliverable (markdown)\n\n"
+        f"```markdown\n{md}\n```\n"
+    )
+    # Ensure it stays within backend cap (main.py truncates at 20k, but keep some headroom)
+    return submission[:19000]
 
 
 def maybe_work_jobs() -> None:
