@@ -48,8 +48,9 @@ def _extract_tag(text: str, tag: str) -> str | None:
 def _escape_and_format(text: str) -> str:
     # lightweight formatting: escape HTML, then support **bold** and inline `code`
     s = html.escape(text or "")
-    s = re.sub(r"\\*\\*(.+?)\\*\\*", r"<strong>\\1</strong>", s)
-    s = re.sub(r"`([^`]+)`", r"<code>\\1</code>", s)
+    # Use \g<1> to avoid accidental literal "\1" output.
+    s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\g<1></strong>", s)
+    s = re.sub(r"`([^`]+)`", r"<code>\g<1></code>", s)
     # preserve newlines
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     return s.replace("\n", "<br>")
@@ -91,13 +92,14 @@ def build_html(messages: list[dict[str, Any]], title: str) -> str:
                 senders.append(str(sn))
         last_text = str(items[-1].get("text") or "")
         topic = _extract_tag(last_text, "topic") or ""
-        label = f"{conv_id} — {', '.join(senders[:3])}"
+        # Keep ASCII-only to avoid mojibake in local file viewers.
+        label = f"{conv_id} - {', '.join(senders[:3])}"
         if topic:
             label += f" — topic: {topic}"
         sidebar_items.append(
             f"<button class='convBtn' data-conv='{html.escape(conv_id)}' onclick='selectConv(\"{html.escape(conv_id)}\")'>"
             f"<div class='convTitle'>{html.escape(label)}</div>"
-            f"<div class='convMeta'>{len(items)} msgs · last: {html.escape(_fmt_ts(items[-1].get('created_at')))}</div>"
+            f"<div class='convMeta'>{len(items)} msgs - last: {html.escape(_fmt_ts(items[-1].get('created_at')))}</div>"
             f"</button>"
         )
 
@@ -119,7 +121,7 @@ def build_html(messages: list[dict[str, Any]], title: str) -> str:
                 meta_bits.append(f"topic: {topic}")
             if meetup:
                 meta_bits.append(f"meetup: {meetup}")
-            meta = " · ".join(meta_bits)
+            meta = " | ".join(meta_bits)
             meta_html = f"<span class='meta'>{html.escape(meta)}</span>" if meta else ""
             rows.append(
                 "<div class='msg'>"
@@ -242,7 +244,7 @@ def build_html(messages: list[dict[str, Any]], title: str) -> str:
 <body>
   <header>
     <div class="title">{html.escape(title)}</div>
-    <div class="sub">Generated {html.escape(now)} · messages: {len(messages)} · conversations: {len(group_items)}</div>
+    <div class="sub">Generated {html.escape(now)} - messages: {len(messages)} - conversations: {len(group_items)}</div>
     <div class="hint">Tip: use the left panel to switch conversations. Sessions use the in-chat protocol tag <code>[conv:&lt;id&gt;]</code>.</div>
   </header>
   <div class="layout">
