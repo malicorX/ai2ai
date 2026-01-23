@@ -1593,7 +1593,10 @@ def maybe_chat(world):
                 "3) Next action as a Job (title + acceptance criteria).\n"
                 "4) One clarifying question.\n"
             )
-            trace_event("thought", "LLM reply (summary)", {"topic": topic, "balance": bal, "other": other_name, "other_snippet": other_text[:120]})
+            dbg = None
+            if AGENT_ID == "agent_2":
+                dbg = {"meetup_mode": meetup_mode, "mid": mid, "pending_mid": pending_mid, "last_mid_sent": _last_meetup_id_sent}
+            trace_event("thought", "LLM reply (summary)", {"topic": topic, "balance": bal, "other": other_name, "other_snippet": other_text[:120], "dbg": dbg})
             raw = llm_chat(sys, user, max_tokens=260)
             reply = _style(f"{tprefix}{raw}")
             # Hard fallback if the model output is too vague.
@@ -1613,8 +1616,8 @@ def maybe_chat(world):
             if not _too_similar_to_recent(reply):
                 chat_send(reply[:600])
                 _remember_sent(reply)
-            if meetup_mode and (mid is not None):
-                _last_meetup_id_sent = mid
+        if meetup_mode and (mid is not None):
+            _last_meetup_id_sent = mid
         _last_seen_other_msg_id = last_other.get("msg_id")
         _last_replied_to_msg_id = last_other.get("msg_id")
         _last_sent_at = now
