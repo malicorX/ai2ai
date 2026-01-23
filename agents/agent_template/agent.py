@@ -277,6 +277,7 @@ JOBS_MIN_BALANCE_TARGET = float(os.getenv("JOBS_MIN_BALANCE_TARGET", "150"))
 TRADE_EVERY_SECONDS = float(os.getenv("TRADE_EVERY_SECONDS", "20"))
 TRADE_GIFT_THRESHOLD = float(os.getenv("TRADE_GIFT_THRESHOLD", "25"))
 TRADE_GIFT_AMOUNT = float(os.getenv("TRADE_GIFT_AMOUNT", "5"))
+ARTIFACT_ANNOUNCE_IN_CHAT = os.getenv("ARTIFACT_ANNOUNCE_IN_CHAT", "0").strip() == "1"
 
 _last_replied_to_msg_id = None
 _last_seen_other_msg_id = None
@@ -1415,7 +1416,7 @@ def maybe_chat(world):
 
     p = min(1.0, CHAT_PROBABILITY * ADJACENT_CHAT_BOOST)
     if meetup_mode and (now_total - _last_forced_meetup_msg_at_total) >= MEETUP_WINDOW_MIN:
-        # Guarantee at least one message per agent per meetup window.
+        # Guarantee at least one message per agent per meetup window (still respects turn-taking above).
         pass
     else:
         if random.random() > p:
@@ -1530,10 +1531,10 @@ def maybe_chat(world):
     if meetup_mode:
         _last_forced_meetup_msg_at_total = now_total
 
-    # If we just sent an opener, produce an artifact and announce it (once).
+    # Optional: write an artifact, but do NOT spam chat unless explicitly enabled.
     try:
         ap = maybe_write_artifact(topic)
-        if ap:
+        if ap and ARTIFACT_ANNOUNCE_IN_CHAT:
             note = _style(f"{tprefix}I wrote an artifact at `{ap}`. I'd like your critique: what should I change to make it job-ready?")
             if not _too_similar_to_recent(note):
                 chat_send(note[:600])
