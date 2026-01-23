@@ -118,11 +118,12 @@ def build_html(messages: list[dict[str, Any]], title: str) -> str:
             if meetup:
                 meta_bits.append(f"meetup: {meetup}")
             meta = " · ".join(meta_bits)
+            meta_html = f"<span class='meta'>{html.escape(meta)}</span>" if meta else ""
             rows.append(
                 "<div class='msg'>"
                 f"<div class='msgHeader'><span class='sender'>{html.escape(sender)}</span>"
                 f"<span class='time'>{html.escape(created)}</span>"
-                f"{f'<span class=\"meta\">{html.escape(meta)}</span>' if meta else ''}"
+                f"{meta_html}"
                 "</div>"
                 f"<div class='msgBody'>{body_html}</div>"
                 "</div>"
