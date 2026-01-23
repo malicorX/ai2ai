@@ -192,7 +192,8 @@ def perform_scheduled_life_step(world) -> None:
     now_total = _total_minutes(day, minute_of_day)
 
     # If we have a pending conversation-created job to execute, force travel to computer until it's done.
-    if _force_computer_until_total and _force_computer_until_total > now_total:
+    force_computer = bool(_force_computer_until_total and _force_computer_until_total > now_total)
+    if force_computer:
         try:
             if not _at_landmark(world, COMPUTER_LANDMARK_ID, radius=COMPUTER_ACCESS_RADIUS):
                 _active_goal = {
@@ -213,6 +214,9 @@ def perform_scheduled_life_step(world) -> None:
     MEETUP_WINDOW_MIN = int(os.getenv("MEETUP_WINDOW_MIN", "5"))   # for 5 minutes
     MEETUP_DWELL_MIN = int(os.getenv("MEETUP_DWELL_MIN", str(MEETUP_WINDOW_MIN)))  # dwell at least the window
     meetup_mode = (MEETUP_PERIOD_MIN > 0) and ((minute_of_day % MEETUP_PERIOD_MIN) < MEETUP_WINDOW_MIN)
+    # When forcing a computer trip to execute a job, do NOT override the goal with meetups.
+    if force_computer:
+        meetup_mode = False
 
     # Goal parameters (prevents "thrashing" when sim time jumps)
     GOAL_MAX_MIN = int(os.getenv("GOAL_MAX_MIN", "180"))     # abandon if stuck too long (sim minutes)
@@ -1143,6 +1147,7 @@ def _do_job(job: dict) -> str:
 def maybe_work_jobs() -> None:
     global _last_jobs_at, _active_job_id
     global _pending_claim_job_id
+    global _force_computer_until_total
     now = time.time()
     if now - _last_jobs_at < JOBS_EVERY_SECONDS:
         return
@@ -1176,6 +1181,7 @@ def maybe_work_jobs() -> None:
                     memory_append("event", f"Submitted job {job_id}: {job.get('title')}", tags=["job"])
                     trace_event("action", f"submitted job {job_id}", {"job_id": job_id, "source": "conversation"})
                     chat_send(_style(f"I executed our agreed job and submitted deliverable `{job_id}` for human review."))
+                    _force_computer_until_total = -10**9
         except Exception:
             pass
         finally:
