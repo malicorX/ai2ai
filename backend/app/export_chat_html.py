@@ -95,7 +95,7 @@ def build_html(messages: list[dict[str, Any]], title: str) -> str:
         # Keep ASCII-only to avoid mojibake in local file viewers.
         label = f"{conv_id} - {', '.join(senders[:3])}"
         if topic:
-            label += f" — topic: {topic}"
+            label += f" - topic: {topic}"
         sidebar_items.append(
             f"<button class='convBtn' data-conv='{html.escape(conv_id)}' onclick='selectConv(\"{html.escape(conv_id)}\")'>"
             f"<div class='convTitle'>{html.escape(label)}</div>"
@@ -290,7 +290,7 @@ def main() -> None:
     if args.latest_run:
         run_dir = _find_latest_run_dir(Path(args.runs_dir))
         chat_path = run_dir / "chat_messages.jsonl"
-        title = f"{args.title} — run {run_dir.name}"
+        title = f"{args.title} - run {run_dir.name}"
     else:
         chat_path = Path(args.input) if args.input else (DATA_DIR / "chat_messages.jsonl")
         title = args.title
