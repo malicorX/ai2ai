@@ -64,13 +64,20 @@ def _fmt_ts(created_at: Any) -> str:
         return ""
 
 
-def build_html(messages: list[dict[str, Any]], title: str) -> str:
+def build_html(messages: list[dict[str, Any]], thoughts: list[dict[str, Any]], title: str) -> str:
     # Group by conversation id if present; otherwise everything goes into one group.
     groups: dict[str, list[dict[str, Any]]] = {}
     for m in messages:
         text = str(m.get("text") or "")
         conv = _extract_tag(text, "conv") or "no-conv"
         groups.setdefault(conv, []).append(m)
+
+    # Group thoughts by conversation id (from trace_event data.conv)
+    tgroups: dict[str, list[dict[str, Any]]] = {}
+    for e in thoughts:
+        data = e.get("data") if isinstance(e.get("data"), dict) else {}
+        conv = str(data.get("conv") or "").strip() or "no-conv"
+        tgroups.setdefault(conv, []).append(e)
 
     # Sort groups by last message time
     def last_ts(items: list[dict[str, Any]]) -> float:
@@ -106,6 +113,7 @@ def build_html(messages: list[dict[str, Any]], title: str) -> str:
     # Build per-conv message HTML
     conv_sections = []
     for conv_id, items in group_items:
+        # Spoken messages
         rows = []
         for mm in items:
             sender = str(mm.get("sender_name") or mm.get("sender_id") or "?")
@@ -132,9 +140,40 @@ def build_html(messages: list[dict[str, Any]], title: str) -> str:
                 f"<div class='msgBody'>{body_html}</div>"
                 "</div>"
             )
+
+        # Thought entries (trace chat_thought)
+        trows = []
+        for e in (tgroups.get(conv_id) or []):
+            agent = str(e.get("agent_name") or e.get("agent_id") or "?")
+            created = _fmt_ts(e.get("created_at"))
+            data = e.get("data") if isinstance(e.get("data"), dict) else {}
+            think = str(data.get("think") or "").strip()
+            if not think:
+                continue
+            trows.append(
+                "<div class='msg thought'>"
+                f"<div class='msgHeader'><span class='sender'>{html.escape(agent)}</span>"
+                f"<span class='time'>{html.escape(created)}</span>"
+                f"<span class='meta'>internal thought</span>"
+                "</div>"
+                f"<div class='msgBody'>{_escape_and_format(think)}</div>"
+                "</div>"
+            )
+
         conv_sections.append(
             f"<section class='convSection' id='conv-{html.escape(conv_id)}' data-conv='{html.escape(conv_id)}'>"
-            + "\n".join(rows)
+            + (
+                "<div class='tabs'>"
+                "<button class='tabBtn active' data-tab='spoken' onclick='selectTab(\"spoken\")'>Spoken</button>"
+                "<button class='tabBtn' data-tab='thoughts' onclick='selectTab(\"thoughts\")'>Thoughts</button>"
+                "</div>"
+                "<div class='tabPane active' data-tab='spoken'>"
+                + ("\n".join(rows) if rows else "<div class='convMeta'>(no spoken messages)</div>")
+                + "</div>"
+                "<div class='tabPane' data-tab='thoughts'>"
+                + ("\n".join(trows) if trows else "<div class='convMeta'>(no thoughts captured)</div>")
+                + "</div>"
+            )
             + "</section>"
         )
 
@@ -211,6 +250,10 @@ def build_html(messages: list[dict[str, Any]], title: str) -> str:
       padding: 10px 12px;
       margin-bottom: 12px;
     }}
+    .msg.thought {{
+      background: rgba(122,162,255,0.06);
+      border-color: rgba(122,162,255,0.20);
+    }}
     .msgHeader {{
       display: flex;
       gap: 10px;
@@ -235,6 +278,34 @@ def build_html(messages: list[dict[str, Any]], title: str) -> str:
     .convSection {{ display: none; }}
     .convSection.active {{ display: block; }}
     .hint {{ color: var(--muted); font-size: 12px; margin-top: 8px; }}
+    .tabs {{
+      display: flex;
+      gap: 10px;
+      position: sticky;
+      top: 0;
+      padding: 10px 0 12px 0;
+      background: rgba(11,18,32,0.60);
+      backdrop-filter: blur(6px);
+      z-index: 5;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      margin-bottom: 12px;
+    }}
+    .tabBtn {{
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.02);
+      color: var(--text);
+      border-radius: 999px;
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 650;
+    }}
+    .tabBtn.active {{
+      border-color: rgba(122,162,255,0.55);
+      outline: 2px solid rgba(122,162,255,0.25);
+    }}
+    .tabPane {{ display: none; }}
+    .tabPane.active {{ display: block; }}
     @media (max-width: 980px) {{
       .layout {{ grid-template-columns: 1fr; }}
       aside {{ border-right: none; border-bottom: 1px solid var(--border); }}
@@ -261,6 +332,8 @@ def build_html(messages: list[dict[str, Any]], title: str) -> str:
       btns.forEach(b => b.classList.toggle('active', b.dataset.conv === convId));
       const secs = document.querySelectorAll('.convSection');
       secs.forEach(s => s.classList.toggle('active', s.dataset.conv === convId));
+      // reset tab to spoken when switching conv
+      selectTab('spoken');
       const sec = document.getElementById('conv-' + convId);
       if (sec) {{
         // jump to top on selection for clarity
@@ -269,6 +342,14 @@ def build_html(messages: list[dict[str, Any]], title: str) -> str:
           if (main) main.scrollTop = 0;
         }});
       }}
+    }}
+    function selectTab(tabName) {{
+      const activeSec = document.querySelector('.convSection.active');
+      if (!activeSec) return;
+      const btns = activeSec.querySelectorAll('.tabBtn');
+      btns.forEach(b => b.classList.toggle('active', b.dataset.tab === tabName));
+      const panes = activeSec.querySelectorAll('.tabPane');
+      panes.forEach(p => p.classList.toggle('active', p.dataset.tab === tabName));
     }}
     // default selection
     selectConv({json.dumps(default_conv)});
@@ -281,6 +362,7 @@ def build_html(messages: list[dict[str, Any]], title: str) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Export chat_messages.jsonl to a readable HTML viewer.")
     ap.add_argument("--input", type=str, default="", help="Path to chat_messages.jsonl (default: /app/data/chat_messages.jsonl)")
+    ap.add_argument("--trace", type=str, default="", help="Path to trace_events.jsonl (default: /app/data/trace_events.jsonl)")
     ap.add_argument("--latest-run", action="store_true", help="Use latest run under /app/data/runs/<run_id>/chat_messages.jsonl")
     ap.add_argument("--runs-dir", type=str, default=str(DATA_DIR / "runs"), help="Runs directory (default: /app/data/runs)")
     ap.add_argument("--out", type=str, default="result_viewer.html", help="Output HTML path")
@@ -290,18 +372,33 @@ def main() -> None:
     if args.latest_run:
         run_dir = _find_latest_run_dir(Path(args.runs_dir))
         chat_path = run_dir / "chat_messages.jsonl"
+        trace_path = run_dir / "trace_events.jsonl"
         title = f"{args.title} - run {run_dir.name}"
     else:
         chat_path = Path(args.input) if args.input else (DATA_DIR / "chat_messages.jsonl")
+        trace_path = Path(args.trace) if args.trace else (DATA_DIR / "trace_events.jsonl")
         title = args.title
 
     msgs = _read_jsonl(chat_path)
     msgs = [m for m in msgs if isinstance(m.get("text"), str)]
-    html_out = build_html(msgs, title=title)
+    trace = []
+    try:
+        trace = _read_jsonl(trace_path)
+    except Exception:
+        trace = []
+    trace = [
+        e
+        for e in trace
+        if (e.get("kind") == "thought")
+        and (e.get("summary") == "chat_thought")
+        and isinstance(e.get("data"), dict)
+        and isinstance((e.get("data") or {}).get("think"), str)
+    ]
+    html_out = build_html(msgs, thoughts=trace, title=title)
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html_out, encoding="utf-8")
-    print(f"Wrote {out_path} ({len(msgs)} messages) from {chat_path}")
+    print(f"Wrote {out_path} ({len(msgs)} messages, {len(trace)} thoughts) from {chat_path} and {trace_path}")
 
 
 if __name__ == "__main__":
