@@ -250,7 +250,9 @@ def perform_scheduled_life_step(world) -> None:
                 memory_append_scored("event", nugget, tags=["life", "gossip", place_id])
             except Exception:
                 pass
-            chat_send(_style(f"[life] {nugget}"))
+            # IMPORTANT: do not spam the chat stream with life/status logs.
+            # Persist as trace + memory; reserve chat for purposeful discussion.
+            trace_event("status", "life note", {"place": place_id, "minute": minute_of_day, "note": nugget})
 
     arrived_at = int(_active_goal.get("arrived_at_total") or now_total)
     dwell_min = MEETUP_DWELL_MIN if (_active_goal.get("kind") == "meetup") else GOAL_DWELL_MIN
@@ -1335,7 +1337,7 @@ def _topic_candidates() -> list:
 
 
 def maybe_set_topic(world) -> str:
-    """Rotate topic occasionally when adjacent and it is our turn."""
+    """Set a topic when adjacent and it is our turn (prefer goal-driven topics)."""
     global _last_topic_set_at
     if not _adjacent_to_other(world):
         return ""
@@ -1357,8 +1359,23 @@ def maybe_set_topic(world) -> str:
     except Exception:
         pass
 
-    candidates = _topic_candidates()
-    pick = random.choice([c for c in candidates if c.lower() != current.lower()] or candidates)
+    # Prefer a goal-driven topic based on the agent's current needs.
+    bal = _cached_balance
+    try:
+        if bal is None:
+            bal = economy_balance()
+    except Exception:
+        bal = bal if bal is not None else 0.0
+
+    if float(bal or 0.0) < float(JOBS_MIN_BALANCE_TARGET):
+        pick = "Earn ai$: pick one job strategy + acceptance criteria"
+    else:
+        pick = "Human-in-the-loop feedback: reward/penalty mechanics that are fair"
+
+    # Fallback to curated topic list if needed.
+    if not pick:
+        candidates = _topic_candidates()
+        pick = random.choice([c for c in candidates if c.lower() != current.lower()] or candidates)
     chat_topic_set(pick, reason="rotate topic to keep conversation meaningful and avoid loops")
     _last_topic_set_at = now
     return pick
@@ -1420,10 +1437,12 @@ def maybe_chat(world):
             sys = (
                 "You are an autonomous agent in a 2D world. You are chatting with another agent.\n"
                 "Rules:\n"
-                "- Be concise and specific (3-8 sentences).\n"
+                "- Be concise and specific (4-10 sentences).\n"
                 "- Do NOT repeat yourself.\n"
                 "- If asked a question, answer it directly.\n"
-                "- Prefer proposing a concrete next action that can be turned into a Job.\n"
+                "- The chat must have PURPOSE. Do not ramble or philosophize.\n"
+                "- Tie your message to your persona and the ai$ economy.\n"
+                "- Prefer proposing a concrete next action as a Job with acceptance criteria.\n"
                 "- You care about earning ai$ ethically via Jobs; real money transfers are always human-approved.\n"
             )
             user = (
@@ -1431,11 +1450,23 @@ def maybe_chat(world):
                 f"State:\n- agent_id={AGENT_ID}\n- display_name={DISPLAY_NAME}\n- balance={bal}\n- topic={topic}\n\n"
             f"Relevant memories (ranked):\n{chr(10).join(mem_lines) if mem_lines else '(none)'}\n\n"
                 f"Other said:\n{other_name}: {other_text}\n\n"
-                "Reply as this agent:"
+                "Reply using this structure:\n"
+                "1) One-sentence summary of what the other said.\n"
+                "2) Proposal (what we should do next and why).\n"
+                "3) Next action as a Job (title + acceptance criteria).\n"
+                "4) One clarifying question.\n"
             )
             trace_event("thought", "LLM reply (summary)", {"topic": topic, "balance": bal, "other": other_name, "other_snippet": other_text[:120]})
             raw = llm_chat(sys, user, max_tokens=260)
             reply = _style(f"{tprefix}{raw}")
+            # Hard fallback if the model output is too vague.
+            low = reply.lower()
+            if ("acceptance" not in low) and ("criteria" not in low) and ("job" not in low) and ("next action" not in low):
+                reply = _style(
+                    f"{tprefix}{other_name}: Proposal: pick ONE job-sized change tied to ai$ outcomes.\n"
+                    f"Next action as a Job: Title: 'Make chat purposeful' | Acceptance: remove [life] spam; each message includes proposal+job+question.\n"
+                    f"Question: do we optimize (a) ai$ earning rate or (b) human readability first?"
+                )
         else:
             reply = _style(f"{tprefix}{_compose_reply(other_name, other_text, topic)}")
         if not _too_similar_to_recent(reply):
@@ -1446,7 +1477,7 @@ def maybe_chat(world):
         _last_sent_at = now
         return
 
-    # Otherwise, start/continue conversation with an opener.
+    # Otherwise, start/continue conversation with an opener (still purposeful).
     tprefix = f"[topic: {topic}] " if topic else ""
     if USE_LANGGRAPH:
         persona = (PERSONALITY or "").strip()
@@ -1463,7 +1494,10 @@ def maybe_chat(world):
         user = (
             f"Persona:\n{persona}\n\n"
             f"State:\n- agent_id={AGENT_ID}\n- display_name={DISPLAY_NAME}\n- balance={bal}\n- topic={topic}\n\n"
-            "Write ONE opener message that moves the work forward."
+            "Write ONE opener message using this structure:\n"
+            "1) Proposal.\n"
+            "2) Next action as a Job (title + acceptance criteria).\n"
+            "3) One question.\n"
         )
         trace_event("thought", "LLM opener (summary)", {"topic": topic, "balance": bal})
         raw = llm_chat(sys, user, max_tokens=220)
