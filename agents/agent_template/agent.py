@@ -35,6 +35,8 @@ _last_walk_trace_place = ""
 _last_social_touch_total = -10**9
 _last_forced_meetup_msg_at_total = -10**9
 _last_meetup_id_sent = None
+_last_run_id = ""
+_last_run_check_at = 0.0
 
 
 class PlanItem(BaseModel):
@@ -305,6 +307,42 @@ def get_world():
     r = requests.get(f"{WORLD_API}/world", timeout=10)
     r.raise_for_status()
     return r.json()
+
+
+def get_run_id() -> str:
+    r = requests.get(f"{WORLD_API}/run", timeout=10)
+    r.raise_for_status()
+    return str(r.json().get("run_id") or "")
+
+
+def maybe_reset_on_new_run() -> None:
+    """
+    If the backend run_id changes (POST /admin/new_run), reset local agent chat state.
+    This avoids "stuck" turn-tracking across runs without restarting agent containers.
+    """
+    global _last_run_id, _last_run_check_at
+    global _last_replied_to_msg_id, _last_seen_other_msg_id, _last_sent_at, _recent_sent_norm
+    global _last_forced_meetup_msg_at_total, _last_meetup_id_sent
+
+    now = time.time()
+    if now - _last_run_check_at < 5.0:
+        return
+    _last_run_check_at = now
+    try:
+        rid = get_run_id()
+    except Exception:
+        return
+    if not rid:
+        return
+    if _last_run_id and rid != _last_run_id:
+        # reset chat-related memory
+        _last_replied_to_msg_id = None
+        _last_seen_other_msg_id = None
+        _last_sent_at = 0.0
+        _recent_sent_norm = []
+        _last_forced_meetup_msg_at_total = -10**9
+        _last_meetup_id_sent = None
+    _last_run_id = rid
 
 
 def _sign(n: int) -> int:
@@ -1676,6 +1714,7 @@ def main():
     while True:
         try:
             upsert()
+            maybe_reset_on_new_run()
             world = get_world()
             maybe_process_event_invites(world)
             maybe_reflect(world)
