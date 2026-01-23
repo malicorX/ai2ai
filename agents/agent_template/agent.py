@@ -1457,18 +1457,32 @@ def maybe_chat(world):
     now_total = _total_minutes(day, minute_of_day)
     mid = _meetup_id(now_total, MEETUP_PERIOD_MIN) if meetup_mode else None
 
-    # If the other agent already posted a meetup-tagged opener, allow replying even outside the strict window.
+    # Determine if there's an in-progress meetup exchange (one side spoke, the other hasn't).
+    # This lets us continue/complete the 2-turn exchange even outside the strict window.
     pending_mid = None
     try:
         recent = chat_recent(limit=MAX_CHAT_TO_SCAN)
-        for m in reversed(recent):
+        # Find latest meetup id (if any) and whether both sides have spoken.
+        latest_mid = None
+        by_mid = {}
+        for m in recent:
             mtxt = str(m.get("text") or "")
             mmid = _extract_meetup_id(mtxt)
             if mmid is None:
                 continue
-            if m.get("sender_id") != AGENT_ID:
-                pending_mid = mmid
-                break
+            latest_mid = mmid if (latest_mid is None or mmid > latest_mid) else latest_mid
+            s = by_mid.get(mmid) or set()
+            s.add(str(m.get("sender_id") or ""))
+            by_mid[mmid] = s
+
+        # If latest meetup has a message from the other but not from us, it's pending for us.
+        if latest_mid is not None:
+            s = by_mid.get(latest_mid) or set()
+            if AGENT_ID not in s:
+                pending_mid = latest_mid
+            # If we already spoke but the other hasn't, keep the exchange alive (agent_1 waits/chases).
+            elif ("agent_1" in s) and ("agent_2" not in s) and AGENT_ID == "agent_1":
+                pending_mid = latest_mid
     except Exception:
         pending_mid = None
 
