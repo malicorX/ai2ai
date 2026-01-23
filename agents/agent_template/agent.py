@@ -412,6 +412,14 @@ def _adjacent_to_other(world) -> bool:
     return _chebyshev(ax, ay, ox, oy) <= 1
 
 
+def _other_agent_coords(world):
+    agents = world.get("agents", [])
+    other = next((a for a in agents if a.get("agent_id") != AGENT_ID), None)
+    if not other:
+        return None
+    return int(other.get("x", 0)), int(other.get("y", 0))
+
+
 def chat_recent(limit: int = MAX_CHAT_TO_SCAN):
     r = requests.get(f"{WORLD_API}/chat/recent?limit={limit}", timeout=10)
     r.raise_for_status()
@@ -1387,8 +1395,19 @@ def maybe_chat(world):
     global _last_replied_to_msg_id, _last_seen_other_msg_id, _last_sent_at
     global _last_forced_meetup_msg_at_total
 
-    # Only talk when adjacent; once adjacent we stop moving and keep chatting.
+    # Only talk when adjacent.
+    # During meetup windows we actively close distance so chat reliably happens.
+    day, minute_of_day = world_time(world)
+    MEETUP_PERIOD_MIN = int(os.getenv("MEETUP_PERIOD_MIN", "10"))
+    MEETUP_WINDOW_MIN = int(os.getenv("MEETUP_WINDOW_MIN", "5"))
+    meetup_mode = (MEETUP_PERIOD_MIN > 0) and ((minute_of_day % MEETUP_PERIOD_MIN) < MEETUP_WINDOW_MIN)
+
     if not _adjacent_to_other(world):
+        if meetup_mode:
+            oc = _other_agent_coords(world)
+            if oc:
+                _move_towards(world, oc[0], oc[1])
+                return
         return
 
     # Chat is part of life; do NOT gate it behind the computer location.
@@ -1399,7 +1418,6 @@ def maybe_chat(world):
     except Exception:
         topic = ""
 
-    day, minute_of_day = world_time(world)
     now_total = _total_minutes(day, minute_of_day)
     now = time.time()
     if now - _last_sent_at < CHAT_MIN_SECONDS:
@@ -1408,11 +1426,6 @@ def maybe_chat(world):
     msgs = chat_recent()
     if not _is_my_turn(msgs):
         return
-
-    # During meetup windows, force a minimal amount of real conversation so it doesn't feel "dead".
-    MEETUP_PERIOD_MIN = int(os.getenv("MEETUP_PERIOD_MIN", "10"))
-    MEETUP_WINDOW_MIN = int(os.getenv("MEETUP_WINDOW_MIN", "5"))
-    meetup_mode = (MEETUP_PERIOD_MIN > 0) and ((minute_of_day % MEETUP_PERIOD_MIN) < MEETUP_WINDOW_MIN)
 
     p = min(1.0, CHAT_PROBABILITY * ADJACENT_CHAT_BOOST)
     if meetup_mode and (now_total - _last_forced_meetup_msg_at_total) >= MEETUP_WINDOW_MIN:
