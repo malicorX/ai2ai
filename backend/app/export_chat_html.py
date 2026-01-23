@@ -39,8 +39,10 @@ def _find_latest_run_dir(runs_dir: Path) -> Path:
 
 
 def _extract_tag(text: str, tag: str) -> str | None:
-    m = re.search(rf"\\[{re.escape(tag)}:([^\\]]+)\\]", text or "")
-    return m.group(1).strip() if m else None
+    # Example: [conv:abc] or [topic: Something]
+    pat = r"\[" + re.escape(tag) + r":([^\]]+)\]"
+    m = re.search(pat, text or "")
+    return str(m.group(1)).strip() if m else None
 
 
 def _escape_and_format(text: str) -> str:
