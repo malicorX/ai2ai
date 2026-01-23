@@ -38,6 +38,13 @@ _last_meetup_id_sent = None
 _last_run_id = ""
 _last_run_check_at = 0.0
 
+# Conversation protocol (sticky sessions)
+_active_conv_id = None
+_active_conv_other_id = None
+_active_conv_started_total = -10**9
+_active_conv_last_total = -10**9
+_active_conv_turns = 0
+
 
 class PlanItem(BaseModel):
     minute: int = Field(ge=0, le=1439)
@@ -323,6 +330,7 @@ def maybe_reset_on_new_run() -> None:
     global _last_run_id, _last_run_check_at
     global _last_replied_to_msg_id, _last_seen_other_msg_id, _last_sent_at, _recent_sent_norm
     global _last_forced_meetup_msg_at_total, _last_meetup_id_sent
+    global _active_conv_id, _active_conv_other_id, _active_conv_started_total, _active_conv_last_total, _active_conv_turns
 
     now = time.time()
     if now - _last_run_check_at < 5.0:
@@ -342,6 +350,11 @@ def maybe_reset_on_new_run() -> None:
         _recent_sent_norm = []
         _last_forced_meetup_msg_at_total = -10**9
         _last_meetup_id_sent = None
+        _active_conv_id = None
+        _active_conv_other_id = None
+        _active_conv_started_total = -10**9
+        _active_conv_last_total = -10**9
+        _active_conv_turns = 0
     _last_run_id = rid
 
 
@@ -470,6 +483,27 @@ def _extract_meetup_id(text: str):
         return int(m.group(1)) if m else None
     except Exception:
         return None
+
+
+def _extract_conv_id(text: str):
+    try:
+        m = re.search(r"\[conv:([A-Za-z0-9_-]{4,64})\]", text or "")
+        return str(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
+def _is_goodbye(text: str) -> bool:
+    t = (text or "").lower()
+    if "[bye]" in t:
+        return True
+    return bool(re.search(r"\b(goodbye|bye for now|bye\.|see you|farewell)\b", t))
+
+
+def _new_conv_id(now_total: int) -> str:
+    # short-ish id, stable enough for logs; avoids uuid spam
+    suffix = "".join(random.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(4))
+    return f"{now_total}-{AGENT_ID[-1]}-{suffix}"
 
 
 def chat_recent(limit: int = MAX_CHAT_TO_SCAN):
@@ -1447,10 +1481,46 @@ def maybe_set_topic(world) -> str:
     return pick
 
 
+def maybe_conversation_step(world) -> bool:
+    """
+    If a conversation is active, agents should prioritize staying in it:
+    approach the partner and only do chat until the conversation ends.
+    """
+    global _active_conv_id, _active_conv_other_id, _active_conv_last_total, _active_conv_turns
+    if not _active_conv_id:
+        return False
+    day, minute_of_day = world_time(world)
+    now_total = _total_minutes(day, minute_of_day)
+    conv_max_silence = int(os.getenv("CONV_MAX_SILENCE_MIN", "30"))
+    conv_max_turns = int(os.getenv("CONV_MAX_TURNS", "8"))
+    if conv_max_silence > 0 and (now_total - int(_active_conv_last_total or now_total)) > conv_max_silence:
+        trace_event("status", "conversation expired (silence)", {"conv": _active_conv_id})
+        _active_conv_id = None
+        _active_conv_other_id = None
+        _active_conv_turns = 0
+        return False
+    if conv_max_turns > 0 and int(_active_conv_turns) >= conv_max_turns:
+        trace_event("status", "conversation expired (turn limit)", {"conv": _active_conv_id})
+        _active_conv_id = None
+        _active_conv_other_id = None
+        _active_conv_turns = 0
+        return False
+
+    if not _adjacent_to_other(world):
+        oc = _other_agent_coords(world)
+        if oc:
+            _move_towards(world, oc[0], oc[1])
+        return True
+
+    maybe_chat(world)
+    return True
+
+
 def maybe_chat(world):
     global _last_replied_to_msg_id, _last_seen_other_msg_id, _last_sent_at
     global _last_forced_meetup_msg_at_total
     global _last_meetup_id_sent
+    global _active_conv_id, _active_conv_other_id, _active_conv_started_total, _active_conv_last_total, _active_conv_turns
 
     # Only talk when adjacent.
     # During meetup windows (or when a meetup opener is pending), we actively close distance so chat reliably happens.
@@ -1463,6 +1533,49 @@ def maybe_chat(world):
     # Use a stable "meetup/period id" for tagging + alternation even if the actual adjacency happens slightly
     # outside the strict meetup window (sim time can step fast).
     mid = _meetup_id(now_total, MEETUP_PERIOD_MIN) if period_active else None
+
+    conv_max_silence = int(os.getenv("CONV_MAX_SILENCE_MIN", "30"))
+    conv_max_turns = int(os.getenv("CONV_MAX_TURNS", "8"))
+
+    # Pull recent messages once and detect/attach to conversations.
+    msgs = []
+    try:
+        msgs = chat_recent(limit=MAX_CHAT_TO_SCAN)
+    except Exception:
+        msgs = []
+
+    # Detect most recent message from the other in general (used for conversation start discovery).
+    last_other_any = None
+    for m in reversed(msgs):
+        if m.get("sender_id") != AGENT_ID:
+            last_other_any = m
+            break
+
+    incoming_conv = None
+    if last_other_any:
+        incoming_conv = _extract_conv_id(str(last_other_any.get("text") or ""))
+    if incoming_conv and incoming_conv != _active_conv_id:
+        _active_conv_id = incoming_conv
+        _active_conv_other_id = str(last_other_any.get("sender_id") or "")
+        _active_conv_started_total = now_total
+        _active_conv_last_total = now_total
+        _active_conv_turns = 0
+        trace_event("status", "conversation started", {"conv": _active_conv_id, "with": _active_conv_other_id})
+
+    # Expire conversation if silent too long or too many turns.
+    if _active_conv_id:
+        if conv_max_silence > 0 and (now_total - int(_active_conv_last_total or now_total)) > conv_max_silence:
+            trace_event("status", "conversation expired (silence)", {"conv": _active_conv_id})
+            _active_conv_id = None
+            _active_conv_other_id = None
+            _active_conv_turns = 0
+        elif conv_max_turns > 0 and int(_active_conv_turns) >= conv_max_turns:
+            trace_event("status", "conversation expired (turn limit)", {"conv": _active_conv_id})
+            _active_conv_id = None
+            _active_conv_other_id = None
+            _active_conv_turns = 0
+
+    in_conv = _active_conv_id is not None
 
     # Determine if there's an in-progress meetup exchange (one side spoke, the other hasn't).
     # This lets us continue/complete the 2-turn exchange even outside the strict window.
@@ -1500,7 +1613,7 @@ def maybe_chat(world):
         period_active = True
 
     if not _adjacent_to_other(world):
-        if meetup_mode:
+        if meetup_mode or in_conv:
             oc = _other_agent_coords(world)
             if oc:
                 _move_towards(world, oc[0], oc[1])
@@ -1519,12 +1632,28 @@ def maybe_chat(world):
     if now - _last_sent_at < CHAT_MIN_SECONDS:
         return
 
-    msgs = chat_recent()
-    if not _is_my_turn(msgs):
-        return
+    # Turn-taking: within an active conversation, only consider messages from that conversation.
+    conv_msgs = []
+    if in_conv and _active_conv_id:
+        for m in msgs:
+            if _extract_conv_id(str(m.get("text") or "")) == _active_conv_id:
+                conv_msgs.append(m)
+        if conv_msgs:
+            _active_conv_last_total = now_total
+            if not _is_my_turn(conv_msgs):
+                return
+        else:
+            # no messages yet with this conv id; allow normal turn rules below
+            pass
+    else:
+        if not _is_my_turn(msgs):
+            return
 
     p = min(1.0, CHAT_PROBABILITY * ADJACENT_CHAT_BOOST)
-    if period_active:
+    if in_conv:
+        # In a conversation session, do not limit to "one message per period".
+        pass
+    elif period_active:
         # Deterministic alternation per meetup window:
         # - agent_1 opens once per meetup_id
         # - agent_2 replies once per meetup_id
@@ -1532,8 +1661,7 @@ def maybe_chat(world):
         if _last_meetup_id_sent == mid:
             return
 
-        recent = chat_recent(limit=MAX_CHAT_TO_SCAN)
-        window_msgs = [m for m in recent if _extract_meetup_id(str(m.get("text") or "")) == mid]
+        window_msgs = [m for m in msgs if _extract_meetup_id(str(m.get("text") or "")) == mid]
         me_sent = any((m.get("sender_id") == AGENT_ID) for m in window_msgs)
         if me_sent:
             _last_meetup_id_sent = mid
@@ -1548,19 +1676,39 @@ def maybe_chat(world):
         if random.random() > p:
             return
 
-    msgs = chat_recent()
+    # Pick last message from the other (within the conversation if active).
     last_other = None
-    for m in reversed(msgs):
-        if m.get("sender_id") != AGENT_ID:
-            last_other = m
-            break
+    if in_conv and _active_conv_id:
+        for m in reversed(msgs):
+            if m.get("sender_id") == AGENT_ID:
+                continue
+            if _extract_conv_id(str(m.get("text") or "")) == _active_conv_id:
+                last_other = m
+                break
+    else:
+        last_other = last_other_any
+
+    # If the other ended the conversation, acknowledge and exit.
+    if in_conv and last_other:
+        lt = str(last_other.get("text") or "")
+        if _is_goodbye(lt):
+            # Only send the goodbye acknowledgement if it's our turn within the conversation.
+            if conv_msgs and _is_my_turn(conv_msgs):
+                bye = f"[conv:{_active_conv_id}] Goodbye. [bye]"
+                chat_send(bye[:600])
+            trace_event("status", "conversation ended (other said goodbye)", {"conv": _active_conv_id})
+            _active_conv_id = None
+            _active_conv_other_id = None
+            _active_conv_turns = 0
+            return
 
     # If we have an unseen message from the other, reply to it.
     if last_other and last_other.get("msg_id") != _last_seen_other_msg_id:
         other_name = last_other.get("sender_name", "Other")
         other_text = (last_other.get("text") or "").strip()
-        mprefix = f"[meetup:{mid}] " if period_active and (mid is not None) else ""
-        tprefix = f"{mprefix}[topic: {topic}] " if topic else mprefix
+        cprefix = f"[conv:{_active_conv_id}] " if in_conv and _active_conv_id else ""
+        mprefix = f"[meetup:{mid}] " if (not in_conv) and period_active and (mid is not None) else ""
+        tprefix = f"{cprefix}{mprefix}[topic: {topic}] " if topic else f"{cprefix}{mprefix}"
         reply = None
         if USE_LANGGRAPH:
             # LLM-driven: keep it grounded in tools and current system state.
@@ -1588,6 +1736,7 @@ def maybe_chat(world):
                 "- Tie your message to your persona and the ai$ economy.\n"
                 "- Prefer proposing a concrete next action as a Job with acceptance criteria.\n"
                 "- You care about earning ai$ ethically via Jobs; real money transfers are always human-approved.\n"
+                "- If the conversation is complete, you may end with 'Goodbye.'\n"
             )
             user = (
                 f"Persona:\n{persona}\n\n"
@@ -1629,16 +1778,28 @@ def maybe_chat(world):
 
         if reply is None:
             reply = _style(f"{tprefix}{_compose_reply(other_name, other_text, topic)}")
-        if period_active:
-            # In meetups/periods, always send the one allowed message (don't let similarity heuristics suppress it).
+        force_send = in_conv or period_active
+        if force_send:
+            # In conversations/meetups, always send (don't let similarity heuristics suppress it).
             if AGENT_ID == "agent_2":
                 trace_event("action", "chat_send attempt", {"mid": mid, "mode": "reply"})
+            if in_conv and conv_max_turns > 0 and int(_active_conv_turns) >= max(0, conv_max_turns - 1):
+                if "[bye]" not in reply.lower() and "goodbye" not in reply.lower():
+                    reply = (reply.rstrip() + "\nGoodbye. [bye]")[:600]
             chat_send(reply[:600])
         else:
             if not _too_similar_to_recent(reply):
                 chat_send(reply[:600])
                 _remember_sent(reply)
-        if period_active and (mid is not None):
+        if in_conv and _active_conv_id:
+            _active_conv_turns = int(_active_conv_turns) + 1
+            _active_conv_last_total = now_total
+            if _is_goodbye(reply):
+                trace_event("status", "conversation ended (we said goodbye)", {"conv": _active_conv_id})
+                _active_conv_id = None
+                _active_conv_other_id = None
+                _active_conv_turns = 0
+        elif period_active and (mid is not None):
             _last_meetup_id_sent = mid
         _last_seen_other_msg_id = last_other.get("msg_id")
         _last_replied_to_msg_id = last_other.get("msg_id")
@@ -1646,8 +1807,19 @@ def maybe_chat(world):
         return
 
     # Otherwise, start/continue conversation with an opener (still purposeful).
-    mprefix = f"[meetup:{mid}] " if period_active and (mid is not None) else ""
-    tprefix = f"{mprefix}[topic: {topic}] " if topic else mprefix
+    if not in_conv:
+        # Start a new sticky conversation session when we initiate an opener.
+        _active_conv_id = _new_conv_id(now_total)
+        _active_conv_other_id = str((last_other_any or {}).get("sender_id") or "")
+        _active_conv_started_total = now_total
+        _active_conv_last_total = now_total
+        _active_conv_turns = 0
+        in_conv = True
+        trace_event("status", "conversation started (opener)", {"conv": _active_conv_id, "with": _active_conv_other_id})
+
+    cprefix = f"[conv:{_active_conv_id}] " if in_conv and _active_conv_id else ""
+    mprefix = f"[meetup:{mid}] " if (not in_conv) and period_active and (mid is not None) else ""
+    tprefix = f"{cprefix}{mprefix}[topic: {topic}] " if topic else f"{cprefix}{mprefix}"
     if USE_LANGGRAPH:
         persona = (PERSONALITY or "").strip()
         bal = _cached_balance
@@ -1659,6 +1831,7 @@ def maybe_chat(world):
             "- Be concrete and non-repetitive.\n"
             "- Prefer proposing a job-like next action with acceptance criteria.\n"
             "- You care about earning ai$ ethically via Jobs; real money transfers are always human-approved.\n"
+            "- If the conversation is complete, you may end with 'Goodbye.'\n"
         )
         user = (
             f"Persona:\n{persona}\n\n"
@@ -1679,14 +1852,28 @@ def maybe_chat(world):
         ]
         msg = (_style(tprefix + random.choice(openers)))[:600]
 
-    if period_active:
+    if in_conv or period_active:
         chat_send(msg)
     else:
         if not _too_similar_to_recent(msg):
             chat_send(msg)
             _remember_sent(msg)
     _last_sent_at = now
-    if period_active:
+    if in_conv and _active_conv_id:
+        _active_conv_turns = int(_active_conv_turns) + 1
+        _active_conv_last_total = now_total
+        if conv_max_turns > 0 and int(_active_conv_turns) >= conv_max_turns and ("goodbye" not in msg.lower()):
+            # If we hit the turn cap, mark conversation ended locally (prevents being stuck forever).
+            trace_event("status", "conversation ended (turn cap)", {"conv": _active_conv_id})
+            _active_conv_id = None
+            _active_conv_other_id = None
+            _active_conv_turns = 0
+        elif _is_goodbye(msg):
+            trace_event("status", "conversation ended (we said goodbye)", {"conv": _active_conv_id})
+            _active_conv_id = None
+            _active_conv_other_id = None
+            _active_conv_turns = 0
+    elif period_active:
         _last_forced_meetup_msg_at_total = now_total
         if mid is not None:
             _last_meetup_id_sent = mid
@@ -1766,6 +1953,10 @@ def main():
             upsert()
             maybe_reset_on_new_run()
             world = get_world()
+            # Sticky conversations: if we're in an active conversation, focus on it until it ends.
+            if maybe_conversation_step(world):
+                time.sleep(SLEEP_SECONDS)
+                continue
             maybe_process_event_invites(world)
             maybe_reflect(world)
             # plan schedule at the computer once per simulated day
