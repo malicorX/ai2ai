@@ -1740,15 +1740,16 @@ def maybe_chat(world):
 
             sys = (
                 "You are an autonomous agent in a 2D world. You are chatting with another agent.\n"
+                "IMPORTANT: separate internal thoughts from spoken output.\n"
+                "Return STRICT JSON ONLY with this schema:\n"
+                "{\"think\": <string>, \"say\": <string>, \"end\": <true|false>}\n"
                 "Rules:\n"
-                "- Be concise and specific (4-10 sentences).\n"
-                "- Do NOT repeat yourself.\n"
-                "- If asked a question, answer it directly.\n"
-                "- The chat must have PURPOSE. Do not ramble or philosophize.\n"
-                "- Tie your message to your persona and the ai$ economy.\n"
+                "- 'think' can include planning and private reasoning.\n"
+                "- 'say' must be ONLY what you would say out loud to the other agent.\n"
+                "- In 'say', do NOT include meta like '1) summary', do NOT narrate your thinking.\n"
+                "- Be concise, concrete, and non-repetitive.\n"
                 "- Prefer proposing a concrete next action as a Job with acceptance criteria.\n"
-                "- You care about earning ai$ ethically via Jobs; real money transfers are always human-approved.\n"
-                "- If the conversation is complete, you may end with 'Goodbye.'\n"
+                "- If the conversation is complete, set end=true and include a short goodbye in 'say'.\n"
             )
             user = (
                 f"Persona:\n{persona}\n\n"
@@ -1775,8 +1776,22 @@ def maybe_chat(world):
                 "LLM reply (summary)",
                 {"topic": topic, "balance": bal, "other": other_name, "other_snippet": other_text[:120], "dbg": dbg},
             )
-            raw = llm_chat(sys, user, max_tokens=260)
-            reply = _style(f"{tprefix}{raw}")
+            raw = llm_chat(sys, user, max_tokens=320)
+            think = ""
+            say = ""
+            end_flag = False
+            try:
+                m = re.search(r"\{[\s\S]*\}", raw)
+                obj = json.loads(m.group(0) if m else raw)
+                think = str(obj.get("think") or "").strip()
+                say = str(obj.get("say") or "").strip()
+                end_flag = bool(obj.get("end") or False)
+            except Exception:
+                # Fallback: treat raw as spoken text
+                say = str(raw or "").strip()
+            if think:
+                trace_event("thought", "chat_thought", {"conv": _active_conv_id, "think": think[:800]})
+            reply = _style(f"{tprefix}{say}".strip())
             # Hard fallback if the model output is too vague.
             low = reply.lower()
             if ("acceptance" not in low) and ("criteria" not in low) and ("job" not in low) and ("next action" not in low):
@@ -1795,7 +1810,7 @@ def maybe_chat(world):
             # In conversations/meetups, always send (don't let similarity heuristics suppress it).
             if AGENT_ID == "agent_2":
                 trace_event("action", "chat_send attempt", {"mid": mid, "mode": "reply"})
-            if in_conv and conv_max_turns > 0 and int(_active_conv_turns) >= max(0, conv_max_turns - 1):
+            if in_conv and (end_flag or (conv_max_turns > 0 and int(_active_conv_turns) >= max(0, conv_max_turns - 1))):
                 if "[bye]" not in reply.lower() and "goodbye" not in reply.lower():
                     reply = (reply.rstrip() + "\nGoodbye. [bye]")[:600]
             chat_send(reply[:600])
@@ -1838,12 +1853,16 @@ def maybe_chat(world):
         sys = (
             "You are an autonomous agent in a 2D world.\n"
             "You are about to start/advance a conversation with another agent.\n"
+            "IMPORTANT: separate internal thoughts from spoken output.\n"
+            "Return STRICT JSON ONLY with this schema:\n"
+            "{\"think\": <string>, \"say\": <string>, \"end\": <true|false>}\n"
             "Rules:\n"
-            "- Maximize quality; speed is not important.\n"
+            "- 'think' can include planning and private reasoning.\n"
+            "- 'say' must be ONLY what you would say out loud.\n"
+            "- In 'say', do NOT include numbered meta (no '1) summary', no 'here is my response').\n"
             "- Be concrete and non-repetitive.\n"
             "- Prefer proposing a job-like next action with acceptance criteria.\n"
-            "- You care about earning ai$ ethically via Jobs; real money transfers are always human-approved.\n"
-            "- If the conversation is complete, you may end with 'Goodbye.'\n"
+            "- If the conversation is complete, set end=true and include a short goodbye in 'say'.\n"
         )
         user = (
             f"Persona:\n{persona}\n\n"
@@ -1854,8 +1873,21 @@ def maybe_chat(world):
             "3) One question.\n"
         )
         trace_event("thought", "LLM opener (summary)", {"topic": topic, "balance": bal})
-        raw = llm_chat(sys, user, max_tokens=220)
-        msg = (_style(tprefix + raw))[:600]
+        raw = llm_chat(sys, user, max_tokens=320)
+        think = ""
+        say = ""
+        end_flag = False
+        try:
+            m = re.search(r"\{[\s\S]*\}", raw)
+            obj = json.loads(m.group(0) if m else raw)
+            think = str(obj.get("think") or "").strip()
+            say = str(obj.get("say") or "").strip()
+            end_flag = bool(obj.get("end") or False)
+        except Exception:
+            say = str(raw or "").strip()
+        if think:
+            trace_event("thought", "chat_thought", {"conv": _active_conv_id, "think": think[:800]})
+        msg = (_style((tprefix + say).strip()))[:600]
     else:
         openers = [
             "Let's ground this: I'll write a short artifact in my workspace for this topic and summarize it here.",
@@ -1874,6 +1906,8 @@ def maybe_chat(world):
     if in_conv and _active_conv_id:
         _active_conv_turns = int(_active_conv_turns) + 1
         _active_conv_last_total = now_total
+        if (end_flag or (conv_max_turns > 0 and int(_active_conv_turns) >= conv_max_turns)) and ("goodbye" not in msg.lower()) and ("[bye]" not in msg.lower()):
+            msg = (msg.rstrip() + "\nGoodbye. [bye]")[:600]
         if conv_max_turns > 0 and int(_active_conv_turns) >= conv_max_turns and ("goodbye" not in msg.lower()):
             # If we hit the turn cap, mark conversation ended locally (prevents being stuck forever).
             trace_event("status", "conversation ended (turn cap)", {"conv": _active_conv_id})
