@@ -1152,24 +1152,14 @@ def maybe_work_jobs() -> None:
     if now - _last_jobs_at < JOBS_EVERY_SECONDS:
         return
 
-    # Only do job tool-work from the computer access zone (navigation test + safety).
-    # If not at the computer, just wait until schedule brings us there.
-    try:
-        w = get_world()
-        if not _at_landmark(w, COMPUTER_LANDMARK_ID, radius=COMPUTER_ACCESS_RADIUS):
-            _last_jobs_at = now
-            return
-    except Exception:
-        pass
-
-    # If we created a job during a conversation, claim+submit it as soon as we reach the computer.
+    # Conversation-created jobs are "must-do": claim+submit even if we're not at the computer
+    # (otherwise events/meetups can starve execution and the system looks stuck).
     if _pending_claim_job_id and not _active_job_id:
         job_id = _pending_claim_job_id
         try:
             if jobs_claim(job_id):
                 trace_event("action", f"claimed job {job_id}", {"job_id": job_id, "source": "conversation"})
                 _active_job_id = job_id
-                # Fetch the job details
                 job = {}
                 try:
                     job = requests.get(f"{WORLD_API}/jobs/{job_id}", timeout=10).json().get("job") or {}
@@ -1189,6 +1179,16 @@ def maybe_work_jobs() -> None:
             _active_job_id = ""
             _last_jobs_at = now
         return
+
+    # Only do job tool-work from the computer access zone (navigation test + safety).
+    # If not at the computer, just wait until schedule brings us there.
+    try:
+        w = get_world()
+        if not _at_landmark(w, COMPUTER_LANDMARK_ID, radius=COMPUTER_ACCESS_RADIUS):
+            _last_jobs_at = now
+            return
+    except Exception:
+        pass
 
     # Only chase jobs if we want more ai$.
     bal = _cached_balance
