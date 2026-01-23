@@ -47,6 +47,8 @@ _active_conv_turns = 0
 _active_conv_job_id = ""
 _pending_claim_job_id = ""
 _force_computer_until_total = -10**9
+_pending_claim_conv_id = ""
+_pending_claim_job_title = ""
 
 
 class PlanItem(BaseModel):
@@ -354,6 +356,7 @@ def maybe_reset_on_new_run() -> None:
     global _last_forced_meetup_msg_at_total, _last_meetup_id_sent
     global _active_conv_id, _active_conv_other_id, _active_conv_started_total, _active_conv_last_total, _active_conv_turns
     global _active_conv_job_id, _pending_claim_job_id, _force_computer_until_total
+    global _pending_claim_conv_id, _pending_claim_job_title
 
     now = time.time()
     if now - _last_run_check_at < 5.0:
@@ -381,6 +384,8 @@ def maybe_reset_on_new_run() -> None:
         _active_conv_job_id = ""
         _pending_claim_job_id = ""
         _force_computer_until_total = -10**9
+        _pending_claim_conv_id = ""
+        _pending_claim_job_title = ""
     _last_run_id = rid
 
 
@@ -1156,7 +1161,7 @@ def _do_job(job: dict) -> str:
 
 def maybe_work_jobs() -> None:
     global _last_jobs_at, _active_job_id
-    global _pending_claim_job_id
+    global _pending_claim_job_id, _pending_claim_conv_id, _pending_claim_job_title
     global _force_computer_until_total
     now = time.time()
     if now - _last_jobs_at < JOBS_EVERY_SECONDS:
@@ -1180,12 +1185,17 @@ def maybe_work_jobs() -> None:
                 if ok:
                     memory_append("event", f"Submitted job {job_id}: {job.get('title')}", tags=["job"])
                     trace_event("action", f"submitted job {job_id}", {"job_id": job_id, "source": "conversation"})
-                    chat_send(_style(f"I executed our agreed job and submitted deliverable `{job_id}` for human review."))
+                    prefix = f"[conv:{_pending_claim_conv_id}] " if _pending_claim_conv_id else ""
+                    t = (_pending_claim_job_title or job.get("title") or "").strip()
+                    title_note = f" ({t})" if t else ""
+                    chat_send(_style(f"{prefix}I executed the agreed job and submitted `{job_id}`{title_note} for human review."))
                     _force_computer_until_total = -10**9
         except Exception:
             pass
         finally:
             _pending_claim_job_id = ""
+            _pending_claim_conv_id = ""
+            _pending_claim_job_title = ""
             _active_job_id = ""
             _last_jobs_at = now
         return
@@ -1642,6 +1652,7 @@ def maybe_chat(world):
     global _last_meetup_id_sent
     global _active_conv_id, _active_conv_other_id, _active_conv_started_total, _active_conv_last_total, _active_conv_turns
     global _active_conv_job_id, _pending_claim_job_id, _force_computer_until_total
+    global _pending_claim_conv_id, _pending_claim_job_title
 
     # Only talk when adjacent.
     # During meetup windows (or when a meetup opener is pending), we actively close distance so chat reliably happens.
@@ -1930,6 +1941,8 @@ def maybe_chat(world):
                         if jid:
                             _active_conv_job_id = jid
                             _pending_claim_job_id = jid
+                            _pending_claim_conv_id = str(_active_conv_id or "")
+                            _pending_claim_job_title = jtitle
                             _force_computer_until_total = now_total + 240  # 4h sim time should be plenty
                             trace_event("action", "created job from conversation", {"job_id": jid, "title": jtitle, "reward": jreward})
                             # Tell the other agent and end cleanly.
@@ -1946,6 +1959,8 @@ def maybe_chat(world):
                     if jid:
                         _active_conv_job_id = jid
                         _pending_claim_job_id = jid
+                        _pending_claim_conv_id = str(_active_conv_id or "")
+                        _pending_claim_job_title = jtitle
                         _force_computer_until_total = now_total + 240
                         trace_event("action", "created fallback job from conversation", {"job_id": jid, "title": jtitle})
                         say = (say + f"\n\nI created a real backend Job `{jid}` (reward 15 ai$). I'll claim+submit it when I reach the computer. Goodbye. [bye]").strip()

@@ -87,7 +87,17 @@ def build_html(messages: list[dict[str, Any]], thoughts: list[dict[str, Any]], t
             return 0.0
 
     group_items = sorted(groups.items(), key=lambda kv: last_ts(kv[1]), reverse=True)
-    default_conv = group_items[0][0] if group_items else "no-conv"
+    # Default selection: prefer a real conversation thread over "no-conv" status-only messages.
+    default_conv = "no-conv"
+    if group_items:
+        best = None
+        for conv_id, items in group_items:
+            if conv_id == "no-conv":
+                continue
+            score = len(items) + len(tgroups.get(conv_id) or [])
+            if best is None or score > best[0]:
+                best = (score, conv_id)
+        default_conv = best[1] if best else group_items[0][0]
 
     # Build sidebar list
     sidebar_items = []
