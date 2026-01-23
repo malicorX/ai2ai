@@ -506,6 +506,38 @@ def _new_conv_id(now_total: int) -> str:
     return f"{now_total}-{AGENT_ID[-1]}-{suffix}"
 
 
+def _sanitize_say(s: str) -> str:
+    """
+    Ensure 'say' is truly spoken output: strip meta narration like
+    'Here is my response' and leading numbered summaries '1) ... 2) ...'.
+    """
+    s = (s or "").strip()
+    if not s:
+        return ""
+    # Remove common boilerplate headers
+    s = re.sub(r"^\s*(here('?s)?|this is)\s+(my\s+)?(opener|response|reply|message)\s*:\s*", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"^\s*(summary|analysis)\s*:\s*", "", s, flags=re.IGNORECASE)
+
+    lines = s.splitlines()
+    cleaned: list[str] = []
+    dropped = 0
+    for ln in lines:
+        # Drop a few leading "meta summary" numbered lines (not acceptance criteria lists).
+        if dropped < 3 and re.match(r"^\s*\d+[.)]\s+", ln):
+            low = ln.lower()
+            if any(k in low for k in ["you ", "you'", "max ", "tina ", "suggest", "propose", "agree", "summary"]):
+                dropped += 1
+                continue
+        cleaned.append(ln)
+    s = "\n".join(cleaned).strip()
+
+    # If the model still emits a long numbered meta preamble, keep only the section starting at the first job/proposal marker.
+    m = re.search(r"(?im)^(proposal|job|next action|acceptance criteria|question)\b.*", s)
+    if m and m.start() > 0:
+        s = s[m.start():].strip()
+    return s
+
+
 def chat_recent(limit: int = MAX_CHAT_TO_SCAN):
     r = requests.get(f"{WORLD_API}/chat/recent?limit={limit}", timeout=10)
     r.raise_for_status()
@@ -1746,7 +1778,8 @@ def maybe_chat(world):
                 "Rules:\n"
                 "- 'think' can include planning and private reasoning.\n"
                 "- 'say' must be ONLY what you would say out loud to the other agent.\n"
-                "- In 'say', do NOT include meta like '1) summary', do NOT narrate your thinking.\n"
+                "- In 'say', do NOT include meta like '1) ...', 'Summary:', or 'Here is my response'.\n"
+                "- In 'say', do NOT describe what you are doing; just do it.\n"
                 "- Be concise, concrete, and non-repetitive.\n"
                 "- Prefer proposing a concrete next action as a Job with acceptance criteria.\n"
                 "- If the conversation is complete, set end=true and include a short goodbye in 'say'.\n"
@@ -1791,6 +1824,7 @@ def maybe_chat(world):
                 say = str(raw or "").strip()
             if think:
                 trace_event("thought", "chat_thought", {"conv": _active_conv_id, "think": think[:800]})
+            say = _sanitize_say(say)
             reply = _style(f"{tprefix}{say}".strip())
             # Hard fallback if the model output is too vague.
             low = reply.lower()
@@ -1859,7 +1893,8 @@ def maybe_chat(world):
             "Rules:\n"
             "- 'think' can include planning and private reasoning.\n"
             "- 'say' must be ONLY what you would say out loud.\n"
-            "- In 'say', do NOT include numbered meta (no '1) summary', no 'here is my response').\n"
+            "- In 'say', do NOT include numbered meta (no '1) ...', no 'Summary:', no 'Here is my response').\n"
+            "- In 'say', do NOT describe what you are doing; just do it.\n"
             "- Be concrete and non-repetitive.\n"
             "- Prefer proposing a job-like next action with acceptance criteria.\n"
             "- If the conversation is complete, set end=true and include a short goodbye in 'say'.\n"
@@ -1887,6 +1922,7 @@ def maybe_chat(world):
             say = str(raw or "").strip()
         if think:
             trace_event("thought", "chat_thought", {"conv": _active_conv_id, "think": think[:800]})
+        say = _sanitize_say(say)
         msg = (_style((tprefix + say).strip()))[:600]
     else:
         openers = [
