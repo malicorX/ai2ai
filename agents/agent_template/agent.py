@@ -1561,20 +1561,23 @@ def maybe_chat(world):
         other_text = (last_other.get("text") or "").strip()
         mprefix = f"[meetup:{mid}] " if period_active and (mid is not None) else ""
         tprefix = f"{mprefix}[topic: {topic}] " if topic else mprefix
+        reply = None
         if USE_LANGGRAPH:
             # LLM-driven: keep it grounded in tools and current system state.
             persona = (PERSONALITY or "").strip()
             bal = _cached_balance
-        retrieved = []
-        try:
-            retrieved = memory_retrieve(q=f"{topic} {other_text}", k=6)
-        except Exception:
             retrieved = []
-        if retrieved:
-            trace_event("thought", "memory retrieval used", {"q": topic, "k": len(retrieved)})
-        mem_lines = []
-        for m in (retrieved or [])[:6]:
-            mem_lines.append(f"- ({m.get('kind')}, imp={m.get('importance')}) {str(m.get('text') or '')[:180]}")
+            try:
+                retrieved = memory_retrieve(q=f"{topic} {other_text}", k=6)
+            except Exception:
+                retrieved = []
+            if retrieved:
+                trace_event("thought", "memory retrieval used", {"q": topic, "k": len(retrieved)})
+
+            mem_lines = []
+            for mm in (retrieved or [])[:6]:
+                mem_lines.append(f"- ({mm.get('kind')}, imp={mm.get('importance')}) {str(mm.get('text') or '')[:180]}")
+
             sys = (
                 "You are an autonomous agent in a 2D world. You are chatting with another agent.\n"
                 "Rules:\n"
@@ -1589,7 +1592,7 @@ def maybe_chat(world):
             user = (
                 f"Persona:\n{persona}\n\n"
                 f"State:\n- agent_id={AGENT_ID}\n- display_name={DISPLAY_NAME}\n- balance={bal}\n- topic={topic}\n\n"
-            f"Relevant memories (ranked):\n{chr(10).join(mem_lines) if mem_lines else '(none)'}\n\n"
+                f"Relevant memories (ranked):\n{chr(10).join(mem_lines) if mem_lines else '(none)'}\n\n"
                 f"Other said:\n{other_name}: {other_text}\n\n"
                 "Reply using this structure:\n"
                 "1) One-sentence summary of what the other said.\n"
@@ -1606,7 +1609,11 @@ def maybe_chat(world):
                     "pending_mid": pending_mid,
                     "last_mid_sent": _last_meetup_id_sent,
                 }
-            trace_event("thought", "LLM reply (summary)", {"topic": topic, "balance": bal, "other": other_name, "other_snippet": other_text[:120], "dbg": dbg})
+            trace_event(
+                "thought",
+                "LLM reply (summary)",
+                {"topic": topic, "balance": bal, "other": other_name, "other_snippet": other_text[:120], "dbg": dbg},
+            )
             raw = llm_chat(sys, user, max_tokens=260)
             reply = _style(f"{tprefix}{raw}")
             # Hard fallback if the model output is too vague.
@@ -1619,8 +1626,13 @@ def maybe_chat(world):
                 )
         else:
             reply = _style(f"{tprefix}{_compose_reply(other_name, other_text, topic)}")
+
+        if reply is None:
+            reply = _style(f"{tprefix}{_compose_reply(other_name, other_text, topic)}")
         if period_active:
-            # In meetups, always send the one allowed message for the window (don't let similarity heuristics suppress it).
+            # In meetups/periods, always send the one allowed message (don't let similarity heuristics suppress it).
+            if AGENT_ID == "agent_2":
+                trace_event("action", "chat_send attempt", {"mid": mid, "mode": "reply"})
             chat_send(reply[:600])
         else:
             if not _too_similar_to_recent(reply):
