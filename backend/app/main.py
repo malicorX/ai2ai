@@ -36,6 +36,10 @@ STARTING_AIDOLLARS = float(os.getenv("STARTING_AIDOLLARS", "100"))
 TREASURY_ID = os.getenv("TREASURY_ID", "treasury")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 
+# Run/session id (helps agents reset local state after /admin/new_run without restarting containers)
+_run_id: str = time.strftime("%Y%m%d-%H%M%S")
+_run_started_at: float = time.time()
+
 EMBEDDINGS_BASE_URL = os.getenv("EMBEDDINGS_BASE_URL", "").rstrip("/")
 EMBEDDINGS_MODEL = os.getenv("EMBEDDINGS_MODEL", "llama3.1:8b")
 EMBEDDINGS_TRUNCATE = int(os.getenv("EMBEDDINGS_TRUNCATE", "256"))
@@ -256,6 +260,11 @@ def _require_admin(request: Request) -> bool:
 @app.get("/")
 def root():
     return RedirectResponse(url="/ui/")
+
+
+@app.get("/run")
+def run_info():
+    return {"run_id": _run_id, "started_at": _run_started_at}
 
 # In-memory state (Milestone 1). Persistence comes later.
 _tick = 0
@@ -1503,6 +1512,7 @@ class NewRunRequest(BaseModel):
 @app.post("/admin/new_run")
 async def admin_new_run(req: NewRunRequest, request: Request):
     global _tick, _agents, _world_started_at, _chat, _trace, _audit, _topic, _topic_set_at, _topic_history, _board_posts, _board_replies
+    global _run_id, _run_started_at
     if not _require_admin(request):
         return {"error": "unauthorized"}
 
@@ -1516,6 +1526,8 @@ async def admin_new_run(req: NewRunRequest, request: Request):
     _chat = []
     _trace = []
     _audit = []
+    _run_id = rid
+    _run_started_at = time.time()
 
     if req.reset_topic:
         _topic = "getting started"
@@ -1526,7 +1538,7 @@ async def admin_new_run(req: NewRunRequest, request: Request):
         _board_posts = {}
         _board_replies = {}
 
-    return {"ok": True, **info}
+    return {"ok": True, **info, "run_id": _run_id, "started_at": _run_started_at}
 
 
 @app.get("/economy/balances")
