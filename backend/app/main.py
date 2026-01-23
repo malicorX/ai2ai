@@ -34,6 +34,7 @@ MEMORY_EMBED_DIR.mkdir(parents=True, exist_ok=True)
 
 STARTING_AIDOLLARS = float(os.getenv("STARTING_AIDOLLARS", "100"))
 TREASURY_ID = os.getenv("TREASURY_ID", "treasury")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 
 EMBEDDINGS_BASE_URL = os.getenv("EMBEDDINGS_BASE_URL", "").rstrip("/")
 EMBEDDINGS_MODEL = os.getenv("EMBEDDINGS_MODEL", "llama3.1:8b")
@@ -63,6 +64,26 @@ def _read_jsonl(path: Path, limit: Optional[int] = None) -> List[dict]:
     if limit is not None and limit > 0:
         return out[-limit:]
     return out
+
+
+def _rotate_logs(run_id: str, files: List[Path]) -> dict:
+    """
+    Copy the current JSONL logs into DATA_DIR/runs/<run_id>/ and truncate originals.
+    Returns basic stats for response payloads.
+    """
+    runs_dir = DATA_DIR / "runs" / run_id
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    rotated = []
+    for p in files:
+        try:
+            if p.exists():
+                dst = runs_dir / p.name
+                dst.write_bytes(p.read_bytes())
+                p.write_text("", encoding="utf-8")
+                rotated.append({"file": str(p.name), "bytes": int(dst.stat().st_size)})
+        except Exception:
+            continue
+    return {"run_id": run_id, "rotated": rotated, "dir": str(runs_dir)}
 
 
 def _safe_json_preview(body: bytes) -> Optional[dict]:
@@ -218,6 +239,18 @@ async def audit_middleware(request: Request, call_next):
     except Exception:
         pass
     return resp
+
+
+def _require_admin(request: Request) -> bool:
+    """
+    Minimal guardrail:
+    - If ADMIN_TOKEN is set, require `Authorization: Bearer <token>`.
+    - If not set, allow (intended for LAN/local use).
+    """
+    if not ADMIN_TOKEN:
+        return True
+    auth = (request.headers.get("authorization") or "").strip()
+    return auth == f"Bearer {ADMIN_TOKEN}"
 
 
 @app.get("/")
@@ -1454,6 +1487,46 @@ async def chat_send(req: ChatSendRequest):
 def audit_recent(limit: int = 100):
     limit = max(1, min(limit, 500))
     return {"events": [asdict(e) for e in _audit[-limit:]]}
+
+
+class NewRunRequest(BaseModel):
+    """
+    Starts a new run:
+    - rotates/truncates audit/chat/trace logs into /app/data/runs/<run_id>/
+    - resets in-memory world state and clock
+    """
+    run_id: str = ""
+    reset_board: bool = True
+    reset_topic: bool = True
+
+
+@app.post("/admin/new_run")
+async def admin_new_run(req: NewRunRequest, request: Request):
+    global _tick, _agents, _world_started_at, _chat, _trace, _audit, _topic, _topic_set_at, _topic_history, _board_posts, _board_replies
+    if not _require_admin(request):
+        return {"error": "unauthorized"}
+
+    rid = (req.run_id or "").strip() or time.strftime("%Y%m%d-%H%M%S")
+    info = _rotate_logs(rid, [AUDIT_PATH, TRACE_PATH, CHAT_PATH])
+
+    # Reset in-memory state (agents will re-upsert)
+    _tick = 0
+    _agents = {}
+    _world_started_at = time.time()
+    _chat = []
+    _trace = []
+    _audit = []
+
+    if req.reset_topic:
+        _topic = "getting started"
+        _topic_set_at = 0.0
+        _topic_history = []
+
+    if req.reset_board:
+        _board_posts = {}
+        _board_replies = {}
+
+    return {"ok": True, **info}
 
 
 @app.get("/economy/balances")
