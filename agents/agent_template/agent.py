@@ -22,6 +22,7 @@ WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "/app/workspace").strip()
 COMPUTER_LANDMARK_ID = os.getenv("COMPUTER_LANDMARK_ID", "computer").strip()
 COMPUTER_ACCESS_RADIUS = int(os.getenv("COMPUTER_ACCESS_RADIUS", "1"))
 HOME_LANDMARK_ID = os.getenv("HOME_LANDMARK_ID", f"home_{AGENT_ID}").strip()
+ROLE = os.getenv("ROLE", "proposer" if AGENT_ID == "agent_1" else "executor").strip().lower()
 
 _last_day_planned = None
 _daily_plan = None
@@ -1167,6 +1168,11 @@ def maybe_work_jobs() -> None:
     if now - _last_jobs_at < JOBS_EVERY_SECONDS:
         return
 
+    # Role split: proposer (agent_1) does not execute tasks; executor (agent_2) does.
+    if ROLE != "executor":
+        _last_jobs_at = now
+        return
+
     # Conversation-created jobs are "must-do": claim+submit even if we're not at the computer
     # (otherwise events/meetups can starve execution and the system looks stuck).
     if _pending_claim_job_id and not _active_job_id:
@@ -1210,12 +1216,6 @@ def maybe_work_jobs() -> None:
     except Exception:
         pass
 
-    # Only chase jobs if we want more ai$.
-    bal = _cached_balance
-    if bal is not None and float(bal) >= JOBS_MIN_BALANCE_TARGET:
-        _last_jobs_at = now
-        return
-
     # If we're already working on one, don't pick another.
     if _active_job_id:
         _last_jobs_at = now
@@ -1231,8 +1231,12 @@ def maybe_work_jobs() -> None:
         _last_jobs_at = now
         return
 
-    # Pick highest reward first (simple greedy).
-    open_jobs.sort(key=lambda j: float(j.get("reward") or 0.0), reverse=True)
+    # In task-mode, only execute tasks proposed by agent_1.
+    open_jobs = [j for j in open_jobs if str(j.get("created_by") or "") == "agent_1"]
+    if not open_jobs:
+        _last_jobs_at = now
+        return
+    open_jobs.sort(key=lambda j: float(j.get("created_at") or 0.0), reverse=True)
     job = open_jobs[0]
     job_id = job.get("job_id")
     if not job_id:
@@ -1935,7 +1939,9 @@ def maybe_chat(world):
                 if isinstance(job_obj, dict):
                     jtitle = str(job_obj.get("title") or "").strip()[:120]
                     jbody = str(job_obj.get("body") or "").strip()[:2000]
-                    jreward = float(job_obj.get("reward") or 15.0)
+                    # Task-mode payout is fixed by the backend (1 ai$ to proposer + 1 ai$ to executor).
+                    # Keep a tiny positive reward to satisfy backend validation, but do not rely on it.
+                    jreward = 0.01
                     if jtitle and jbody and jreward > 0:
                         jid = jobs_create(jtitle, jbody, jreward)
                         if jid:
@@ -1955,7 +1961,7 @@ def maybe_chat(world):
                         "Create a short, concrete deliverable file in /app/workspace/deliverables explaining ONE way the agent can earn ai$ next, "
                         "with acceptance criteria that a human can verify quickly."
                     )
-                    jid = jobs_create(jtitle, jbody, 15.0)
+                    jid = jobs_create(jtitle, jbody, 0.01)
                     if jid:
                         _active_conv_job_id = jid
                         _pending_claim_job_id = jid

@@ -1208,6 +1208,22 @@ async def jobs_submit(job_id: str, req: JobSubmitRequest):
         return {"error": "invalid_submission"}
     ev = _append_job_event("submit", job_id, {"agent_id": req.agent_id, "submission": sub, "created_at": time.time()})
     await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})
+
+    # --- Task-mode reward (agent_1 proposer, agent_2 executor) ---
+    # For now we treat jobs as tasks. When an agent-submitted job is created by another agent,
+    # auto-award 1 ai$ to BOTH participants immediately (tracked in the economy ledger).
+    try:
+        proposer = str(_jobs[job_id].created_by or "").strip()
+        executor = str(req.agent_id or "").strip()
+        if proposer and executor and proposer.startswith("agent_") and executor.startswith("agent_") and proposer != executor:
+            ensure_account(proposer)
+            ensure_account(executor)
+            # Award is from treasury (system); economy_award already ensures treasury exists.
+            await economy_award(AwardRequest(to_id=proposer, amount=1.0, reason=f"task completed (job {job_id})", by="system:task"))
+            await economy_award(AwardRequest(to_id=executor, amount=1.0, reason=f"task completed (job {job_id})", by="system:task"))
+    except Exception:
+        pass
+
     return {"ok": True, "job": asdict(_jobs[job_id])}
 
 
