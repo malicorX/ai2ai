@@ -358,6 +358,11 @@ def _build_run_job_state(job_events: list[dict]) -> dict[str, dict]:
                 j["submission"] = str(d.get("submission") or "")
                 j["submitted_at"] = ca or float(d.get("created_at") or 0.0)
                 j["status"] = "submitted"
+            elif t == "verify":
+                ok = d.get("ok")
+                j["auto_verify_ok"] = ok if isinstance(ok, bool) else None
+                j["auto_verify_note"] = str(d.get("note") or "")
+                j["auto_verified_at"] = ca or float(d.get("created_at") or 0.0)
             elif t == "review":
                 j["status"] = "approved" if bool(d.get("approved")) else "rejected"
                 j["reviewed_by"] = str(d.get("reviewed_by") or "")
@@ -481,6 +486,9 @@ def runs_summary(run_id: str):
                     "submitted_by": t.get("submitted_by"),
                     "created_at": t.get("created_at"),
                     "submitted_at": t.get("submitted_at"),
+                    "auto_verify_ok": t.get("auto_verify_ok"),
+                    "auto_verify_note": (str(t.get("auto_verify_note") or "")[:500]),
+                    "auto_verified_at": t.get("auto_verified_at"),
                     "submission_preview": (str(t.get("submission") or "")[:500]),
                 }
                 for t in tasks[:50]
@@ -1452,9 +1460,12 @@ class Job:
     reviewed_by: str
     reviewed_at: float
     review_note: str
+    auto_verify_ok: Optional[bool] = None
+    auto_verify_note: str = ""
+    auto_verified_at: float = 0.0
 
 
-JobEventType = Literal["create", "claim", "submit", "review", "cancel"]
+JobEventType = Literal["create", "claim", "submit", "verify", "review", "cancel"]
 
 
 @dataclass
@@ -1515,6 +1526,9 @@ def _apply_job_event(ev: JobEvent) -> None:
             reviewed_by="",
             reviewed_at=0.0,
             review_note="",
+            auto_verify_ok=None,
+            auto_verify_note="",
+            auto_verified_at=0.0,
         )
         return
 
@@ -1533,6 +1547,13 @@ def _apply_job_event(ev: JobEvent) -> None:
         job.submitted_by = str(d.get("agent_id") or "")[:80]
         job.submitted_at = float(d.get("created_at") or ev.created_at)
         job.submission = str(d.get("submission") or "")[:20000]
+        return
+
+    if t == "verify" and job.status == "submitted":
+        ok = d.get("ok")
+        job.auto_verify_ok = ok if isinstance(ok, bool) else None
+        job.auto_verify_note = str(d.get("note") or "")[:2000]
+        job.auto_verified_at = float(d.get("created_at") or ev.created_at)
         return
 
     if t == "review" and job.status == "submitted":
@@ -1655,6 +1676,10 @@ async def jobs_submit(job_id: str, req: JobSubmitRequest):
         j2 = _jobs.get(job_id)
         if j2 and j2.status == "submitted":
             ok, note = _auto_verify_task(j2, sub)
+            # Record the verifier result for UI / auditing.
+            # Skip recording if no verifier matched.
+            if not note.startswith("auto_verify skipped"):
+                _append_job_event("verify", job_id, {"ok": bool(ok), "note": note, "created_at": time.time()})
             if ok:
                 review_req = JobReviewRequest(approved=True, reviewed_by="system:auto_verify", note=note, payout=0.0, penalty=None)
                 await jobs_review(job_id, review_req)
