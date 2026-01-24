@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.responses import RedirectResponse
+from starlette.responses import HTMLResponse, FileResponse
 
 
 WORLD_SIZE = 32
@@ -27,6 +28,8 @@ EVENTS_PATH = DATA_DIR / "events_events.jsonl"
 CHAT_PATH = DATA_DIR / "chat_messages.jsonl"
 TRACE_PATH = DATA_DIR / "trace_events.jsonl"
 AUDIT_PATH = DATA_DIR / "audit_log.jsonl"
+RUNS_DIR = DATA_DIR / "runs"
+RUNS_DIR.mkdir(parents=True, exist_ok=True)
 MEMORY_DIR = DATA_DIR / "memory"
 MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 MEMORY_EMBED_DIR = DATA_DIR / "memory_embeddings"
@@ -75,7 +78,7 @@ def _rotate_logs(run_id: str, files: List[Path]) -> dict:
     Copy the current JSONL logs into DATA_DIR/runs/<run_id>/ and truncate originals.
     Returns basic stats for response payloads.
     """
-    runs_dir = DATA_DIR / "runs" / run_id
+    runs_dir = RUNS_DIR / run_id
     runs_dir.mkdir(parents=True, exist_ok=True)
     rotated = []
     for p in files:
@@ -87,6 +90,14 @@ def _rotate_logs(run_id: str, files: List[Path]) -> dict:
                 rotated.append({"file": str(p.name), "bytes": int(dst.stat().st_size)})
         except Exception:
             continue
+    # Best-effort write meta.json so the UI can show run boundaries.
+    try:
+        (runs_dir / "meta.json").write_text(
+            json.dumps({"run_id": run_id, "rotated": rotated, "archived_at": time.time()}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
     return {"run_id": run_id, "rotated": rotated, "dir": str(runs_dir)}
 
 
@@ -265,6 +276,371 @@ def root():
 @app.get("/run")
 def run_info():
     return {"run_id": _run_id, "started_at": _run_started_at}
+
+
+def _list_run_dirs(limit: int = 50) -> list[dict]:
+    limit = max(1, min(limit, 200))
+    items = []
+    try:
+        dirs = [p for p in RUNS_DIR.iterdir() if p.is_dir()]
+        dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for p in dirs[:limit]:
+            meta = {}
+            mp = p / "meta.json"
+            if mp.exists():
+                try:
+                    meta = json.loads(mp.read_text(encoding="utf-8", errors="replace") or "{}")
+                except Exception:
+                    meta = {}
+            items.append(
+                {
+                    "run_id": p.name,
+                    "mtime": float(p.stat().st_mtime),
+                    "meta": meta,
+                    "has_viewer": bool((p / "result_viewer.html").exists()),
+                }
+            )
+    except Exception:
+        return []
+    return items
+
+
+def _read_run_jsonl(run_id: str, filename: str, limit: Optional[int] = None) -> list[dict]:
+    p = (RUNS_DIR / run_id / filename).resolve()
+    if not str(p).startswith(str((RUNS_DIR / run_id).resolve())):
+        return []
+    return _read_jsonl(p, limit=limit)
+
+
+def _build_run_job_state(job_events: list[dict]) -> dict[str, dict]:
+    """
+    Reconstruct minimal job/task state from jobs_events.jsonl.
+    Output dict: job_id -> state dict.
+    """
+    jobs: dict[str, dict] = {}
+    for r in job_events:
+        try:
+            t = r.get("event_type")
+            job_id = str(r.get("job_id") or "")
+            d = r.get("data") if isinstance(r.get("data"), dict) else {}
+            ca = float(r.get("created_at") or d.get("created_at") or 0.0)
+            if not job_id:
+                continue
+            if t == "create":
+                jobs[job_id] = {
+                    "job_id": job_id,
+                    "title": str(d.get("title") or ""),
+                    "body": str(d.get("body") or ""),
+                    "reward": float(d.get("reward") or 0.0),
+                    "created_by": str(d.get("created_by") or ""),
+                    "created_at": ca or float(d.get("created_at") or 0.0),
+                    "status": "open",
+                    "claimed_by": "",
+                    "submitted_by": "",
+                    "submission": "",
+                    "submitted_at": 0.0,
+                }
+                continue
+            j = jobs.get(job_id)
+            if not j:
+                # Unknown job; initialize a stub so we still show it in summaries.
+                j = {"job_id": job_id, "title": "", "body": "", "reward": 0.0, "created_by": "", "created_at": 0.0, "status": "unknown"}
+                jobs[job_id] = j
+            if t == "claim":
+                j["claimed_by"] = str(d.get("agent_id") or "")
+                j["status"] = "claimed"
+            elif t == "submit":
+                j["submitted_by"] = str(d.get("agent_id") or "")
+                j["submission"] = str(d.get("submission") or "")
+                j["submitted_at"] = ca or float(d.get("created_at") or 0.0)
+                j["status"] = "submitted"
+            elif t == "review":
+                j["status"] = "approved" if bool(d.get("approved")) else "rejected"
+                j["reviewed_by"] = str(d.get("reviewed_by") or "")
+                j["note"] = str(d.get("note") or "")
+            elif t == "cancel":
+                j["status"] = "cancelled"
+        except Exception:
+            continue
+    return jobs
+
+
+@app.get("/runs")
+def runs_list(limit: int = 50):
+    return {"runs": _list_run_dirs(limit=limit), "current": {"run_id": _run_id, "started_at": _run_started_at}}
+
+
+@app.get("/runs/{run_id}/summary")
+def runs_summary(run_id: str):
+    # Basic log counts + errors
+    audit = _read_run_jsonl(run_id, "audit_log.jsonl")
+    trace = _read_run_jsonl(run_id, "trace_events.jsonl")
+    chat = _read_run_jsonl(run_id, "chat_messages.jsonl")
+    jobs_ev = _read_run_jsonl(run_id, "jobs_events.jsonl")
+
+    status_counts: dict[int, int] = {}
+    for e in audit:
+        sc = int(e.get("status_code") or 0)
+        status_counts[sc] = status_counts.get(sc, 0) + 1
+    http_errors = sum(v for k, v in status_counts.items() if k >= 400)
+    trace_errors = [e for e in trace if e.get("kind") == "error"]
+
+    # Tasks/jobs: focus on agent_1 proposed tasks (task-mode)
+    jobs = _build_run_job_state(jobs_ev)
+    tasks = [j for j in jobs.values() if str(j.get("created_by") or "") == "agent_1"]
+    # Prefer tasks that were tagged with this run_id in title/body.
+    tag = f"[run:{run_id}]"
+    tagged = [t for t in tasks if (tag in str(t.get("title") or "")) or (tag in str(t.get("body") or ""))]
+    tasks = tagged or tasks
+    # Sort newest first
+    tasks.sort(key=lambda j: float(j.get("created_at") or 0.0), reverse=True)
+
+    done = [t for t in tasks if t.get("status") in ("submitted", "approved")]
+    open_ = [t for t in tasks if t.get("status") in ("open", "claimed", "unknown")]
+
+    return {
+        "run_id": run_id,
+        "counts": {"audit": len(audit), "trace": len(trace), "chat": len(chat), "job_events": len(jobs_ev)},
+        "http": {"errors_ge_400": http_errors, "status_counts": status_counts},
+        "trace": {"errors": len(trace_errors), "last_error": (trace_errors[-1].get("summary") if trace_errors else "")},
+        "tasks": {
+            "total": len(tasks),
+            "done": len(done),
+            "open": len(open_),
+            "items": [
+                {
+                    "job_id": t.get("job_id"),
+                    "title": t.get("title"),
+                    "status": t.get("status"),
+                    "created_by": t.get("created_by"),
+                    "claimed_by": t.get("claimed_by"),
+                    "submitted_by": t.get("submitted_by"),
+                    "created_at": t.get("created_at"),
+                    "submitted_at": t.get("submitted_at"),
+                    "submission_preview": (str(t.get("submission") or "")[:500]),
+                }
+                for t in tasks[:50]
+            ],
+        },
+    }
+
+
+def _extract_tag(text: str, tag: str) -> Optional[str]:
+    try:
+        import re
+
+        m = re.search(r"\[" + re.escape(tag) + r":([^\]]+)\]", text or "")
+        return str(m.group(1)).strip() if m else None
+    except Exception:
+        return None
+
+
+def _escape_and_format(text: str) -> str:
+    import html as _html
+    import re as _re
+
+    s = _html.escape(text or "")
+    s = _re.sub(r"\*\*(.+?)\*\*", r"<strong>\g<1></strong>", s)
+    s = _re.sub(r"`([^`]+)`", r"<code>\g<1></code>", s)
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    return s.replace("\n", "<br>")
+
+
+def _fmt_ts(created_at: Any) -> str:
+    import datetime as dt
+
+    try:
+        x = float(created_at)
+        return dt.datetime.fromtimestamp(x).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return ""
+
+
+def _build_viewer_html(messages: list[dict], thoughts: list[dict], title: str) -> str:
+    # Minimal embedded version of export_chat_html.py (no external deps).
+    import html as _html
+    import json as _json
+    import re as _re
+    import time as _time
+
+    groups: dict[str, list[dict]] = {}
+    for m in messages:
+        text = str(m.get("text") or "")
+        conv = _extract_tag(text, "conv") or "no-conv"
+        groups.setdefault(conv, []).append(m)
+
+    tgroups: dict[str, list[dict]] = {}
+    for e in thoughts:
+        data = e.get("data") if isinstance(e.get("data"), dict) else {}
+        conv = str(data.get("conv") or "").strip() or "no-conv"
+        tgroups.setdefault(conv, []).append(e)
+
+    def last_ts(items: list[dict]) -> float:
+        try:
+            return float(items[-1].get("created_at") or 0.0)
+        except Exception:
+            return 0.0
+
+    group_items = sorted(groups.items(), key=lambda kv: last_ts(kv[1]), reverse=True)
+    default_conv = "no-conv"
+    if group_items:
+        best = None
+        for conv_id, items in group_items:
+            if conv_id == "no-conv":
+                continue
+            score = len(items) + len(tgroups.get(conv_id) or [])
+            if best is None or score > best[0]:
+                best = (score, conv_id)
+        default_conv = best[1] if best else group_items[0][0]
+
+    sidebar_items = []
+    conv_sections = []
+    for conv_id, items in group_items:
+        senders = []
+        for mm in items:
+            sn = mm.get("sender_name") or mm.get("sender_id") or "?"
+            if sn not in senders:
+                senders.append(str(sn))
+        last_text = str(items[-1].get("text") or "")
+        topic = _extract_tag(last_text, "topic") or ""
+        label = f"{conv_id} - {', '.join(senders[:3])}"
+        if topic:
+            label += f" - topic: {topic}"
+        sidebar_items.append(
+            f"<button class='convBtn' data-conv='{_html.escape(conv_id)}' onclick='selectConv(\"{_html.escape(conv_id)}\")'>"
+            f"<div class='convTitle'>{_html.escape(label)}</div>"
+            f"<div class='convMeta'>{len(items)} msgs - last: {_html.escape(_fmt_ts(items[-1].get('created_at')))}</div>"
+            f"</button>"
+        )
+
+        rows = []
+        for mm in items:
+            sender = str(mm.get("sender_name") or mm.get("sender_id") or "?")
+            created = _fmt_ts(mm.get("created_at"))
+            raw_text = str(mm.get("text") or "")
+            body = _re.sub(r"\\[conv:[^\\]]+\\]\\s*", "", raw_text).strip()
+            rows.append(
+                "<div class='msg'>"
+                f"<div class='msgHeader'><span class='sender'>{_html.escape(sender)}</span>"
+                f"<span class='time'>{_html.escape(created)}</span></div>"
+                f"<div class='msgBody'>{_escape_and_format(body)}</div>"
+                "</div>"
+            )
+
+        trows = []
+        for e in (tgroups.get(conv_id) or []):
+            agent = str(e.get("agent_name") or e.get("agent_id") or "?")
+            created = _fmt_ts(e.get("created_at"))
+            data = e.get("data") if isinstance(e.get("data"), dict) else {}
+            think = str(data.get("think") or "").strip()
+            if not think:
+                continue
+            trows.append(
+                "<div class='msg thought'>"
+                f"<div class='msgHeader'><span class='sender'>{_html.escape(agent)}</span>"
+                f"<span class='time'>{_html.escape(created)}</span>"
+                f"<span class='meta'>internal thought</span></div>"
+                f"<div class='msgBody'>{_escape_and_format(think)}</div>"
+                "</div>"
+            )
+
+        conv_sections.append(
+            f"<section class='convSection' id='conv-{_html.escape(conv_id)}' data-conv='{_html.escape(conv_id)}'>"
+            + "<div class='tabs'>"
+            + "<button class='tabBtn active' data-tab='spoken' onclick='selectTab(\"spoken\")'>Spoken</button>"
+            + "<button class='tabBtn' data-tab='thoughts' onclick='selectTab(\"thoughts\")'>Thoughts</button>"
+            + "</div>"
+            + "<div class='tabPane active' data-tab='spoken'>"
+            + ("\n".join(rows) if rows else "<div class='convMeta'>(no spoken messages)</div>")
+            + "</div>"
+            + "<div class='tabPane' data-tab='thoughts'>"
+            + ("\n".join(trows) if trows else "<div class='convMeta'>(no thoughts captured)</div>")
+            + "</div>"
+            + "</section>"
+        )
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{_html.escape(title)}</title>
+  <style>
+    :root {{
+      --bg: #0b1220; --panel: #0f1a30; --border: rgba(255,255,255,0.10);
+      --text: rgba(255,255,255,0.92); --muted: rgba(255,255,255,0.65);
+      --codeBg: rgba(255,255,255,0.08);
+    }}
+    html, body {{ height: 100%; }}
+    body {{ margin:0; background:var(--bg); color:var(--text); font-family: ui-sans-serif, system-ui, Segoe UI, Roboto, Arial; }}
+    header {{ position:sticky; top:0; background:rgba(11,18,32,0.86); border-bottom:1px solid var(--border); padding:12px 16px; z-index:10; }}
+    header .sub {{ color:var(--muted); font-size:12px; margin-top:2px; }}
+    .layout {{ display:grid; grid-template-columns: 360px 1fr; height: calc(100% - 58px); }}
+    aside {{ border-right:1px solid var(--border); background:var(--panel); overflow:auto; padding:10px; }}
+    main {{ overflow:auto; padding:14px 18px; }}
+    .convBtn {{ width:100%; text-align:left; border:1px solid var(--border); background:rgba(255,255,255,0.02); color:var(--text);
+      border-radius:10px; padding:10px; margin-bottom:10px; cursor:pointer; }}
+    .convBtn.active {{ outline:2px solid rgba(122,162,255,0.35); border-color: rgba(122,162,255,0.55); }}
+    .convTitle {{ font-weight:650; font-size:13px; }}
+    .convMeta {{ color:var(--muted); font-size:12px; margin-top:6px; }}
+    .msg {{ border:1px solid var(--border); background:rgba(255,255,255,0.02); border-radius:12px; padding:10px 12px; margin-bottom:10px; }}
+    .msgHeader {{ display:flex; gap:10px; align-items:baseline; }}
+    .sender {{ font-weight:700; }}
+    .time, .meta {{ color:var(--muted); font-size:12px; }}
+    .msgBody {{ margin-top:6px; line-height:1.35; }}
+    code {{ background: var(--codeBg); padding: 2px 6px; border-radius: 8px; }}
+    .tabs {{ display:flex; gap:8px; margin-bottom:10px; }}
+    .tabBtn {{ border:1px solid var(--border); background:rgba(255,255,255,0.02); color:var(--text); border-radius:999px; padding:6px 10px; cursor:pointer; }}
+    .tabBtn.active {{ outline:2px solid rgba(122,162,255,0.35); }}
+    .tabPane {{ display:none; }}
+    .tabPane.active {{ display:block; }}
+    .convSection {{ display:none; }}
+    .convSection.active {{ display:block; }}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="title">{_html.escape(title)}</div>
+    <div class="sub">Generated {_html.escape(_fmt_ts(_time.time()))} - messages: {len(messages)} - thoughts: {len(thoughts)} - conversations: {len(groups)}</div>
+  </header>
+  <div class="layout">
+    <aside>{''.join(sidebar_items)}</aside>
+    <main>{''.join(conv_sections)}</main>
+  </div>
+  <script>
+    function selectConv(convId) {{
+      document.querySelectorAll('.convBtn').forEach(b => b.classList.toggle('active', b.dataset.conv === convId));
+      document.querySelectorAll('.convSection').forEach(s => s.classList.toggle('active', s.dataset.conv === convId));
+      selectTab('spoken');
+    }}
+    function selectTab(tab) {{
+      document.querySelectorAll('.tabBtn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+      document.querySelectorAll('.tabPane').forEach(p => p.classList.toggle('active', p.dataset.tab === tab));
+    }}
+    selectConv({_json.dumps(default_conv)});
+  </script>
+</body>
+</html>"""
+
+
+@app.get("/runs/{run_id}/viewer")
+def runs_viewer(run_id: str):
+    run_dir = (RUNS_DIR / run_id).resolve()
+    if not run_dir.exists() or not run_dir.is_dir():
+        return {"error": "not_found"}
+    viewer_path = run_dir / "result_viewer.html"
+    if viewer_path.exists():
+        return FileResponse(str(viewer_path), media_type="text/html")
+    # Generate on demand
+    msgs = _read_jsonl(run_dir / "chat_messages.jsonl")
+    trace = _read_jsonl(run_dir / "trace_events.jsonl")
+    thoughts = [e for e in trace if e.get("kind") == "chat_thought"]
+    html_txt = _build_viewer_html(msgs, thoughts, title=f"Run {run_id} - Conversations")
+    try:
+        viewer_path.write_text(html_txt, encoding="utf-8")
+    except Exception:
+        pass
+    return HTMLResponse(content=html_txt)
 
 # In-memory state (Milestone 1). Persistence comes later.
 _tick = 0
@@ -1528,12 +1904,35 @@ class NewRunRequest(BaseModel):
 @app.post("/admin/new_run")
 async def admin_new_run(req: NewRunRequest, request: Request):
     global _tick, _agents, _world_started_at, _chat, _trace, _audit, _topic, _topic_set_at, _topic_history, _board_posts, _board_replies
+    global _jobs, _job_events, _economy_ledger, _balances
     global _run_id, _run_started_at
     if not _require_admin(request):
         return {"error": "unauthorized"}
 
-    rid = (req.run_id or "").strip() or time.strftime("%Y%m%d-%H%M%S")
-    info = _rotate_logs(rid, [AUDIT_PATH, TRACE_PATH, CHAT_PATH])
+    # Archive the *current* run into its own directory, then start a fresh run_id.
+    archived_run_id = _run_id
+    archived_started_at = _run_started_at
+    archived_info = _rotate_logs(
+        archived_run_id,
+        [
+            AUDIT_PATH,
+            TRACE_PATH,
+            CHAT_PATH,
+            JOBS_PATH,
+            ECONOMY_PATH,
+            EVENTS_PATH,
+        ],
+    )
+    # Update meta.json with run boundaries.
+    try:
+        meta_p = RUNS_DIR / archived_run_id / "meta.json"
+        meta = {}
+        if meta_p.exists():
+            meta = json.loads(meta_p.read_text(encoding="utf-8", errors="replace") or "{}")
+        meta.update({"run_id": archived_run_id, "started_at": archived_started_at, "ended_at": time.time()})
+        meta_p.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
     # Reset in-memory state (agents will re-upsert)
     _tick = 0
@@ -1542,7 +1941,13 @@ async def admin_new_run(req: NewRunRequest, request: Request):
     _chat = []
     _trace = []
     _audit = []
-    _run_id = rid
+    _jobs = {}
+    _job_events = []
+    _economy_ledger = []
+    _balances = {}
+
+    new_run_id = (req.run_id or "").strip() or time.strftime("%Y%m%d-%H%M%S")
+    _run_id = new_run_id
     _run_started_at = time.time()
 
     if req.reset_topic:
@@ -1554,7 +1959,12 @@ async def admin_new_run(req: NewRunRequest, request: Request):
         _board_posts = {}
         _board_replies = {}
 
-    return {"ok": True, **info, "run_id": _run_id, "started_at": _run_started_at}
+    return {
+        "ok": True,
+        "run_id": _run_id,
+        "started_at": _run_started_at,
+        "archived": {"run_id": archived_run_id, "started_at": archived_started_at, **archived_info},
+    }
 
 
 @app.get("/economy/balances")

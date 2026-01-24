@@ -50,6 +50,8 @@
     <span id="topicStatus" class="pill">loading…</span>
     <span style="margin-left:10px;">Balances:</span>
     <span id="balancesStatus" class="pill">loading…</span>
+    <span style="margin-left:10px;">Run:</span>
+    <span id="runStatus" class="pill">loading…</span>
   </div>
   <p style="max-width: 980px;">
     This page is served by the backend. It subscribes to <code>/ws/world</code> and renders agents.
@@ -58,6 +60,27 @@
   <div class="row">
     <canvas id="world" width="640" height="640"></canvas>
     <div style="display:flex; flex-direction:column; gap: 12px;">
+      <div style="background:white; border:1px solid #ccc; padding:10px; border-radius:6px; width:420px;">
+        <h3 style="margin:0 0 8px 0;">Run Controls</h3>
+        <div style="display:flex; gap:8px; margin-bottom:8px; align-items:center;">
+          <input id="adminToken" type="password" placeholder="ADMIN_TOKEN (optional)" style="padding:6px; flex:1;" />
+          <button id="newRunBtn">Start New Run</button>
+        </div>
+        <div style="display:flex; gap:12px; margin-bottom:8px; font-size:12px; color:#444;">
+          <label style="display:flex; gap:6px; align-items:center;"><input id="resetTopicChk" type="checkbox" checked />reset topic</label>
+          <label style="display:flex; gap:6px; align-items:center;"><input id="resetBoardChk" type="checkbox" />reset board</label>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
+          <button id="runsRefreshBtn">Refresh Runs</button>
+          <select id="runsSelect" style="padding:6px; flex:1;"></select>
+          <button id="openViewerBtn">Open Viewer</button>
+        </div>
+        <div style="display:flex; gap:8px; margin-bottom:8px;">
+          <button id="loadSummaryBtn">Load Summary</button>
+          <span id="runsStatus" class="pill">?</span>
+        </div>
+        <pre id="runSummary" style="white-space:pre-wrap; background:#fafafa; border:1px solid #ddd; padding:8px; border-radius:6px; max-height:220px; overflow:auto; font-size:12px;"></pre>
+      </div>
       <div id="log"></div>
 
       <div style="background:white; border:1px solid #ccc; padding:10px; border-radius:6px; width:420px;">
@@ -157,6 +180,108 @@
     const timeStatus = document.getElementById("timeStatus");
     const topicStatus = document.getElementById("topicStatus");
     const balancesStatus = document.getElementById("balancesStatus");
+    const runStatus = document.getElementById("runStatus");
+
+    const adminToken = document.getElementById("adminToken");
+    const newRunBtn = document.getElementById("newRunBtn");
+    const resetTopicChk = document.getElementById("resetTopicChk");
+    const resetBoardChk = document.getElementById("resetBoardChk");
+    const runsRefreshBtn = document.getElementById("runsRefreshBtn");
+    const runsSelect = document.getElementById("runsSelect");
+    const openViewerBtn = document.getElementById("openViewerBtn");
+    const loadSummaryBtn = document.getElementById("loadSummaryBtn");
+    const runsStatus = document.getElementById("runsStatus");
+    const runSummary = document.getElementById("runSummary");
+
+    function authHeaders() {
+      const tok = (adminToken.value || localStorage.getItem("adminToken") || "").trim();
+      if (tok) {
+        localStorage.setItem("adminToken", tok);
+        return { "Authorization": `Bearer ${tok}` };
+      }
+      return {};
+    }
+
+    async function fetchRunInfo() {
+      try {
+        const r = await fetch(`${BACKEND_HTTP}/run`);
+        const j = await r.json();
+        runStatus.textContent = j.run_id ? j.run_id : "unknown";
+      } catch (e) {
+        runStatus.textContent = "error";
+      }
+    }
+
+    async function refreshRuns() {
+      runsStatus.textContent = "loading…";
+      try {
+        const r = await fetch(`${BACKEND_HTTP}/runs?limit=50`);
+        const j = await r.json();
+        const runs = j.runs || [];
+        runsSelect.innerHTML = "";
+        for (const it of runs) {
+          const opt = document.createElement("option");
+          opt.value = it.run_id;
+          const meta = it.meta || {};
+          const ended = meta.ended_at ? new Date(meta.ended_at * 1000).toLocaleString() : "";
+          opt.textContent = ended ? `${it.run_id} (ended ${ended})` : it.run_id;
+          runsSelect.appendChild(opt);
+        }
+        runsStatus.textContent = `runs=${runs.length}`;
+      } catch (e) {
+        runsStatus.textContent = "error";
+      }
+    }
+
+    async function loadSelectedSummary() {
+      const rid = runsSelect.value;
+      if (!rid) return;
+      runsStatus.textContent = "loading…";
+      runSummary.textContent = "";
+      try {
+        const r = await fetch(`${BACKEND_HTTP}/runs/${encodeURIComponent(rid)}/summary`);
+        const j = await r.json();
+        runSummary.textContent = JSON.stringify(j, null, 2);
+        runsStatus.textContent = `tasks done=${(j.tasks && j.tasks.done) || 0}/${(j.tasks && j.tasks.total) || 0}`;
+      } catch (e) {
+        runsStatus.textContent = "error";
+      }
+    }
+
+    newRunBtn.addEventListener("click", async () => {
+      newRunBtn.disabled = true;
+      try {
+        const payload = {
+          reset_topic: !!resetTopicChk.checked,
+          reset_board: !!resetBoardChk.checked
+        };
+        const r = await fetch(`${BACKEND_HTTP}/admin/new_run`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify(payload),
+        });
+        const j = await r.json();
+        if (!j.ok) {
+          runsStatus.textContent = `new_run failed: ${j.error || "unknown"}`;
+        } else {
+          runsStatus.textContent = `started ${j.run_id}`;
+          await fetchRunInfo();
+          await refreshRuns();
+        }
+      } catch (e) {
+        runsStatus.textContent = "new_run error";
+      } finally {
+        newRunBtn.disabled = false;
+      }
+    });
+
+    runsRefreshBtn.addEventListener("click", refreshRuns);
+    loadSummaryBtn.addEventListener("click", loadSelectedSummary);
+    openViewerBtn.addEventListener("click", () => {
+      const rid = runsSelect.value;
+      if (!rid) return;
+      window.open(`${BACKEND_HTTP}/runs/${encodeURIComponent(rid)}/viewer`, "_blank");
+    });
     function fmtTime(day, minuteOfDay) {
       const mm = Math.max(0, minuteOfDay|0);
       const h = Math.floor(mm / 60);
@@ -442,6 +567,9 @@
       }
     }
     refreshTopic();
+    // Run info + archived runs list
+    fetchRunInfo();
+    refreshRuns();
 
     async function refreshBalances() {
       try {
