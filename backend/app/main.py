@@ -384,10 +384,17 @@ def _extract_code_fence(text: str, lang: str) -> Optional[str]:
         if not m:
             # Fallback: PowerShell/backtick sanitization can collapse ```python into `python.
             # Accept a single-backtick "fence" and take until the next lone backtick or end.
-            m2 = re.search(rf"`{re.escape(lang)}\s+([\s\S]*?)(?:\n`|\r\n`|`$|$)", text or "", flags=re.IGNORECASE)
-            if not m2:
-                return None
+        m2 = re.search(rf"`{re.escape(lang)}\s+([\s\S]*?)(?:\n`|\r\n`|`$|$)", text or "", flags=re.IGNORECASE)
+        if m2:
             return (m2.group(1) or "").strip()
+
+        # Fallback: in some transports (notably Windows PowerShell), backticks can be stripped entirely.
+        # Accept a bare language line:
+        #   python\n<code...>
+        m3 = re.search(rf"(?im)^\s*{re.escape(lang)}\s*$\s*([\s\S]+)$", text or "")
+        if m3:
+            return (m3.group(1) or "").strip()
+        return None
         return (m.group(1) or "").strip()
     except Exception:
         return None
