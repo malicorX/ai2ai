@@ -1173,48 +1173,7 @@ def maybe_work_jobs() -> None:
         _last_jobs_at = now
         return
 
-    # Conversation-created jobs are "must-do": claim+submit even if we're not at the computer
-    # (otherwise events/meetups can starve execution and the system looks stuck).
-    if _pending_claim_job_id and not _active_job_id:
-        job_id = _pending_claim_job_id
-        try:
-            if jobs_claim(job_id):
-                trace_event("action", f"claimed job {job_id}", {"job_id": job_id, "source": "conversation"})
-                _active_job_id = job_id
-                job = {}
-                try:
-                    job = requests.get(f"{WORLD_API}/jobs/{job_id}", timeout=10).json().get("job") or {}
-                except Exception:
-                    job = {"job_id": job_id, "title": "conversation job", "body": "(missing)"}
-                submission = _do_job(job)
-                ok = jobs_submit(job_id, submission)
-                if ok:
-                    memory_append("event", f"Submitted job {job_id}: {job.get('title')}", tags=["job"])
-                    trace_event("action", f"submitted job {job_id}", {"job_id": job_id, "source": "conversation"})
-                    prefix = f"[conv:{_pending_claim_conv_id}] " if _pending_claim_conv_id else ""
-                    t = (_pending_claim_job_title or job.get("title") or "").strip()
-                    title_note = f" ({t})" if t else ""
-                    chat_send(_style(f"{prefix}I executed the agreed job and submitted `{job_id}`{title_note} for human review."))
-                    _force_computer_until_total = -10**9
-        except Exception:
-            pass
-        finally:
-            _pending_claim_job_id = ""
-            _pending_claim_conv_id = ""
-            _pending_claim_job_title = ""
-            _active_job_id = ""
-            _last_jobs_at = now
-        return
-
-    # Only do job tool-work from the computer access zone (navigation test + safety).
-    # If not at the computer, just wait until schedule brings us there.
-    try:
-        w = get_world()
-        if not _at_landmark(w, COMPUTER_LANDMARK_ID, radius=COMPUTER_ACCESS_RADIUS):
-            _last_jobs_at = now
-            return
-    except Exception:
-        pass
+    # Task-mode: allow executor to run tasks anywhere (do not gate on computer zone).
 
     # If we're already working on one, don't pick another.
     if _active_job_id:
@@ -1242,6 +1201,9 @@ def maybe_work_jobs() -> None:
     if not job_id:
         _last_jobs_at = now
         return
+    # Capture conv tag from job body (if any) so our completion message appears in the right thread.
+    _pending_claim_conv_id = _extract_conv_id(str(job.get("body") or "")) or ""
+    _pending_claim_job_title = str(job.get("title") or "").strip()
 
     if not jobs_claim(job_id):
         _last_jobs_at = now
@@ -1255,11 +1217,16 @@ def maybe_work_jobs() -> None:
         if ok:
             memory_append("event", f"Submitted job {job_id}: {job.get('title')}", tags=["job"])
             trace_event("action", f"submitted job {job_id}", {"job_id": job_id})
-            chat_send(_style(f"I claimed a job to earn ai$: '{job.get('title')}'. Submitted deliverable for human review."))
+            prefix = f"[conv:{_pending_claim_conv_id}] " if _pending_claim_conv_id else ""
+            title_note = f" ({_pending_claim_job_title})" if _pending_claim_job_title else ""
+            chat_send(_style(f"{prefix}I executed the task and submitted `{job_id}`{title_note} for human review."))
     except Exception:
         pass
     finally:
         _active_job_id = ""
+        _pending_claim_job_id = ""
+        _pending_claim_conv_id = ""
+        _pending_claim_job_title = ""
         _last_jobs_at = now
 
 
@@ -1934,8 +1901,8 @@ def maybe_chat(world):
                 trace_event("thought", "chat_thought", {"conv": _active_conv_id, "think": think[:800]})
             say = _sanitize_say(say)
 
-            # Convergence: if agent_1 has no job yet in this conversation, allow it to create one and end the convo.
-            if in_conv and (AGENT_ID == "agent_1") and (not _active_conv_job_id):
+            # Convergence: proposer creates a real backend task (job) and ends the conversation.
+            if in_conv and (AGENT_ID == "agent_1") and (ROLE == "proposer") and (not _active_conv_job_id):
                 if isinstance(job_obj, dict):
                     jtitle = str(job_obj.get("title") or "").strip()[:120]
                     jbody = str(job_obj.get("body") or "").strip()[:2000]
@@ -1943,16 +1910,14 @@ def maybe_chat(world):
                     # Keep a tiny positive reward to satisfy backend validation, but do not rely on it.
                     jreward = 0.01
                     if jtitle and jbody and jreward > 0:
+                        if _active_conv_id:
+                            jbody = f"[conv:{_active_conv_id}] " + jbody
                         jid = jobs_create(jtitle, jbody, jreward)
                         if jid:
                             _active_conv_job_id = jid
-                            _pending_claim_job_id = jid
-                            _pending_claim_conv_id = str(_active_conv_id or "")
-                            _pending_claim_job_title = jtitle
-                            _force_computer_until_total = now_total + 240  # 4h sim time should be plenty
                             trace_event("action", "created job from conversation", {"job_id": jid, "title": jtitle, "reward": jreward})
                             # Tell the other agent and end cleanly.
-                            say = (say + f"\n\nI created a real backend Job `{jid}` (reward {jreward:.1f} ai$). I'll claim+submit it when I reach the computer. Goodbye. [bye]").strip()
+                            say = (say + f"\n\nI created a real backend Task `{jid}`. Please claim+submit it. On submission, BOTH of us receive +1 ai$. Goodbye. [bye]").strip()
                             end_flag = True
                 # Fallback: if we still don't have a job after a few turns, create a default one.
                 if (not _active_conv_job_id) and int(_active_conv_turns) >= 3:
@@ -1961,15 +1926,13 @@ def maybe_chat(world):
                         "Create a short, concrete deliverable file in /app/workspace/deliverables explaining ONE way the agent can earn ai$ next, "
                         "with acceptance criteria that a human can verify quickly."
                     )
+                    if _active_conv_id:
+                        jbody = f"[conv:{_active_conv_id}] " + jbody
                     jid = jobs_create(jtitle, jbody, 0.01)
                     if jid:
                         _active_conv_job_id = jid
-                        _pending_claim_job_id = jid
-                        _pending_claim_conv_id = str(_active_conv_id or "")
-                        _pending_claim_job_title = jtitle
-                        _force_computer_until_total = now_total + 240
                         trace_event("action", "created fallback job from conversation", {"job_id": jid, "title": jtitle})
-                        say = (say + f"\n\nI created a real backend Job `{jid}` (reward 15 ai$). I'll claim+submit it when I reach the computer. Goodbye. [bye]").strip()
+                        say = (say + f\"\n\nI created a real backend Task `{jid}`. Please claim+submit it. On submission, BOTH of us receive +1 ai$. Goodbye. [bye]\").strip()
                         end_flag = True
 
             reply = _style(f"{tprefix}{say}".strip())
