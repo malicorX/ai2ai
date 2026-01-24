@@ -38,6 +38,8 @@ _last_forced_meetup_msg_at_total = -10**9
 _last_meetup_id_sent = None
 _last_run_id = ""
 _last_run_check_at = 0.0
+_last_task_proposed_at = 0.0
+_last_task_title = ""
 
 # Conversation protocol (sticky sessions)
 _active_conv_id = None
@@ -1104,6 +1106,7 @@ def _do_job(job: dict) -> str:
     deliver_dir = os.path.join(WORKSPACE_DIR, "deliverables")
     os.makedirs(deliver_dir, exist_ok=True)
     out_path = os.path.join(deliver_dir, f"{job_id}.md")
+    py_path = os.path.join(deliver_dir, f"{job_id}.py")
 
     # Use memory as "long-term context"
     mem = []
@@ -1129,13 +1132,47 @@ def _do_job(job: dict) -> str:
     content.append((persona[:800] + ("…" if len(persona) > 800 else "")).strip())
     content.append("")
     content.append("## Output")
-    # Provide a structured response template the human can judge.
-    content.append("- Summary:")
-    content.append(f"  - I will deliver a concrete response and a file artifact at `{out_path}`.")
-    content.append("- Proposed approach:")
-    content.append("  - Clarify deliverable format")
-    content.append("  - Produce the artifact")
-    content.append("  - Ask for review criteria")
+    tlow = (title + " " + body).lower()
+    if "prime" in tlow and "five" in tlow:
+        code = (
+            "def is_prime(n: int) -> bool:\n"
+            "    if n < 2:\n"
+            "        return False\n"
+            "    if n == 2:\n"
+            "        return True\n"
+            "    if n % 2 == 0:\n"
+            "        return False\n"
+            "    d = 3\n"
+            "    while d * d <= n:\n"
+            "        if n % d == 0:\n"
+            "            return False\n"
+            "        d += 2\n"
+            "    return True\n\n"
+            "def first_n_primes(k: int) -> list[int]:\n"
+            "    out = []\n"
+            "    n = 2\n"
+            "    while len(out) < k:\n"
+            "        if is_prime(n):\n"
+            "            out.append(n)\n"
+            "        n += 1\n"
+            "    return out\n\n"
+            "if __name__ == '__main__':\n"
+            "    for p in first_n_primes(5):\n"
+            "        print(p)\n"
+        )
+        _append_file(py_path, code)
+        content.append(f"Created `{py_path}`.\n")
+        content.append("```python")
+        content.append(code.rstrip())
+        content.append("```")
+    else:
+        # Provide a structured response template the human can judge.
+        content.append("- Summary:")
+        content.append(f"  - I will deliver a concrete response and a file artifact at `{out_path}`.")
+        content.append("- Proposed approach:")
+        content.append("  - Clarify deliverable format")
+        content.append("  - Produce the artifact")
+        content.append("  - Ask for review criteria")
     content.append("")
     content.append("## Long-term memory context (recent)")
     content.extend(mem_lines or ["- (none yet)"])
@@ -1318,6 +1355,69 @@ def jobs_create(title: str, body: str, reward: float) -> str:
         return ""
     job = data.get("job") or {}
     return str(job.get("job_id") or "")
+
+
+def maybe_propose_task() -> None:
+    """
+    Task proposer mode (agent_1): keep at most one open task at a time.
+    The executor (agent_2) will claim+submit; backend will award +1 ai$ to both on submit.
+    """
+    global _last_task_proposed_at, _last_task_title
+    if ROLE != "proposer":
+        return
+    now = time.time()
+    if now - _last_task_proposed_at < 45.0:
+        return
+    _last_task_proposed_at = now
+
+    # Don't spam: only one open task at a time.
+    try:
+        open_jobs = jobs_list(status="open", limit=50)
+    except Exception:
+        return
+    mine_open = [j for j in open_jobs if str(j.get("created_by") or "") == "agent_1"]
+    if mine_open:
+        return
+
+    # Simple rotation of concrete tasks the executor can do without external access.
+    candidates = [
+        {
+            "title": "Task: Python primes script (smallest five primes)",
+            "body": (
+                "Write a Python script that prints the smallest five prime numbers.\n"
+                "Acceptance criteria:\n"
+                "- Provide a runnable `primes.py`.\n"
+                "- Running it prints exactly: 2, 3, 5, 7, 11 (one per line).\n"
+                "- Include the code in the submission."
+            ),
+        },
+        {
+            "title": "Task: Summarize last run (what happened + next fix)",
+            "body": (
+                "Write a short markdown summary of the last simulation run.\n"
+                "Acceptance criteria:\n"
+                "- 5-10 bullet points of what happened.\n"
+                "- 3 concrete next fixes.\n"
+                "- No fluff."
+            ),
+        },
+        {
+            "title": "Task: Define 3 task quality metrics",
+            "body": (
+                "Define 3 objective metrics to judge whether tasks are good and whether execution was successful.\n"
+                "Acceptance criteria:\n"
+                "- Each metric has a formula or unambiguous scoring method.\n"
+                "- Each metric includes a target threshold.\n"
+                "- Short explanation (1-2 sentences each)."
+            ),
+        },
+    ]
+    pick = next((c for c in candidates if c["title"] != _last_task_title), candidates[0])
+    _last_task_title = pick["title"]
+    jid = jobs_create(pick["title"], pick["body"], 0.01)
+    if jid:
+        # Notify the executor in chat (no need for a long conversation).
+        chat_send(_style(f"[task:{jid}] New task for agent_2: {pick['title']}. Please claim+submit. (+1 ai$ each on submit)"))
 
 
 def _remember_sent(text: str) -> None:
@@ -2154,6 +2254,8 @@ def main():
             if maybe_conversation_step(world):
                 time.sleep(SLEEP_SECONDS)
                 continue
+            # Task proposer mode: agent_1 periodically creates a single open task for agent_2 to execute.
+            maybe_propose_task()
             maybe_process_event_invites(world)
             maybe_reflect(world)
             # plan schedule at the computer once per simulated day
