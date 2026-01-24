@@ -118,6 +118,13 @@ ssh -o BatchMode=yes malicor@sparky1 "curl -s http://localhost:8000/board/posts"
 **Preferred (served from backend):**
 - Open: `http://sparky1:8000/ui/` (or `http://sparky1:8000/` which redirects)
 
+### Download the latest run results to local `result_viewer.html`
+**What it does:** Downloads the HTML conversation viewer for the latest archived run and overwrites your local `result_viewer.html` so you can open it as a `file:///...` in Cursor/offline.
+
+```powershell
+pwsh -File .\scripts\pull_result_viewer.ps1 -BaseUrl "http://sparky1:8000" -RunId "latest" -OutPath "M:\Data\Projects\ai_ai2ai\result_viewer.html"
+```
+
 **Fallback (local file):**
 - Open `frontend/index.html`
 - If the backend isn’t the same host as the HTML page, set `BACKEND_WS` inside the file to:
