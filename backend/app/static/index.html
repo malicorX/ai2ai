@@ -4,18 +4,65 @@
   <meta charset="UTF-8" />
   <title>AI Village (v1) — Viewer</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-    .row { display: flex; gap: 16px; }
-    canvas { background: white; border: 1px solid #ccc; }
+    :root { --bg: #f5f5f5; --panel: #fff; --border: #ccc; }
+    html, body { height: 100%; }
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      background: var(--bg);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    #topbar {
+      padding: 12px 14px 10px 14px;
+      border-bottom: 1px solid #e3e3e3;
+      background: rgba(245,245,245,0.92);
+      backdrop-filter: blur(8px);
+    }
+    #topbar h2 { margin: 0 0 8px 0; font-size: 20px; }
+    #statusLine { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; font-size: 13px; }
+    #statusLine .kv { display: inline-flex; gap: 6px; align-items: center; }
+    #desc { margin: 8px 0 0 0; color: #333; max-width: 1100px; font-size: 13px; }
+
+    .layout {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(560px, 1fr) minmax(360px, 520px);
+      gap: 12px;
+      padding: 12px;
+    }
+    #canvasWrap {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 0;
+    }
+    canvas { background: white; border: 1px solid #ddd; border-radius: 8px; display: block; }
+
+    #sidebar {
+      min-height: 0;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    #sidebar > * { width: 100% !important; box-sizing: border-box; }
     #log {
-      width: 420px;
-      height: 640px;
       background: white;
       border: 1px solid #ccc;
       overflow-y: auto;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
       font-size: 12px;
       padding: 10px;
+      border-radius: 6px;
+      min-height: 120px;
+      max-height: 220px;
     }
     .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eee; }
     .ok { background: #d4edda; }
@@ -38,28 +85,26 @@
   </style>
 </head>
 <body>
-  <h2>AI Village (v1) — World Viewer</h2>
-  <div>
-    <span>WebSocket:</span>
-    <span id="wsStatus" class="pill bad">disconnected</span>
-    <span style="margin-left:10px;">World:</span>
-    <span id="worldStatus" class="pill">tick=? agents=?</span>
-    <span style="margin-left:10px;">Time:</span>
-    <span id="timeStatus" class="pill">day=? ??:??</span>
-    <span style="margin-left:10px;">Topic:</span>
-    <span id="topicStatus" class="pill">loading…</span>
-    <span style="margin-left:10px;">Balances:</span>
-    <span id="balancesStatus" class="pill">loading…</span>
-    <span style="margin-left:10px;">Run:</span>
-    <span id="runStatus" class="pill">loading…</span>
-  </div>
-  <p style="max-width: 980px;">
-    This page is served by the backend. It subscribes to <code>/ws/world</code> and renders agents.
-  </p>
+  <header id="topbar">
+    <h2>AI Village (v1) — World Viewer</h2>
+    <div id="statusLine">
+      <span class="kv"><span>WebSocket:</span><span id="wsStatus" class="pill bad">disconnected</span></span>
+      <span class="kv"><span>World:</span><span id="worldStatus" class="pill">tick=? agents=?</span></span>
+      <span class="kv"><span>Time:</span><span id="timeStatus" class="pill">day=? ??:??</span></span>
+      <span class="kv"><span>Topic:</span><span id="topicStatus" class="pill">loading…</span></span>
+      <span class="kv"><span>Balances:</span><span id="balancesStatus" class="pill">loading…</span></span>
+      <span class="kv"><span>Run:</span><span id="runStatus" class="pill">loading…</span></span>
+    </div>
+    <p id="desc">
+      Served by the backend. Live world via <code>/ws/world</code>. Use “Run Controls” to start new runs and view results.
+    </p>
+  </header>
 
-  <div class="row">
-    <canvas id="world" width="640" height="640"></canvas>
-    <div style="display:flex; flex-direction:column; gap: 12px;">
+  <div class="layout">
+    <div id="canvasWrap">
+      <canvas id="world" width="640" height="640"></canvas>
+    </div>
+    <div id="sidebar">
       <div style="background:white; border:1px solid #ccc; padding:10px; border-radius:6px; width:420px;">
         <h3 style="margin:0 0 8px 0;">Run Controls</h3>
         <div style="display:flex; gap:8px; margin-bottom:8px; align-items:center;">
@@ -291,8 +336,9 @@
       return `day=${day} ${hh}:${mi}`;
     }
 
-    const tile = 20;
-    const worldPx = 32 * tile;
+    const WORLD_SIZE = 32;
+    let tile = 20;
+    let worldPx = WORLD_SIZE * tile;
     const trails = {}; // agent_id -> [{x,y,ts}]
     const lastIntent = {}; // agent_id -> string (latest trace summary)
     const TRAIL_MAX = 80;
@@ -302,6 +348,37 @@
     tooltip.id = "tooltip";
     document.body.appendChild(tooltip);
     let lastHoverKey = "";
+
+    function resizeCanvas() {
+      const wrap = document.getElementById("canvasWrap");
+      if (!wrap) return;
+      const rect = wrap.getBoundingClientRect();
+      // Keep a bit of padding headroom
+      const maxSize = Math.floor(Math.min(rect.width - 24, rect.height - 24));
+      const cssSize = Math.max(360, maxSize);
+      tile = Math.max(10, Math.floor(cssSize / WORLD_SIZE));
+      worldPx = tile * WORLD_SIZE;
+
+      const dpr = window.devicePixelRatio || 1;
+      canvas.style.width = worldPx + "px";
+      canvas.style.height = worldPx + "px";
+      canvas.width = Math.floor(worldPx * dpr);
+      canvas.height = Math.floor(worldPx * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      // redraw using current state
+      if (latestWorld) {
+        try { renderWorld(latestWorld); } catch (e) { drawGrid(); }
+      } else {
+        drawGrid();
+      }
+    }
+
+    let _resizeT = null;
+    window.addEventListener("resize", () => {
+      if (_resizeT) clearTimeout(_resizeT);
+      _resizeT = setTimeout(resizeCanvas, 80);
+    });
 
     function log(msg) {
       const line = document.createElement("div");
@@ -398,7 +475,8 @@
       }
     }
 
-    drawGrid();
+    resizeCanvas();
+    canvas._didInitialResize = true;
 
     // --- Bulletin board ---
     const boardStatus = document.getElementById("boardStatus");
@@ -888,6 +966,8 @@
             const data = msg.data;
             latestWorld = data;
             for (const a of (data.agents || [])) pushTrail(a);
+            // Ensure canvas is sized to current viewport before rendering
+            if (!canvas._didInitialResize) { resizeCanvas(); canvas._didInitialResize = true; }
             drawGrid();
             const occ = buildOccupancy(data);
             drawTrails(data.agents);
