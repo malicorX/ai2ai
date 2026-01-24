@@ -2039,7 +2039,7 @@ def maybe_chat(world):
                     if jid:
                         _active_conv_job_id = jid
                         trace_event("action", "created fallback job from conversation", {"job_id": jid, "title": jtitle})
-                        say = (say + f\"\n\nI created a real backend Task `{jid}`. Please claim+submit it. On submission, BOTH of us receive +1 ai$. Goodbye. [bye]\").strip()
+                        say = (say + f"\n\nI created a real backend Task `{jid}`. Please claim+submit it. On submission, BOTH of us receive +1 ai$. Goodbye. [bye]").strip()
                         end_flag = True
 
             reply = _style(f"{tprefix}{say}".strip())
