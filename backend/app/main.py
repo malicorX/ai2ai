@@ -8,6 +8,10 @@ import math
 import urllib.request
 import uuid
 import time
+import re
+import tempfile
+import subprocess
+import sys
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Literal, Any
 
@@ -365,6 +369,64 @@ def _build_run_job_state(job_events: list[dict]) -> dict[str, dict]:
     return jobs
 
 
+def _extract_code_fence(text: str, lang: str) -> Optional[str]:
+    """
+    Extract the first fenced code block: ```lang ... ```
+    Returns code string or None.
+    """
+    try:
+        m = re.search(rf"```{re.escape(lang)}\s+([\s\S]*?)```", text or "", flags=re.IGNORECASE)
+        if not m:
+            return None
+        return (m.group(1) or "").strip()
+    except Exception:
+        return None
+
+
+def _auto_verify_task(job: Job, submission: str) -> tuple[bool, str]:
+    """
+    Minimal automatic verifier for a small set of task templates.
+    Returns (ok, note).
+    """
+    title = (job.title or "").lower()
+    body = (job.body or "").lower()
+    text = (submission or "")
+
+    # Prime task: require python code that prints first 5 primes, one per line.
+    if ("prime" in title or "prime" in body) and ("five" in title or "five" in body or "5" in title or "5" in body):
+        code = _extract_code_fence(text, "python") or _extract_code_fence(text, "py")
+        if not code:
+            return (False, "auto_verify failed: missing ```python``` code fence in submission")
+        if len(code) > 12000:
+            return (False, "auto_verify failed: python code too large")
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                p = Path(td) / "task.py"
+                p.write_text(code, encoding="utf-8")
+                # Run with timeout; no perfect sandbox, but keeps runs short.
+                r = subprocess.run(
+                    [sys.executable, "-I", str(p)],
+                    cwd=td,
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+                if r.returncode != 0:
+                    return (False, f"auto_verify failed: script error (code={r.returncode}): {r.stderr.strip()[:300]}")
+                out = (r.stdout or "").strip().splitlines()
+                out = [ln.strip() for ln in out if ln.strip() != ""]
+                expected = ["2", "3", "5", "7", "11"]
+                if out[:5] != expected:
+                    return (False, f"auto_verify failed: expected first lines {expected}, got {out[:5]}")
+                return (True, "auto_verify ok: primes output matches expected 2,3,5,7,11")
+        except subprocess.TimeoutExpired:
+            return (False, "auto_verify failed: script timeout")
+        except Exception as e:
+            return (False, f"auto_verify failed: exception {e}")
+
+    return (False, "auto_verify skipped: no verifier matched")
+
+
 @app.get("/runs")
 def runs_list(limit: int = 50):
     return {"runs": _list_run_dirs(limit=limit), "current": {"run_id": _run_id, "started_at": _run_started_at}}
@@ -395,7 +457,8 @@ def runs_summary(run_id: str):
     # Sort newest first
     tasks.sort(key=lambda j: float(j.get("created_at") or 0.0), reverse=True)
 
-    done = [t for t in tasks if t.get("status") in ("submitted", "approved")]
+    verified = [t for t in tasks if t.get("status") == "approved"]
+    submitted = [t for t in tasks if t.get("status") == "submitted"]
     open_ = [t for t in tasks if t.get("status") in ("open", "claimed", "unknown")]
 
     return {
@@ -405,7 +468,8 @@ def runs_summary(run_id: str):
         "trace": {"errors": len(trace_errors), "last_error": (trace_errors[-1].get("summary") if trace_errors else "")},
         "tasks": {
             "total": len(tasks),
-            "done": len(done),
+            "verified": len(verified),
+            "submitted_unverified": len(submitted),
             "open": len(open_),
             "items": [
                 {
@@ -1585,18 +1649,15 @@ async def jobs_submit(job_id: str, req: JobSubmitRequest):
     ev = _append_job_event("submit", job_id, {"agent_id": req.agent_id, "submission": sub, "created_at": time.time()})
     await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})
 
-    # --- Task-mode reward (agent_1 proposer, agent_2 executor) ---
-    # For now we treat jobs as tasks. When an agent-submitted job is created by another agent,
-    # auto-award 1 ai$ to BOTH participants immediately (tracked in the economy ledger).
+    # Auto-verify certain task templates and auto-approve on success.
+    # IMPORTANT: payout should be tied to verification/approval, not to "submission" alone.
     try:
-        proposer = str(_jobs[job_id].created_by or "").strip()
-        executor = str(req.agent_id or "").strip()
-        if proposer and executor and proposer.startswith("agent_") and executor.startswith("agent_") and proposer != executor:
-            ensure_account(proposer)
-            ensure_account(executor)
-            # Award is from treasury (system); economy_award already ensures treasury exists.
-            await economy_award(AwardRequest(to_id=proposer, amount=1.0, reason=f"task completed (job {job_id})", by="system:task"))
-            await economy_award(AwardRequest(to_id=executor, amount=1.0, reason=f"task completed (job {job_id})", by="system:task"))
+        j2 = _jobs.get(job_id)
+        if j2 and j2.status == "submitted":
+            ok, note = _auto_verify_task(j2, sub)
+            if ok:
+                review_req = JobReviewRequest(approved=True, reviewed_by="system:auto_verify", note=note, payout=0.0, penalty=None)
+                await jobs_review(job_id, review_req)
     except Exception:
         pass
 
@@ -1636,6 +1697,16 @@ async def jobs_review(job_id: str, req: JobReviewRequest):
                     by=f"human:{req.reviewed_by}",
                 )
                 await economy_award(award_req)
+
+            # Task-mode: on approval, award +1 ai$ to BOTH proposer and executor (if distinct agents).
+            try:
+                proposer = str(j2.created_by or "").strip()
+                executor = str(j2.submitted_by or "").strip()
+                if proposer and executor and proposer.startswith("agent_") and executor.startswith("agent_") and proposer != executor:
+                    await economy_award(AwardRequest(to_id=proposer, amount=1.0, reason=f"task verified (job {job_id})", by=f"{req.reviewed_by}"))
+                    await economy_award(AwardRequest(to_id=executor, amount=1.0, reason=f"task verified (job {job_id})", by=f"{req.reviewed_by}"))
+            except Exception:
+                pass
 
         if req.penalty is not None:
             pen = float(req.penalty)
