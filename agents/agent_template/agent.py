@@ -1227,8 +1227,11 @@ def maybe_work_jobs() -> None:
         _last_jobs_at = now
         return
 
-    # In task-mode, only execute tasks proposed by agent_1.
+    # In task-mode, only execute tasks proposed by agent_1 for THIS run.
+    run_tag = f"[run:{_last_run_id}]" if _last_run_id else ""
     open_jobs = [j for j in open_jobs if str(j.get("created_by") or "") == "agent_1"]
+    if run_tag:
+        open_jobs = [j for j in open_jobs if (run_tag in str(j.get("title") or "")) or (run_tag in str(j.get("body") or ""))]
     if not open_jobs:
         _last_jobs_at = now
         return
@@ -1375,7 +1378,10 @@ def maybe_propose_task() -> None:
         open_jobs = jobs_list(status="open", limit=50)
     except Exception:
         return
+    run_tag = f"[run:{_last_run_id}]" if _last_run_id else ""
     mine_open = [j for j in open_jobs if str(j.get("created_by") or "") == "agent_1"]
+    if run_tag:
+        mine_open = [j for j in mine_open if (run_tag in str(j.get("title") or "")) or (run_tag in str(j.get("body") or ""))]
     if mine_open:
         return
 
@@ -1414,10 +1420,11 @@ def maybe_propose_task() -> None:
     ]
     pick = next((c for c in candidates if c["title"] != _last_task_title), candidates[0])
     _last_task_title = pick["title"]
-    jid = jobs_create(pick["title"], pick["body"], 0.01)
+    title = f"{run_tag} {pick['title']}".strip() if run_tag else pick["title"]
+    jid = jobs_create(title, pick["body"], 0.01)
     if jid:
         # Notify the executor in chat (no need for a long conversation).
-        chat_send(_style(f"[task:{jid}] New task for agent_2: {pick['title']}. Please claim+submit. (+1 ai$ each on submit)"))
+        chat_send(_style(f"[task:{jid}] New task for agent_2: {title}. Please claim+submit. (+1 ai$ each on submit)"))
 
 
 def _remember_sent(text: str) -> None:
