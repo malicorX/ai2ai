@@ -120,6 +120,9 @@ def _pick_redo_job(state: AgentState, failed_job_id: str) -> Optional[dict]:
     if not jobs:
         return None
     run_tag = _run_tag(state.get("run_id", ""))
+    # Tag-first: proposer emits [redo_for:<id>] for deterministic routing.
+    tag = f"[redo_for:{fid}]"
+    tagged = []
     out = []
     for j in jobs:
         if str(j.get("created_by") or "") != "agent_1":
@@ -129,8 +132,14 @@ def _pick_redo_job(state: AgentState, failed_job_id: str) -> Optional[dict]:
         low = (t + " " + b).lower()
         if run_tag and not ((run_tag in t) or (run_tag in b)):
             continue
+        if tag in b:
+            tagged.append(j)
+            continue
         if ("redo" in low) or ("fix" in low) or (fid in t) or (fid in b):
             out.append(j)
+    if tagged:
+        tagged.sort(key=lambda j: _safe_float(j.get("created_at"), 0.0), reverse=True)
+        return tagged[0]
     if not out:
         return None
     out.sort(key=lambda j: _safe_float(j.get("created_at"), 0.0), reverse=True)
