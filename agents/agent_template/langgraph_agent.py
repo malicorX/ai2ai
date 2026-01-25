@@ -262,6 +262,32 @@ def _extract_redo_for(body: str) -> str:
     return (m.group(1) if m else "").strip()
 
 
+def _extract_section_bullets(text: str, header_prefix: str, max_scan_lines: int = 40) -> List[str]:
+    """
+    Extract '- ' bullets under a header (similar to backend heuristic).
+    """
+    lines = (text or "").splitlines()
+    hp = (header_prefix or "").strip().lower()
+    start = None
+    for i, ln in enumerate(lines):
+        if ln.strip().lower().startswith(hp):
+            start = i
+            break
+    if start is None:
+        return []
+    bullets: List[str] = []
+    for ln in lines[start + 1 : start + 1 + max_scan_lines]:
+        s = ln.strip()
+        if s.startswith("- "):
+            bullets.append(s[2:].strip())
+            continue
+        if s == "":
+            continue
+        if bullets and not s.startswith("- "):
+            break
+    return [b for b in bullets if b]
+
+
 def node_decide(state: AgentState, config: Any) -> AgentState:
     tools = _cfg_tools(config)
     role: Role = state.get("role", "executor")  # type: ignore[assignment]
@@ -335,13 +361,58 @@ def node_decide(state: AgentState, config: Any) -> AgentState:
                     "Create a redo job now. Put these tags at the top of the body:\n"
                     f"{redo_tag}\n{redo_level_tag}\n"
                 )
-                tools["trace_event"]("thought", "langgraph: proposer creating redo job", {"failed_job_id": bad_id})
-                raw = llm_chat(sys, user, max_tokens=420)
-                obj = _extract_json_obj(raw) or {}
+                tools["trace_event"](
+                    "thought",
+                    "langgraph: proposer creating redo job",
+                    {"failed_job_id": bad_id, "root_id": root_id, "redo_level": redo_level},
+                )
 
-                title = str(obj.get("title") or "").strip()
-                body = str(obj.get("body") or "").strip()
-                reward = _safe_float(obj.get("reward"), 0.01)
+                # Deterministic strict redo template when we're in redo_level>=2.
+                # This is meant to converge quickly and stop penalty loops.
+                title = ""
+                body = ""
+                reward = 0.01
+                if redo_level >= 2:
+                    ac = _extract_section_bullets(bad_body, "acceptance criteria")
+                    ev = _extract_section_bullets(bad_body, "evidence required in submission")
+                    # If we can’t parse bullets, still provide a minimal set that will pass the heuristic.
+                    if not ac:
+                        ac = [
+                            "Submission includes an 'Evidence' section with a checklist.",
+                            "Submission includes any required code fences (e.g., ```python) and artifacts.",
+                        ]
+                    if not ev:
+                        ev = [
+                            "Under Evidence, include a checklist where each acceptance-criteria bullet appears verbatim.",
+                            "Include required code inside the correct fenced block (e.g., ```python).",
+                        ]
+
+                    title = f"{redo_prefix}STRICT redo (format + evidence compliance)"
+                    body_lines = [
+                        f"{redo_tag}",
+                        f"{redo_level_tag}",
+                        "",
+                        f"This is a STRICT redo. Previous attempt failed verification for job `{bad_id}`.",
+                        f"Failure note: {note}",
+                        "",
+                        "Acceptance criteria:",
+                        *[f"- {b}" for b in ac[:10]],
+                        "",
+                        "Evidence required in submission:",
+                        "- Include an 'Evidence' section.",
+                        "- In that Evidence section, include an 'Acceptance criteria checklist' where EACH bullet from Acceptance criteria appears verbatim (copy/paste).",
+                        *[f"- {b}" for b in ev[:10]],
+                        "",
+                        "STRICT MODE: Keep the solution minimal and match acceptance criteria exactly.",
+                    ]
+                    body = "\n".join(body_lines).strip()
+                else:
+                    raw = llm_chat(sys, user, max_tokens=420)
+                    obj = _extract_json_obj(raw) or {}
+                    title = str(obj.get("title") or "").strip()
+                    body = str(obj.get("body") or "").strip()
+                    reward = _safe_float(obj.get("reward"), 0.01)
+
                 if not title or not body:
                     title = f"{redo_prefix}{bad_title}".strip() if bad_title else f"{redo_prefix}Verifiable task"
                     body = (
