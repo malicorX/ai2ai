@@ -42,6 +42,8 @@ class AgentState(TypedDict, total=False):
     last_job: dict
     handled_rejection_job_id: str
     outcome_ack_job_id: str
+    # Internal-only: runtime tool callables injected by the host process.
+    __tools: dict
     action: Action
     acted: bool
 
