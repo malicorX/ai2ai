@@ -61,6 +61,9 @@ class Tools(TypedDict):
     memory_append: Callable[[str, str, List[str], float], None]
 
 
+_TOOLS: Optional[Tools] = None
+
+
 def _get_tools(state: AgentState, config: Any) -> Tools:
     """
     Retrieve runtime tool callables for a node.
@@ -70,6 +73,12 @@ def _get_tools(state: AgentState, config: Any) -> Tools:
     - preferred: state["__tools"] injected by the caller
     - optional: config["tools"] (if the runtime provides it)
     """
+    # Most robust: module-level injected tools (avoids any schema/key filtering in LangGraph).
+    global _TOOLS
+    if _TOOLS is not None:
+        return _TOOLS
+
+    # Fallback: state injection (may be filtered depending on graph schema/runtime).
     if isinstance(state, dict) and isinstance(state.get("__tools"), dict):
         return state["__tools"]  # type: ignore[return-value]
     if isinstance(config, dict) and isinstance(config.get("tools"), dict):
@@ -747,8 +756,11 @@ def run_graph_step(state: AgentState, tools: Tools) -> AgentState:
     global _GRAPH
     if _GRAPH is None:
         _GRAPH = build_graph()
-    # Inject tools into state because nodes may not receive config.
-    st = dict(state)
-    st["__tools"] = tools
-    return _GRAPH.invoke(st)
+    # Inject tools via module-global for maximum compatibility.
+    global _TOOLS
+    _TOOLS = tools
+    try:
+        return _GRAPH.invoke(dict(state))
+    finally:
+        _TOOLS = None
 
