@@ -1552,6 +1552,12 @@ class JobReviewRequest(BaseModel):
     penalty: Optional[float] = None
 
 
+class JobVerifyRequest(BaseModel):
+    """Manual/system verification trigger (admin-only)."""
+    by: str = "human"
+    force: bool = False
+
+
 _jobs: Dict[str, Job] = {}
 _job_events: List[JobEvent] = []
 
@@ -1807,6 +1813,89 @@ async def jobs_review(job_id: str, req: JobReviewRequest):
                 await economy_penalty(pen_req)
     await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})
     return {"ok": True, "job": asdict(_jobs[job_id])}
+
+
+@app.post("/jobs/{job_id}/verify")
+async def jobs_verify(job_id: str, req: JobVerifyRequest, request: Request):
+    """
+    Admin/manual verification trigger:
+    - runs verifier on current submission
+    - records a 'verify' job event
+    - auto-approves on pass
+    - auto-rejects + penalizes on fail (if verifier matched)
+    """
+    global _tick
+    _tick += 1
+    if not _require_admin(request):
+        return {"error": "unauthorized"}
+    j = _jobs.get(job_id)
+    if not j:
+        return {"error": "not_found"}
+    if j.status != "submitted":
+        return {"error": "not_submitted"}
+    # Skip if already verified unless forced
+    if (j.auto_verify_ok is not None) and (not req.force):
+        return {"ok": True, "job": asdict(j), "note": "already_verified"}
+
+    ok, note = _auto_verify_task(j, j.submission or "")
+    if not note.startswith("auto_verify skipped"):
+        _append_job_event("verify", job_id, {"ok": bool(ok), "note": note, "created_at": time.time()})
+
+    if ok:
+        review_req = JobReviewRequest(approved=True, reviewed_by=req.by or "human", note=note, payout=0.0, penalty=None)
+        await jobs_review(job_id, review_req)
+    else:
+        if note.startswith("auto_verify failed"):
+            review_req = JobReviewRequest(
+                approved=False,
+                reviewed_by=req.by or "human",
+                note=note,
+                payout=0.0,
+                penalty=max(0.0, TASK_FAIL_PENALTY),
+            )
+            await jobs_review(job_id, review_req)
+
+    return {"ok": True, "job": asdict(_jobs[job_id])}
+
+
+@app.post("/admin/verify_pending")
+async def admin_verify_pending(request: Request):
+    """Verify all submitted tasks for the current run (admin-only)."""
+    global _tick
+    _tick += 1
+    if not _require_admin(request):
+        return {"error": "unauthorized"}
+    tag = f"[run:{_run_id}]"
+    submitted = [
+        j
+        for j in list(_jobs.values())
+        if j.status == "submitted" and (tag in (j.title or "") or tag in (j.body or ""))
+    ]
+    report = {"run_id": _run_id, "submitted": len(submitted), "approved": 0, "rejected": 0, "skipped": 0, "items": []}
+    for j in submitted[:200]:
+        before = j.status
+        try:
+            out = await jobs_verify(j.job_id, JobVerifyRequest(by="system:verify_pending", force=False), request)
+            jj = _jobs.get(j.job_id)
+            st = (jj.status if jj else before) if isinstance(out, dict) else (jj.status if jj else before)
+            if st == "approved":
+                report["approved"] += 1
+            elif st == "rejected":
+                report["rejected"] += 1
+            else:
+                report["skipped"] += 1
+            report["items"].append(
+                {
+                    "job_id": j.job_id,
+                    "title": j.title,
+                    "status": st,
+                    "auto_verify_ok": (jj.auto_verify_ok if jj else None),
+                    "auto_verify_note": (jj.auto_verify_note if jj else ""),
+                }
+            )
+        except Exception as e:
+            report["items"].append({"job_id": j.job_id, "title": j.title, "status": "error", "error": str(e)[:200]})
+    return {"ok": True, "report": report}
 
 
 class TopicSetRequest(BaseModel):

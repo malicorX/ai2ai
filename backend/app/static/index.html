@@ -122,6 +122,7 @@
         </div>
         <div style="display:flex; gap:8px; margin-bottom:8px;">
           <button id="loadSummaryBtn">Load Summary</button>
+          <button id="verifyPendingBtn">Verify Pending</button>
           <span id="runsStatus" class="pill">?</span>
         </div>
         <pre id="runSummary" style="white-space:pre-wrap; background:#fafafa; border:1px solid #ddd; padding:8px; border-radius:6px; max-height:220px; overflow:auto; font-size:12px;"></pre>
@@ -235,6 +236,7 @@
     const runsSelect = document.getElementById("runsSelect");
     const openViewerBtn = document.getElementById("openViewerBtn");
     const loadSummaryBtn = document.getElementById("loadSummaryBtn");
+    const verifyPendingBtn = document.getElementById("verifyPendingBtn");
     const runsStatus = document.getElementById("runsStatus");
     const runSummary = document.getElementById("runSummary");
 
@@ -322,6 +324,29 @@
 
     runsRefreshBtn.addEventListener("click", refreshRuns);
     loadSummaryBtn.addEventListener("click", loadSelectedSummary);
+    verifyPendingBtn.addEventListener("click", async () => {
+      verifyPendingBtn.disabled = true;
+      runsStatus.textContent = "verifying…";
+      try {
+        const r = await fetch(`${BACKEND_HTTP}/admin/verify_pending`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: "{}",
+        });
+        const j = await r.json();
+        if (!j.ok) {
+          runsStatus.textContent = `verify failed: ${j.error || "unknown"}`;
+        } else {
+          runSummary.textContent = JSON.stringify(j.report, null, 2);
+          runsStatus.textContent = `approved=${j.report.approved} rejected=${j.report.rejected} skipped=${j.report.skipped}`;
+          await refreshBalances();
+        }
+      } catch (e) {
+        runsStatus.textContent = "verify error";
+      } finally {
+        verifyPendingBtn.disabled = false;
+      }
+    });
     openViewerBtn.addEventListener("click", () => {
       const rid = runsSelect.value;
       if (!rid) return;
