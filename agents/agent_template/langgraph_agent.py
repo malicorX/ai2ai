@@ -288,6 +288,30 @@ def _extract_section_bullets(text: str, header_prefix: str, max_scan_lines: int 
     return [b for b in bullets if b]
 
 
+def _count_rejections_for_root(rejected_jobs: List[dict], root_id: str) -> int:
+    """
+    Count how many rejected jobs belong to the same root task:
+    - the root job itself (job_id == root_id)
+    - any redo jobs that contain [redo_for:root_id] in their body
+    """
+    rid = (root_id or "").strip()
+    if not rid:
+        return 0
+    n = 0
+    for j in rejected_jobs or []:
+        try:
+            jid = str(j.get("job_id") or "").strip()
+            body = str(j.get("body") or "")
+            if jid == rid:
+                n += 1
+                continue
+            if _extract_redo_for(body) == rid:
+                n += 1
+        except Exception:
+            continue
+    return n
+
+
 def node_decide(state: AgentState, config: Any) -> AgentState:
     tools = _cfg_tools(config)
     role: Role = state.get("role", "executor")  # type: ignore[assignment]
@@ -338,6 +362,37 @@ def node_decide(state: AgentState, config: Any) -> AgentState:
                 redo_prefix = f"Redo {root_id}: " if root_id else "Redo: "
                 redo_tag = f"[redo_for:{root_id}]" if root_id else "[redo_for:unknown]"
                 redo_level_tag = f"[redo_level:{redo_level}]"
+
+                # Guardrail: stop infinite redo spirals for the same root task.
+                # If we already have too many rejections for this root, do NOT create more redo jobs.
+                max_attempts = int(state.get("max_redo_attempts_per_root") or 3)
+                total_rej = _count_rejections_for_root(state.get("rejected_jobs") or [], root_id)
+                if max_attempts > 0 and total_rej >= max_attempts:
+                    tools["trace_event"](
+                        "status",
+                        "langgraph: redo cap reached; requesting human intervention",
+                        {"root_id": root_id, "rejections_for_root": total_rej, "max": max_attempts, "last_failed_job_id": bad_id},
+                    )
+                    try:
+                        tools["chat_send"](
+                            f"Redo cap reached for root `{root_id}` after {total_rej} rejections. "
+                            f"Last failure `{bad_id}` note: {note[:220]}. "
+                            "Human help needed: adjust acceptance criteria/verifier or clarify requirements."
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        tools["memory_append"](
+                            "reflection",
+                            f"Redo cap reached for root {root_id}. Stop auto-redo. Last_failed={bad_id}. Note={note}",
+                            ["job", "redo_cap", "policy"],
+                            0.99,
+                        )
+                    except Exception:
+                        pass
+                    state["handled_rejection_job_id"] = bad_id
+                    state["action"] = {"kind": "noop", "note": f"redo_cap_reached root={root_id} n={total_rej} max={max_attempts}"}
+                    return state
 
                 sys = (
                     "You are the proposer creating ONE 'redo' job after a failed verification.\n"

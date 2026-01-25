@@ -1405,6 +1405,7 @@ def maybe_langgraph_jobs(world) -> None:
         "last_job_id": _last_langgraph_job_id,
         "handled_rejection_job_id": _last_langgraph_handled_rejection_job_id,
         "outcome_ack_job_id": _last_langgraph_outcome_ack_job_id,
+        "max_redo_attempts_per_root": int(os.getenv("MAX_REDO_ATTEMPTS_PER_ROOT", "3")),
     }
 
     try:
