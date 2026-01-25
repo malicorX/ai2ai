@@ -287,6 +287,8 @@ def node_decide(state: AgentState, config: Any) -> AgentState:
                 bad_title = str(bad.get("title") or "")
                 bad_body = str(bad.get("body") or "")
                 note = str(bad.get("auto_verify_note") or "")
+                redo_prefix = f"Redo {bad_id}: " if bad_id else "Redo: "
+                redo_tag = f"[redo_for:{bad_id}]" if bad_id else "[redo_for:unknown]"
 
                 sys = (
                     "You are the proposer creating ONE 'redo' job after a failed verification.\n"
@@ -314,8 +316,9 @@ def node_decide(state: AgentState, config: Any) -> AgentState:
                 body = str(obj.get("body") or "").strip()
                 reward = _safe_float(obj.get("reward"), 0.01)
                 if not title or not body:
-                    title = f"Redo: {bad_title}".strip() if bad_title else "Redo: Verifiable task"
+                    title = f"{redo_prefix}{bad_title}".strip() if bad_title else f"{redo_prefix}Verifiable task"
                     body = (
+                        f"{redo_tag}\n"
                         f"This is a redo of job `{bad_id}` which failed verification.\n"
                         f"Failure note: {note}\n\n"
                         "Acceptance criteria:\n"
@@ -326,6 +329,12 @@ def node_decide(state: AgentState, config: Any) -> AgentState:
                         "- Include an 'Evidence:' section listing observed output.\n"
                     )
                     reward = 0.01
+
+                # Force deterministic redo labeling for executor routing + auditing.
+                if bad_id and not title.lower().startswith(f"redo {bad_id}".lower()):
+                    title = f"{redo_prefix}{title}".strip()
+                if redo_tag not in body:
+                    body = f"{redo_tag}\n{body}".strip()
 
                 if run_tag and run_tag not in title:
                     title = f"{run_tag} {title}".strip()
