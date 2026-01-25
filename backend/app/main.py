@@ -457,11 +457,12 @@ def _auto_verify_task(job: Job, submission: str) -> tuple[bool, str]:
             bullets = []
             for ln in body_lines[ac_start + 1 : ac_start + 20]:
                 s = ln.strip()
-                if s.startswith("- "):
+                # Accept common bullet markers so agents aren't forced into a single formatting style.
+                if s.startswith("- ") or s.startswith("* ") or s.startswith("• "):
                     bullets.append(s[2:].strip())
                 elif s == "":
                     continue
-                elif bullets and not s.startswith("- "):
+                elif bullets and not (s.startswith("- ") or s.startswith("* ") or s.startswith("• ")):
                     break
             if bullets:
                 sub_low = (submission or "").lower()

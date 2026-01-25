@@ -1136,12 +1136,12 @@ def _do_job(job: dict) -> str:
         bullets: list[str] = []
         for ln in lines[start + 1 : start + 1 + max_lines]:
             s = ln.strip()
-            if s.startswith("- "):
+            if s.startswith("- ") or s.startswith("* ") or s.startswith("• "):
                 bullets.append(s[2:].strip())
                 continue
             if s == "":
                 continue
-            if bullets and not s.startswith("- "):
+            if bullets and not (s.startswith("- ") or s.startswith("* ") or s.startswith("• ")):
                 break
         return [b for b in bullets if b]
 

@@ -304,6 +304,32 @@ def _extract_section_bullets(text: str, header_prefix: str, max_scan_lines: int 
     return [b for b in bullets if b]
 
 
+def _normalize_bullets_outside_code_fences(text: str) -> str:
+    """
+    Normalize common bullet prefixes to '- ' outside triple-backtick code fences.
+    This helps ensure backend verifiers reliably parse Acceptance criteria / Evidence sections.
+    """
+    lines = (text or "").splitlines()
+    out: List[str] = []
+    in_code = False
+    for ln in lines:
+        s = ln.lstrip()
+        if s.startswith("```"):
+            in_code = not in_code
+            out.append(ln)
+            continue
+        if not in_code:
+            # Keep indentation, only swap the bullet marker.
+            if s.startswith("* "):
+                out.append(ln[: len(ln) - len(s)] + "- " + s[2:])
+                continue
+            if s.startswith("• "):
+                out.append(ln[: len(ln) - len(s)] + "- " + s[2:])
+                continue
+        out.append(ln)
+    return "\n".join(out)
+
+
 def _count_rejections_for_root(rejected_jobs: List[dict], root_id: str) -> int:
     """
     Count how many rejected jobs belong to the same root task:
@@ -514,6 +540,7 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
                 if run_tag and run_tag not in title:
                     title = f"{run_tag} {title}".strip()
                 state["handled_rejection_job_id"] = bad_id
+                body = _normalize_bullets_outside_code_fences(body)
                 state["action"] = {"kind": "propose_job", "note": f"redo_for={root_id}|redo_level={redo_level}", "job": {"title": title, "body": body, "reward": float(reward)}}
                 return state
 
@@ -564,6 +591,7 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
 
         if run_tag and run_tag not in title:
             title = f"{run_tag} {title}".strip()
+        body = _normalize_bullets_outside_code_fences(body)
         state["action"] = {"kind": "propose_job", "job": {"title": title, "body": body, "reward": float(reward)}}
         return state
 
