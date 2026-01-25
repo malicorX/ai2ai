@@ -584,7 +584,7 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
                 "- Provide a runnable `primes.py`.\n"
                 "- Running it prints exactly: 2, 3, 5, 7, 11 (one per line).\n"
                 "Evidence required in submission:\n"
-                "- Include the full code in a ```python code fence.\n"
+                "- Include the full code in a python fenced code block (language tag: python).\n"
                 "- Include a short 'Evidence:' section describing the observed output.\n"
             )
             reward = 0.01

@@ -381,13 +381,24 @@ def _extract_code_fence(text: str, lang: str) -> Optional[str]:
     Returns code string or None.
     """
     try:
-        m = re.search(rf"```{re.escape(lang)}\s+([\s\S]*?)```", text or "", flags=re.IGNORECASE)
+        # Only match a real fence line like:
+        #   ```python
+        #   <code>
+        #   ```
+        # Avoid matching inline text like "```python code fence".
+        m = re.search(
+            rf"(?im)^[ \t]*```{re.escape(lang)}[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```[ \t]*$",
+            text or "",
+        )
         if m:
             return (m.group(1) or "").strip()
 
         # Fallback: PowerShell/backtick sanitization can collapse ```python into `python.
         # Accept a single-backtick "fence" and take until the next lone backtick or end.
-        m2 = re.search(rf"`{re.escape(lang)}\s+([\s\S]*?)(?:\n`|\r\n`|`$|$)", text or "", flags=re.IGNORECASE)
+        m2 = re.search(
+            rf"(?im)^[ \t]*`{re.escape(lang)}[ \t]*\r?\n([\s\S]*?)(?:\r?\n[ \t]*`[ \t]*$|$)",
+            text or "",
+        )
         if m2:
             return (m2.group(1) or "").strip()
 
