@@ -475,7 +475,7 @@ def _auto_verify_task(job: Job, submission: str) -> tuple[bool, str]:
                     if k and k not in sub_low:
                         missing.append(b[:80])
                 if missing:
-                    return (False, f\"auto_verify failed: missing evidence for acceptance criteria: {missing[:5]}\")
+                    return (False, f"auto_verify failed: missing evidence for acceptance criteria: {missing[:5]}")
                 return (True, "auto_verify ok: submission references all acceptance criteria (heuristic)")
     except Exception:
         pass
