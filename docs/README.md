@@ -12,6 +12,8 @@ This `docs/` directory is meant to be **copy/paste portable** into future repos.
 - `docs/API.md` — HTTP + WebSocket API (contracts, payloads, status codes)
 - `docs/DATA_MODEL.md` — database schema (tables, indices, constraints) and invariants
 - `docs/AGENTS.md` — how agents run (loop, memory, coordination) and agent framework notes
+- `docs/WORLD_MODEL.md` — what the agents “see”: entities, affordances, and perception payload
+- `docs/BEHAVIOR.md` — what agents “should do”: objectives, roles, task lifecycle, proof/verification
 - `docs/TOOLS.md` — tool surface (shell/browser/APIs), sandboxing, and audit logging requirements
 - `docs/ECONOMY.md` — aiDollar ledger rules, reward/penalty mechanics, compute entitlements
 - `docs/DEPLOYMENT.md` — docker/compose + multi-node DGX deployment strategy

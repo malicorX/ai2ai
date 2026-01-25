@@ -10,6 +10,8 @@ For reproducible documentation you can port to another repo, use:
 - `docs/API.md`
 - `docs/DATA_MODEL.md`
 - `docs/AGENTS.md`
+- `docs/WORLD_MODEL.md`
+- `docs/BEHAVIOR.md`
 - `docs/TOOLS.md`
 - `docs/ECONOMY.md`
 - `docs/DEPLOYMENT.md`
