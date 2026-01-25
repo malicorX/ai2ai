@@ -42,6 +42,7 @@ _last_run_check_at = 0.0
 _last_task_proposed_at = 0.0
 _last_task_title = ""
 _last_langgraph_jobs_at = 0.0
+_last_langgraph_job_id = ""
 
 # Conversation protocol (sticky sessions)
 _active_conv_id = None
@@ -789,6 +790,12 @@ def jobs_list(status: str = "open", limit: int = 20):
     return r.json().get("jobs", [])
 
 
+def jobs_get(job_id: str) -> dict:
+    r = requests.get(f"{WORLD_API}/jobs/{job_id}", timeout=10)
+    r.raise_for_status()
+    return r.json().get("job", {}) or {}
+
+
 def jobs_claim(job_id: str) -> bool:
     r = requests.post(f"{WORLD_API}/jobs/{job_id}/claim", json={"agent_id": AGENT_ID}, timeout=10)
     try:
@@ -1316,6 +1323,7 @@ def maybe_langgraph_jobs(world) -> None:
 
     tools = {
         "jobs_list": jobs_list,
+        "jobs_get": jobs_get,
         "jobs_create": jobs_create,
         "jobs_claim": jobs_claim,
         "jobs_submit": jobs_submit,
@@ -1335,10 +1343,17 @@ def maybe_langgraph_jobs(world) -> None:
         "run_id": _last_run_id,
         "world": world,
         "balance": float(_cached_balance) if (_cached_balance is not None) else 0.0,
+        "last_job_id": _last_langgraph_job_id,
     }
 
     try:
         out = run_graph_step(st, tools) or {}
+        try:
+            lj = str(out.get("last_job_id") or "").strip()
+            if lj:
+                globals()["_last_langgraph_job_id"] = lj
+        except Exception:
+            pass
         trace_event("status", "langgraph: step complete", {"acted": bool(out.get("acted")), "action": out.get("action")})
     except Exception as e:
         trace_event("error", f"langgraph step failed: {e}", {})

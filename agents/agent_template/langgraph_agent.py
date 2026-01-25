@@ -36,12 +36,16 @@ class AgentState(TypedDict, total=False):
     balance: float
     open_jobs: List[dict]
     memories: List[dict]
+    world_model: dict
+    last_job_id: str
+    last_job: dict
     action: Action
     acted: bool
 
 
 class Tools(TypedDict):
     jobs_list: Callable[..., List[dict]]
+    jobs_get: Callable[[str], dict]
     jobs_create: Callable[[str, str, float], str]
     jobs_claim: Callable[[str], bool]
     jobs_submit: Callable[[str, str], bool]
@@ -117,6 +121,54 @@ def node_perceive(state: AgentState, config: Any) -> AgentState:
         state["open_jobs"] = tools["jobs_list"](status="open", limit=50)
     except Exception:
         state["open_jobs"] = []
+
+    # Lightweight world model extraction (compact, stable input for reasoning).
+    w = state.get("world") or {}
+    me = None
+    try:
+        for a in (w.get("agents") or []):
+            if a.get("agent_id") == state.get("agent_id"):
+                me = a
+                break
+    except Exception:
+        me = None
+
+    place_id = ""
+    nearby_agents: List[dict] = []
+    try:
+        if me:
+            ax, ay = int(me.get("x", 0)), int(me.get("y", 0))
+            # nearest landmark within 1 tile
+            for lm in (w.get("landmarks") or []):
+                lx, ly = int(lm.get("x", 0)), int(lm.get("y", 0))
+                if max(abs(ax - lx), abs(ay - ly)) <= 1:
+                    place_id = str(lm.get("id") or "")
+                    break
+            # nearby agents within 2 tiles
+            for a in (w.get("agents") or []):
+                if a.get("agent_id") == state.get("agent_id"):
+                    continue
+                bx, by = int(a.get("x", 0)), int(a.get("y", 0))
+                if max(abs(ax - bx), abs(ay - by)) <= 2:
+                    nearby_agents.append({"agent_id": a.get("agent_id"), "x": bx, "y": by, "display_name": a.get("display_name")})
+    except Exception:
+        place_id = place_id or ""
+
+    state["world_model"] = {
+        "day": int(w.get("day", 0) or 0),
+        "minute_of_day": int(w.get("minute_of_day", 0) or 0),
+        "topic": str(w.get("topic") or ""),
+        "self": {"x": int(me.get("x", 0)) if me else 0, "y": int(me.get("y", 0)) if me else 0, "place_id": place_id},
+        "nearby_agents": nearby_agents,
+    }
+
+    # Fetch last job status if available (supports verify/learn loop).
+    last_id = str(state.get("last_job_id") or "").strip()
+    if last_id:
+        try:
+            state["last_job"] = tools["jobs_get"](last_id) or {}
+        except Exception:
+            state["last_job"] = {}
     state["acted"] = False
     return state
 
@@ -150,6 +202,13 @@ def node_decide(state: AgentState, config: Any) -> AgentState:
     tools = _cfg_tools(config)
     role: Role = state.get("role", "executor")  # type: ignore[assignment]
     run_tag = _run_tag(state.get("run_id", ""))
+
+    # Outcome awareness: if we have a last job, speak/learn before taking new actions.
+    lj = state.get("last_job") or {}
+    lj_status = str(lj.get("status") or "")
+    if lj_status in ("approved", "rejected"):
+        state["action"] = {"kind": "noop", "note": f"last_job_outcome={lj_status}"}
+        return state
 
     # Invariants first (code-enforced)
     if role == "proposer":
@@ -237,6 +296,7 @@ def node_act(state: AgentState, config: Any) -> AgentState:
                 tools["memory_append"]("event", f"Proposed job {jid}: {title}", ["job", "proposed"], 0.6)
             except Exception:
                 pass
+            state["last_job_id"] = jid
             state["acted"] = True
         return state
 
@@ -267,6 +327,7 @@ def node_act(state: AgentState, config: Any) -> AgentState:
                 tools["memory_append"]("event", f"Submitted job {job_id}: {job.get('title')}", ["job", "submitted"], 0.7)
             except Exception:
                 pass
+            state["last_job_id"] = job_id
             state["acted"] = True
         return state
 
@@ -276,6 +337,44 @@ def node_act(state: AgentState, config: Any) -> AgentState:
 def node_reflect(state: AgentState, config: Any) -> AgentState:
     tools = _cfg_tools(config)
     # Lightweight: store one rule-of-thumb so behavior improves over time.
+    # Also: respond to job outcomes (approved/rejected/submitted) so agents internalize "submitted != done".
+    lj = state.get("last_job") or {}
+    if lj:
+        st = str(lj.get("status") or "")
+        note = str(lj.get("auto_verify_note") or "")
+        ok = lj.get("auto_verify_ok")
+        jid = str(lj.get("job_id") or state.get("last_job_id") or "")
+        title = str(lj.get("title") or "")
+        if st == "approved":
+            try:
+                tools["chat_send"](f"Job `{jid}` was approved. ✅ ({title})")
+            except Exception:
+                pass
+            try:
+                tools["memory_append"]("reflection", f"Approved job {jid}. Pattern: verifiable evidence passes. Note={note}", ["job", "approved"], 0.85)
+            except Exception:
+                pass
+        elif st == "rejected":
+            try:
+                tools["chat_send"](f"Job `{jid}` was rejected. I likely lost ai$. Reason: {note[:220]}")
+            except Exception:
+                pass
+            try:
+                tools["memory_append"](
+                    "reflection",
+                    f"Rejected job {jid}. auto_verify_ok={ok}. Fix: ensure Evidence section + required code fences + match acceptance criteria. Note={note}",
+                    ["job", "rejected", "policy"],
+                    0.95,
+                )
+            except Exception:
+                pass
+        elif st == "submitted":
+            # This is the key behavioral distinction: not done yet.
+            try:
+                tools["memory_append"]("event", f"Job {jid} is submitted (pending approval).", ["job", "pending"], 0.55)
+            except Exception:
+                pass
+
     if not state.get("acted"):
         return state
     role = state.get("role", "executor")
