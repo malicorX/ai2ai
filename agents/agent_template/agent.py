@@ -11,6 +11,7 @@ USE_LANGGRAPH = os.getenv("USE_LANGGRAPH", "0").strip() == "1"
 if USE_LANGGRAPH:
     # lightweight import; only used when enabled
     from agent_template.langgraph_runtime import llm_chat
+    from agent_template.langgraph_agent import run_graph_step
 
 
 WORLD_API = os.getenv("WORLD_API_BASE", "http://localhost:8000").rstrip("/")
@@ -40,6 +41,7 @@ _last_run_id = ""
 _last_run_check_at = 0.0
 _last_task_proposed_at = 0.0
 _last_task_title = ""
+_last_langgraph_jobs_at = 0.0
 
 # Conversation protocol (sticky sessions)
 _active_conv_id = None
@@ -1281,6 +1283,67 @@ def maybe_work_jobs() -> None:
         _last_jobs_at = now
 
 
+def maybe_langgraph_jobs(world) -> None:
+    """
+    LangGraph control-plane (incremental rollout):
+    - proposer: create one verifiable job when none is open for this run
+    - executor: claim+execute+submit newest suitable job (with evidence)
+
+    This intentionally focuses on the jobs loop first (highest leverage for "doing real work").
+    """
+    global _last_langgraph_jobs_at
+    if not USE_LANGGRAPH:
+        return
+    now = time.time()
+    every = float(os.getenv("LANGGRAPH_JOBS_EVERY_SECONDS", "20"))
+    if now - _last_langgraph_jobs_at < every:
+        return
+    _last_langgraph_jobs_at = now
+
+    # Avoid double-work: executor legacy loop uses _active_job_id to serialize.
+    if ROLE == "executor" and _active_job_id:
+        return
+
+    def _lg_chat_send(text: str) -> None:
+        # keep the same styling/spam-protection behavior as legacy chat
+        try:
+            chat_send(_style(str(text)))
+        except Exception:
+            return
+
+    def _lg_memory_append(kind: str, text: str, tags: list[str], importance: float) -> None:
+        memory_append_scored(kind, text, tags=tags, importance=float(importance))
+
+    tools = {
+        "jobs_list": jobs_list,
+        "jobs_create": jobs_create,
+        "jobs_claim": jobs_claim,
+        "jobs_submit": jobs_submit,
+        "do_job": _do_job,
+        "chat_send": _lg_chat_send,
+        "trace_event": trace_event,
+        "memory_retrieve": lambda q, k=8: memory_retrieve(q, k=int(k)),
+        "memory_append": _lg_memory_append,
+    }
+
+    # State is intentionally compact for now; we'll expand this into a full world-model over time.
+    st = {
+        "role": ROLE,
+        "agent_id": AGENT_ID,
+        "display_name": DISPLAY_NAME,
+        "persona": (PERSONALITY or "").strip(),
+        "run_id": _last_run_id,
+        "world": world,
+        "balance": float(_cached_balance) if (_cached_balance is not None) else 0.0,
+    }
+
+    try:
+        out = run_graph_step(st, tools) or {}
+        trace_event("status", "langgraph: step complete", {"acted": bool(out.get("acted")), "action": out.get("action")})
+    except Exception as e:
+        trace_event("error", f"langgraph step failed: {e}", {})
+
+
 def maybe_trade(world) -> None:
     """Very simple 'trade/help': if we have much more ai$ than the other agent, gift a small amount."""
     global _last_trade_at
@@ -2272,8 +2335,12 @@ def main():
             if maybe_conversation_step(world):
                 time.sleep(SLEEP_SECONDS)
                 continue
-            # Task proposer mode: agent_1 periodically creates a single open task for agent_2 to execute.
-            maybe_propose_task()
+            # Jobs control-plane: if LangGraph is enabled, it drives proposer/executor job behavior.
+            if USE_LANGGRAPH:
+                maybe_langgraph_jobs(world)
+            else:
+                # Task proposer mode: agent_1 periodically creates a single open task for agent_2 to execute.
+                maybe_propose_task()
             maybe_process_event_invites(world)
             maybe_reflect(world)
             # plan schedule at the computer once per simulated day
@@ -2287,7 +2354,8 @@ def main():
             maybe_social_events(world)
             # Free movement is driven by the schedule; do not force-walk to computer every tick.
             maybe_update_balance()
-            maybe_work_jobs()
+            if not USE_LANGGRAPH:
+                maybe_work_jobs()
             maybe_chat(world)
             maybe_write_memory(world)
             maybe_trade(world)
