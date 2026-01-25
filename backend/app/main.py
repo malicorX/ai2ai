@@ -454,9 +454,11 @@ def _auto_verify_task(job: Job, submission: str) -> tuple[bool, str]:
         except Exception as e:
             return (False, f"auto_verify failed: exception {e}")
 
-    # Generic heuristic: if the job body contains an "Acceptance criteria:" section with bullet points,
-    # require the submission to include an "Evidence" section with a checklist referencing each bullet.
+    # Generic acceptance-criteria heuristic:
+    # If the job body contains an "Acceptance criteria:" section with bullet points, require the submission
+    # to include an "Evidence" section with a checklist referencing each bullet.
     # This is NOT a proof of correctness, but it prevents pure "I did it" with no artifacts.
+    ac_present = False
     try:
         body_lines = (job.body or "").splitlines()
         ac_start = None
@@ -476,6 +478,7 @@ def _auto_verify_task(job: Job, submission: str) -> tuple[bool, str]:
                 elif bullets and not (s.startswith("- ") or s.startswith("* ") or s.startswith("• ")):
                     break
             if bullets:
+                ac_present = True
                 sub_low = (submission or "").lower()
                 if "evidence" not in sub_low:
                     return (False, "auto_verify failed: submission missing an Evidence section for acceptance criteria")
@@ -488,9 +491,45 @@ def _auto_verify_task(job: Job, submission: str) -> tuple[bool, str]:
                         missing.append(b[:80])
                 if missing:
                     return (False, f"auto_verify failed: missing evidence for acceptance criteria: {missing[:5]}")
-                return (True, "auto_verify ok: submission references all acceptance criteria (heuristic)")
     except Exception:
         pass
+
+    # Generic python runnable verifier:
+    # For python-flavored jobs, require runnable code in a python fence and ensure it runs successfully.
+    # If acceptance criteria bullets exist, the submission must also satisfy the acceptance-criteria heuristic above.
+    python_job = ("python" in title) or ("python" in body)
+    if python_job:
+        code = _extract_code_fence(text, "python") or _extract_code_fence(text, "py")
+        if not code:
+            return (False, "auto_verify failed: missing python code fence in submission for python job")
+        if len(code) > 12000:
+            return (False, "auto_verify failed: python code too large")
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                p = Path(td) / "task.py"
+                p.write_text(code, encoding="utf-8")
+                r = subprocess.run(
+                    [sys.executable, "-I", str(p)],
+                    cwd=td,
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+                if r.returncode != 0:
+                    return (False, f"auto_verify failed: python script error (code={r.returncode}): {r.stderr.strip()[:300]}")
+        except subprocess.TimeoutExpired:
+            return (False, "auto_verify failed: python script timeout")
+        except Exception as e:
+            return (False, f"auto_verify failed: python verifier exception {e}")
+
+        # If acceptance criteria were present, we only get here if they passed (no missing evidence).
+        if ac_present:
+            return (True, "auto_verify ok: python code ran + submission references acceptance criteria")
+        return (True, "auto_verify ok: python code ran")
+
+    # If we had acceptance criteria and passed them (no early return), approve.
+    if ac_present:
+        return (True, "auto_verify ok: submission references all acceptance criteria (heuristic)")
 
     return (False, "auto_verify skipped: no verifier matched")
 

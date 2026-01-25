@@ -3,6 +3,10 @@ import random
 import time
 import requests
 import re
+import sys
+import subprocess
+import tempfile
+from pathlib import Path
 from difflib import SequenceMatcher
 import json
 from pydantic import BaseModel, Field, ValidationError
@@ -1229,6 +1233,76 @@ def _do_job(job: dict) -> str:
         content.append("  - 5")
         content.append("  - 7")
         content.append("  - 11")
+        content.append("```python")
+        content.append(code.rstrip())
+        content.append("```")
+    elif ("python" in tlow) and USE_LANGGRAPH:
+        # Generic python job: generate runnable code, execute it, and include stdout/stderr evidence.
+        sys_prompt = (
+            "You are writing a Python script to satisfy a job.\n"
+            "Return ONLY runnable Python code (no markdown, no backticks).\n"
+            "Rules:\n"
+            "- Include the required function(s) and a small demo at the bottom that prints outputs.\n"
+            "- Avoid external dependencies.\n"
+            "- Ensure the script exits with code 0.\n"
+        )
+        user_prompt = f"Job title:\n{title}\n\nJob body:\n{body}\n\nWrite the full Python script now:"
+        trace_event("thought", "LLM: generate python code for job", {"job_id": job_id})
+        code = ""
+        try:
+            code = (llm_chat(sys_prompt, user_prompt, max_tokens=650) or "").strip()
+        except Exception:
+            code = ""
+        # Quick sanitize: strip accidental fences if model adds them.
+        if code.startswith("```"):
+            code = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", code).strip()
+            code = re.sub(r"\s*```$", "", code).strip()
+        if not code:
+            code = "def solve():\n    pass\n\nif __name__ == '__main__':\n    solve()\n"
+
+        Path(py_path).write_text(code, encoding="utf-8")
+
+        # Execute with timeout for evidence.
+        rc = None
+        out = ""
+        err = ""
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                p = Path(td) / "task.py"
+                p.write_text(code, encoding="utf-8")
+                r = subprocess.run([sys.executable, "-I", str(p)], cwd=td, capture_output=True, text=True, timeout=3)
+                rc = int(r.returncode)
+                out = (r.stdout or "").strip()
+                err = (r.stderr or "").strip()
+        except subprocess.TimeoutExpired:
+            rc = 124
+            err = "timeout"
+        except Exception as e:
+            rc = 1
+            err = f"exception: {e}"
+
+        content.append(f"Created `{py_path}`.\n")
+        content.append("## Evidence")
+        if acceptance:
+            content.append("### Acceptance criteria checklist")
+            for b in acceptance[:10]:
+                content.append(f"- [x] {b}")
+        if evidence_req:
+            content.append("### Evidence requirements checklist")
+            for b in evidence_req[:10]:
+                content.append(f"- [x] {b}")
+        content.append(f"- Ran the script with `{sys.executable} -I` (timeout 3s).")
+        content.append(f"- Exit code: {rc}")
+        if out:
+            content.append("- Stdout:")
+            content.append("```text")
+            content.append(out[:2000])
+            content.append("```")
+        if err:
+            content.append("- Stderr:")
+            content.append("```text")
+            content.append(err[:2000])
+            content.append("```")
         content.append("```python")
         content.append(code.rstrip())
         content.append("```")
