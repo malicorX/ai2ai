@@ -41,6 +41,7 @@ class AgentState(TypedDict, total=False):
     last_job_id: str
     last_job: dict
     handled_rejection_job_id: str
+    outcome_ack_job_id: str
     action: Action
     acted: bool
 
@@ -245,10 +246,12 @@ def node_decide(state: AgentState, config: Any) -> AgentState:
     role: Role = state.get("role", "executor")  # type: ignore[assignment]
     run_tag = _run_tag(state.get("run_id", ""))
 
-    # Outcome awareness: if we have a last job, speak/learn before taking new actions.
+    # Outcome awareness: handle approved/rejected once, then continue normally.
     lj = state.get("last_job") or {}
     lj_status = str(lj.get("status") or "")
-    if lj_status in ("approved", "rejected"):
+    lj_id = str(lj.get("job_id") or state.get("last_job_id") or "").strip()
+    ack = str(state.get("outcome_ack_job_id") or "").strip()
+    if lj_status in ("approved", "rejected") and lj_id and (ack != lj_id):
         state["action"] = {"kind": "noop", "note": f"last_job_outcome={lj_status}"}
         return state
 
@@ -469,6 +472,8 @@ def node_reflect(state: AgentState, config: Any) -> AgentState:
                 tools["memory_append"]("reflection", f"Approved job {jid}. Pattern: verifiable evidence passes. Note={note}", ["job", "approved"], 0.85)
             except Exception:
                 pass
+            if jid:
+                state["outcome_ack_job_id"] = jid
         elif st == "rejected":
             try:
                 tools["chat_send"](f"Job `{jid}` was rejected. I likely lost ai$. Reason: {note[:220]}")
@@ -483,6 +488,8 @@ def node_reflect(state: AgentState, config: Any) -> AgentState:
                 )
             except Exception:
                 pass
+            if jid:
+                state["outcome_ack_job_id"] = jid
         elif st == "submitted":
             # This is the key behavioral distinction: not done yet.
             try:

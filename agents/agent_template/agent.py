@@ -44,6 +44,7 @@ _last_task_title = ""
 _last_langgraph_jobs_at = 0.0
 _last_langgraph_job_id = ""
 _last_langgraph_handled_rejection_job_id = ""
+_last_langgraph_outcome_ack_job_id = ""
 
 # Conversation protocol (sticky sessions)
 _active_conv_id = None
@@ -1403,6 +1404,7 @@ def maybe_langgraph_jobs(world) -> None:
         "balance": float(_cached_balance) if (_cached_balance is not None) else 0.0,
         "last_job_id": _last_langgraph_job_id,
         "handled_rejection_job_id": _last_langgraph_handled_rejection_job_id,
+        "outcome_ack_job_id": _last_langgraph_outcome_ack_job_id,
     }
 
     try:
@@ -1417,6 +1419,12 @@ def maybe_langgraph_jobs(world) -> None:
             hid = str(out.get("handled_rejection_job_id") or "").strip()
             if hid:
                 globals()["_last_langgraph_handled_rejection_job_id"] = hid
+        except Exception:
+            pass
+        try:
+            ack = str(out.get("outcome_ack_job_id") or "").strip()
+            if ack:
+                globals()["_last_langgraph_outcome_ack_job_id"] = ack
         except Exception:
             pass
         trace_event("status", "langgraph: step complete", {"acted": bool(out.get("acted")), "action": out.get("action")})
