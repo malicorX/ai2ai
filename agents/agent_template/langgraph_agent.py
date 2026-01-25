@@ -156,8 +156,10 @@ def node_perceive(state: AgentState, config: Any) -> AgentState:
     except Exception:
         state["open_jobs"] = []
 
-    # Proposer also watches rejected jobs to create "redo" tasks (verifier-aware recovery).
-    if state.get("role") == "proposer":
+    # Watch rejected jobs:
+    # - proposer: to create "redo" tasks (verifier-aware recovery)
+    # - executor: to prioritize redo/fix work after penalties
+    if state.get("role") in ("proposer", "executor"):
         try:
             state["rejected_jobs"] = tools["jobs_list"](status="rejected", limit=50)
         except Exception:
@@ -383,8 +385,28 @@ def node_decide(state: AgentState, config: Any) -> AgentState:
 
     # executor
     # If we recently failed verification, prioritize a redo/fix job that references that failure.
-    last_id = str(state.get("last_job_id") or "").strip()
-    redo = _pick_redo_job(state, last_id)
+    # Use most recent rejected job (submitted_by=agent_2) as the primary "failed id".
+    failed_id = ""
+    try:
+        run_tag = _run_tag(state.get("run_id", ""))
+        cand = []
+        for j in (state.get("rejected_jobs") or [])[:50]:
+            if str(j.get("submitted_by") or "") != "agent_2":
+                continue
+            if str(j.get("created_by") or "") != "agent_1":
+                continue
+            if run_tag and not ((run_tag in str(j.get("title") or "")) or (run_tag in str(j.get("body") or ""))):
+                continue
+            cand.append(j)
+        cand.sort(key=lambda j: _safe_float(j.get("reviewed_at"), _safe_float(j.get("submitted_at"), 0.0)), reverse=True)
+        if cand:
+            failed_id = str(cand[0].get("job_id") or "").strip()
+    except Exception:
+        failed_id = ""
+    if not failed_id:
+        failed_id = str(state.get("last_job_id") or "").strip()
+
+    redo = _pick_redo_job(state, failed_id)
     job = redo or _pick_executor_job(state)
     if not job or not job.get("job_id"):
         state["action"] = {"kind": "noop", "note": "no suitable open job"}
