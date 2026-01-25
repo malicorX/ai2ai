@@ -42,6 +42,7 @@ MEMORY_EMBED_DIR.mkdir(parents=True, exist_ok=True)
 STARTING_AIDOLLARS = float(os.getenv("STARTING_AIDOLLARS", "100"))
 TREASURY_ID = os.getenv("TREASURY_ID", "treasury")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
+TASK_FAIL_PENALTY = float(os.getenv("TASK_FAIL_PENALTY", "1.0"))
 
 # Run/session id (helps agents reset local state after /admin/new_run without restarting containers)
 _run_id: str = time.strftime("%Y%m%d-%H%M%S")
@@ -441,6 +442,43 @@ def _auto_verify_task(job: Job, submission: str) -> tuple[bool, str]:
             return (False, "auto_verify failed: script timeout")
         except Exception as e:
             return (False, f"auto_verify failed: exception {e}")
+
+    # Generic heuristic: if the job body contains an "Acceptance criteria:" section with bullet points,
+    # require the submission to include an "Evidence" section with a checklist referencing each bullet.
+    # This is NOT a proof of correctness, but it prevents pure "I did it" with no artifacts.
+    try:
+        body_lines = (job.body or "").splitlines()
+        ac_start = None
+        for i, ln in enumerate(body_lines):
+            if ln.strip().lower().startswith("acceptance criteria"):
+                ac_start = i
+                break
+        if ac_start is not None:
+            bullets = []
+            for ln in body_lines[ac_start + 1 : ac_start + 20]:
+                s = ln.strip()
+                if s.startswith("- "):
+                    bullets.append(s[2:].strip())
+                elif s == "":
+                    continue
+                elif bullets and not s.startswith("- "):
+                    break
+            if bullets:
+                sub_low = (submission or "").lower()
+                if "evidence" not in sub_low:
+                    return (False, "auto_verify failed: submission missing an Evidence section for acceptance criteria")
+                missing = []
+                for b in bullets[:10]:
+                    key = b.lower()
+                    # very forgiving match: any 10-char substring
+                    k = key[: min(24, len(key))]
+                    if k and k not in sub_low:
+                        missing.append(b[:80])
+                if missing:
+                    return (False, f\"auto_verify failed: missing evidence for acceptance criteria: {missing[:5]}\")
+                return (True, "auto_verify ok: submission references all acceptance criteria (heuristic)")
+    except Exception:
+        pass
 
     return (False, "auto_verify skipped: no verifier matched")
 
@@ -1696,6 +1734,17 @@ async def jobs_submit(job_id: str, req: JobSubmitRequest):
             if ok:
                 review_req = JobReviewRequest(approved=True, reviewed_by="system:auto_verify", note=note, payout=0.0, penalty=None)
                 await jobs_review(job_id, review_req)
+            else:
+                # If we had a verifier and it failed, auto-reject and penalize the submitter.
+                if note.startswith("auto_verify failed"):
+                    review_req = JobReviewRequest(
+                        approved=False,
+                        reviewed_by="system:auto_verify",
+                        note=note,
+                        payout=0.0,
+                        penalty=max(0.0, TASK_FAIL_PENALTY),
+                    )
+                    await jobs_review(job_id, review_req)
     except Exception:
         pass
 
