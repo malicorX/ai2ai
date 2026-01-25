@@ -765,6 +765,7 @@ def _build_viewer_html(messages: list[dict], thoughts: list[dict], jobs_state: d
 
                 verifier = reviewed_by or ("system:auto_verify" if (j.get("auto_verified_at") or 0.0) else "")
                 note = (review_note or auto_note).strip()
+                sub_excerpt = sub_txt[:3500] + ("\n\n…(truncated)…" if len(sub_txt) > 3500 else "")
 
                 who_line = (
                     f"created_by={created_by or '?'} | "
@@ -792,7 +793,7 @@ def _build_viewer_html(messages: list[dict], thoughts: list[dict], jobs_state: d
                     + "<details style='margin-top:8px;'><summary class='meta'>Task text</summary>"
                     + f"<div style='margin-top:6px;'>{_escape_and_format(body_txt)}</div></details>"
                     + "<details style='margin-top:8px;'><summary class='meta'>Submission (excerpt)</summary>"
-                    + f"<div style='margin-top:6px;'>{_escape_and_format(sub_txt[:3500] + ('\\n\\n…(truncated)…' if len(sub_txt) > 3500 else ''))}</div></details>"
+                    + f"<div style='margin-top:6px;'>{_escape_and_format(sub_excerpt)}</div></details>"
                     + "</div>"
                     "</div>"
                 )
