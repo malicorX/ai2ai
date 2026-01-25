@@ -341,9 +341,16 @@ def _build_run_job_state(job_events: list[dict]) -> dict[str, dict]:
                     "created_at": ca or float(d.get("created_at") or 0.0),
                     "status": "open",
                     "claimed_by": "",
+                    "claimed_at": 0.0,
                     "submitted_by": "",
                     "submission": "",
                     "submitted_at": 0.0,
+                    "auto_verify_ok": None,
+                    "auto_verify_note": "",
+                    "auto_verified_at": 0.0,
+                    "reviewed_by": "",
+                    "reviewed_at": 0.0,
+                    "review_note": "",
                 }
                 continue
             j = jobs.get(job_id)
@@ -353,6 +360,7 @@ def _build_run_job_state(job_events: list[dict]) -> dict[str, dict]:
                 jobs[job_id] = j
             if t == "claim":
                 j["claimed_by"] = str(d.get("agent_id") or "")
+                j["claimed_at"] = ca or float(d.get("created_at") or 0.0)
                 j["status"] = "claimed"
             elif t == "submit":
                 j["submitted_by"] = str(d.get("agent_id") or "")
@@ -367,7 +375,8 @@ def _build_run_job_state(job_events: list[dict]) -> dict[str, dict]:
             elif t == "review":
                 j["status"] = "approved" if bool(d.get("approved")) else "rejected"
                 j["reviewed_by"] = str(d.get("reviewed_by") or "")
-                j["note"] = str(d.get("note") or "")
+                j["reviewed_at"] = ca or float(d.get("created_at") or 0.0)
+                j["review_note"] = str(d.get("note") or "")
             elif t == "cancel":
                 j["status"] = "cancelled"
         except Exception:
@@ -738,20 +747,53 @@ def _build_viewer_html(messages: list[dict], thoughts: list[dict], jobs_state: d
             prev_key = k
 
         rows = []
-        # If this is a job-thread, add a small job timeline card first.
+        # If this is a job-thread, add a "task card" first (answers who/what/how/verified).
         if conv_id.startswith("job:"):
             jid = conv_id.split("job:", 1)[1]
             j = jobs_state.get(jid) or {}
             if j:
                 st = str(j.get("status") or "")
-                av_note = str(j.get("auto_verify_note") or j.get("note") or "")
-                who = f"created_by={j.get('created_by','')} claimed_by={j.get('claimed_by','')} submitted_by={j.get('submitted_by','')}"
+                created_by = str(j.get("created_by") or "")
+                claimed_by = str(j.get("claimed_by") or "")
+                submitted_by = str(j.get("submitted_by") or "")
+                reviewed_by = str(j.get("reviewed_by") or "")
+                auto_ok = j.get("auto_verify_ok")
+                auto_note = str(j.get("auto_verify_note") or "")
+                review_note = str(j.get("review_note") or "")
+                body_txt = str(j.get("body") or "")
+                sub_txt = str(j.get("submission") or "")
+
+                verifier = reviewed_by or ("system:auto_verify" if (j.get("auto_verified_at") or 0.0) else "")
+                note = (review_note or auto_note).strip()
+
+                who_line = (
+                    f"created_by={created_by or '?'} | "
+                    f"claimed_by={claimed_by or '?'} | "
+                    f"submitted_by={submitted_by or '?'} | "
+                    f"verified_by={verifier or '?'}"
+                )
+                # Short status line with verifier result when available.
+                ver_line = ""
+                if auto_ok is True:
+                    ver_line = f"auto_verify: ok - {auto_note[:160]}"
+                elif auto_ok is False:
+                    ver_line = f"auto_verify: FAILED - {auto_note[:160]}"
+                elif note:
+                    ver_line = note[:160]
                 rows.append(
                     "<div class='msg' style='border-color: rgba(122,162,255,0.35);'>"
-                    "<div class='msgHeader'><span class='sender'>Job timeline</span>"
-                    f"<span class='meta'>{_html.escape(st)} | {_html.escape(who)}</span></div>"
-                    f"<div class='msgBody'><strong>{_html.escape(str(j.get('title') or ''))}</strong><br>"
-                    f"<span class='meta'>{_html.escape(av_note[:260])}</span></div>"
+                    "<div class='msgHeader'><span class='sender'>Task</span>"
+                    f"<span class='meta'>{_html.escape(st)}</span></div>"
+                    f"<div class='msgBody'>"
+                    f"<strong>{_html.escape(str(j.get('title') or ''))}</strong><br>"
+                    f"<span class='meta'>{_html.escape('job_id=' + jid)}</span><br>"
+                    f"<span class='meta'>{_html.escape(who_line)}</span><br>"
+                    + (f"<span class='meta'>{_html.escape(ver_line)}</span><br>" if ver_line else "")
+                    + "<details style='margin-top:8px;'><summary class='meta'>Task text</summary>"
+                    + f"<div style='margin-top:6px;'>{_escape_and_format(body_txt)}</div></details>"
+                    + "<details style='margin-top:8px;'><summary class='meta'>Submission (excerpt)</summary>"
+                    + f"<div style='margin-top:6px;'>{_escape_and_format(sub_txt[:3500] + ('\\n\\n…(truncated)…' if len(sub_txt) > 3500 else ''))}</div></details>"
+                    + "</div>"
                     "</div>"
                 )
 
