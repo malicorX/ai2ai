@@ -59,19 +59,24 @@ class Tools(TypedDict):
     memory_append: Callable[[str, str, List[str], float], None]
 
 
-def _cfg_tools(config: Any) -> Tools:
+def _get_tools(state: AgentState, config: Any) -> Tools:
     """
-    LangGraph passes a config dict as the second arg to nodes. We thread our runtime
-    callables through config["tools"].
+    Retrieve runtime tool callables for a node.
+
+    Note: LangGraph does NOT reliably pass a second positional argument to node functions.
+    We therefore support two mechanisms:
+    - preferred: state["__tools"] injected by the caller
+    - optional: config["tools"] (if the runtime provides it)
     """
+    if isinstance(state, dict) and isinstance(state.get("__tools"), dict):
+        return state["__tools"]  # type: ignore[return-value]
     if isinstance(config, dict) and isinstance(config.get("tools"), dict):
         return config["tools"]  # type: ignore[return-value]
-    # Fallback: allow nesting under configurable (common LangGraph pattern)
     if isinstance(config, dict):
         cfg = config.get("configurable")
         if isinstance(cfg, dict) and isinstance(cfg.get("tools"), dict):
             return cfg["tools"]  # type: ignore[return-value]
-    raise RuntimeError("LangGraph tools missing from config; expected config['tools']")
+    raise RuntimeError("LangGraph tools missing; expected state['__tools'] or config['tools']")
 
 
 def _run_tag(run_id: str) -> str:
@@ -157,8 +162,8 @@ def _proposer_has_open_job(state: AgentState) -> bool:
     return False
 
 
-def node_perceive(state: AgentState, config: Any) -> AgentState:
-    tools = _cfg_tools(config)
+def node_perceive(state: AgentState, config: Any = None) -> AgentState:
+    tools = _get_tools(state, config)
     # Expect world already in state; refresh open jobs.
     try:
         state["open_jobs"] = tools["jobs_list"](status="open", limit=50)
@@ -227,8 +232,8 @@ def node_perceive(state: AgentState, config: Any) -> AgentState:
     return state
 
 
-def node_recall(state: AgentState, config: Any) -> AgentState:
-    tools = _cfg_tools(config)
+def node_recall(state: AgentState, config: Any = None) -> AgentState:
+    tools = _get_tools(state, config)
     # Retrieve only what helps decisions: recent failures/success patterns around verification and jobs.
     q = f"run {state.get('run_id','')} jobs verification failed penalty acceptance criteria evidence"
     try:
@@ -312,8 +317,8 @@ def _count_rejections_for_root(rejected_jobs: List[dict], root_id: str) -> int:
     return n
 
 
-def node_decide(state: AgentState, config: Any) -> AgentState:
-    tools = _cfg_tools(config)
+def node_decide(state: AgentState, config: Any = None) -> AgentState:
+    tools = _get_tools(state, config)
     role: Role = state.get("role", "executor")  # type: ignore[assignment]
     run_tag = _run_tag(state.get("run_id", ""))
 
@@ -583,8 +588,8 @@ def node_decide(state: AgentState, config: Any) -> AgentState:
     return state
 
 
-def node_act(state: AgentState, config: Any) -> AgentState:
-    tools = _cfg_tools(config)
+def node_act(state: AgentState, config: Any = None) -> AgentState:
+    tools = _get_tools(state, config)
     act = state.get("action") or {"kind": "noop"}
     kind = act.get("kind", "noop")
 
@@ -642,8 +647,8 @@ def node_act(state: AgentState, config: Any) -> AgentState:
     return state
 
 
-def node_reflect(state: AgentState, config: Any) -> AgentState:
-    tools = _cfg_tools(config)
+def node_reflect(state: AgentState, config: Any = None) -> AgentState:
+    tools = _get_tools(state, config)
     # Lightweight: store one rule-of-thumb so behavior improves over time.
     # Also: respond to job outcomes (approved/rejected/submitted) so agents internalize "submitted != done".
     lj = state.get("last_job") or {}
@@ -740,6 +745,8 @@ def run_graph_step(state: AgentState, tools: Tools) -> AgentState:
     global _GRAPH
     if _GRAPH is None:
         _GRAPH = build_graph()
-    # LangGraph passes extra kwargs into node callables.
-    return _GRAPH.invoke(state, {"tools": tools})
+    # Inject tools into state because nodes may not receive config.
+    st = dict(state)
+    st["__tools"] = tools
+    return _GRAPH.invoke(st)
 
