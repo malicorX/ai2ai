@@ -35,10 +35,12 @@ class AgentState(TypedDict, total=False):
     world: dict
     balance: float
     open_jobs: List[dict]
+    rejected_jobs: List[dict]
     memories: List[dict]
     world_model: dict
     last_job_id: str
     last_job: dict
+    handled_rejection_job_id: str
     action: Action
     acted: bool
 
@@ -121,6 +123,15 @@ def node_perceive(state: AgentState, config: Any) -> AgentState:
         state["open_jobs"] = tools["jobs_list"](status="open", limit=50)
     except Exception:
         state["open_jobs"] = []
+
+    # Proposer also watches rejected jobs to create "redo" tasks (verifier-aware recovery).
+    if state.get("role") == "proposer":
+        try:
+            state["rejected_jobs"] = tools["jobs_list"](status="rejected", limit=50)
+        except Exception:
+            state["rejected_jobs"] = []
+    else:
+        state["rejected_jobs"] = []
 
     # Lightweight world model extraction (compact, stable input for reasoning).
     w = state.get("world") or {}
@@ -212,6 +223,75 @@ def node_decide(state: AgentState, config: Any) -> AgentState:
 
     # Invariants first (code-enforced)
     if role == "proposer":
+        # If the executor got rejected on a recent job, create ONE redo job with clearer evidence rules.
+        handled = str(state.get("handled_rejection_job_id") or "").strip()
+        rej = list(state.get("rejected_jobs") or [])
+        if rej:
+            # Only consider jobs in this run proposed by agent_1 and executed by agent_2.
+            cand = []
+            for j in rej:
+                if str(j.get("created_by") or "") != "agent_1":
+                    continue
+                if str(j.get("submitted_by") or "") != "agent_2":
+                    continue
+                if run_tag and not ((run_tag in str(j.get("title") or "")) or (run_tag in str(j.get("body") or ""))):
+                    continue
+                if handled and str(j.get("job_id") or "") == handled:
+                    continue
+                cand.append(j)
+            cand.sort(key=lambda j: _safe_float(j.get("reviewed_at"), _safe_float(j.get("submitted_at"), 0.0)), reverse=True)
+            if cand:
+                bad = cand[0]
+                bad_id = str(bad.get("job_id") or "")
+                bad_title = str(bad.get("title") or "")
+                bad_body = str(bad.get("body") or "")
+                note = str(bad.get("auto_verify_note") or "")
+
+                sys = (
+                    "You are the proposer creating ONE 'redo' job after a failed verification.\n"
+                    "Return STRICT JSON ONLY with schema:\n"
+                    "{\"title\": <string>, \"body\": <string>, \"reward\": <number>}\n"
+                    "Rules:\n"
+                    "- The redo job must be easier to verify.\n"
+                    "- Include 'Acceptance criteria:' and 'Evidence required in submission:' sections.\n"
+                    "- Explicitly address the verifier failure note.\n"
+                    "- Keep it executable without web access.\n"
+                )
+                user = (
+                    f"Original job id: {bad_id}\n"
+                    f"Original title: {bad_title}\n"
+                    f"Original body:\n{bad_body}\n\n"
+                    f"Verifier failure note:\n{note}\n\n"
+                    f"Run tag: {run_tag}\n\n"
+                    "Create a redo job now."
+                )
+                tools["trace_event"]("thought", "langgraph: proposer creating redo job", {"failed_job_id": bad_id})
+                raw = llm_chat(sys, user, max_tokens=420)
+                obj = _extract_json_obj(raw) or {}
+
+                title = str(obj.get("title") or "").strip()
+                body = str(obj.get("body") or "").strip()
+                reward = _safe_float(obj.get("reward"), 0.01)
+                if not title or not body:
+                    title = f"Redo: {bad_title}".strip() if bad_title else "Redo: Verifiable task"
+                    body = (
+                        f"This is a redo of job `{bad_id}` which failed verification.\n"
+                        f"Failure note: {note}\n\n"
+                        "Acceptance criteria:\n"
+                        "- Submission includes required code fences and an Evidence section.\n"
+                        "- Output matches the expected result exactly.\n\n"
+                        "Evidence required in submission:\n"
+                        "- Include runnable code in the correct fence (e.g., ```python).\n"
+                        "- Include an 'Evidence:' section listing observed output.\n"
+                    )
+                    reward = 0.01
+
+                if run_tag and run_tag not in title:
+                    title = f"{run_tag} {title}".strip()
+                state["handled_rejection_job_id"] = bad_id
+                state["action"] = {"kind": "propose_job", "note": f"redo_for={bad_id}", "job": {"title": title, "body": body, "reward": float(reward)}}
+                return state
+
         if _proposer_has_open_job(state):
             state["action"] = {"kind": "noop", "note": "proposer already has an open job"}
             return state
