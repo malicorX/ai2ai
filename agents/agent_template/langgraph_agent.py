@@ -252,6 +252,16 @@ def _extract_json_obj(raw: str) -> Optional[dict]:
         return None
 
 
+def _extract_redo_for(body: str) -> str:
+    """
+    Parse a deterministic redo marker like: [redo_for:<job_id>]
+    Returns empty string if missing.
+    """
+    txt = (body or "")
+    m = re.search(r"\[redo_for:([a-f0-9\-]{8,})\]", txt, flags=re.IGNORECASE)
+    return (m.group(1) if m else "").strip()
+
+
 def node_decide(state: AgentState, config: Any) -> AgentState:
     tools = _cfg_tools(config)
     role: Role = state.get("role", "executor")  # type: ignore[assignment]
@@ -296,8 +306,12 @@ def node_decide(state: AgentState, config: Any) -> AgentState:
                 bad_title = str(bad.get("title") or "")
                 bad_body = str(bad.get("body") or "")
                 note = str(bad.get("auto_verify_note") or "")
-                redo_prefix = f"Redo {bad_id}: " if bad_id else "Redo: "
-                redo_tag = f"[redo_for:{bad_id}]" if bad_id else "[redo_for:unknown]"
+                root_id = _extract_redo_for(bad_body) or bad_id
+                # Escalation: if the failed job was itself a redo, we are in "strict mode".
+                redo_level = 2 if _extract_redo_for(bad_body) else 1
+                redo_prefix = f"Redo {root_id}: " if root_id else "Redo: "
+                redo_tag = f"[redo_for:{root_id}]" if root_id else "[redo_for:unknown]"
+                redo_level_tag = f"[redo_level:{redo_level}]"
 
                 sys = (
                     "You are the proposer creating ONE 'redo' job after a failed verification.\n"
@@ -305,17 +319,21 @@ def node_decide(state: AgentState, config: Any) -> AgentState:
                     "{\"title\": <string>, \"body\": <string>, \"reward\": <number>}\n"
                     "Rules:\n"
                     "- The redo job must be easier to verify.\n"
+                    "- If this is a second failure, drastically simplify the task and make evidence requirements explicit.\n"
                     "- Include 'Acceptance criteria:' and 'Evidence required in submission:' sections.\n"
                     "- Explicitly address the verifier failure note.\n"
                     "- Keep it executable without web access.\n"
                 )
                 user = (
-                    f"Original job id: {bad_id}\n"
+                    f"Failed job id: {bad_id}\n"
+                    f"Root job id (redo_for): {root_id}\n"
+                    f"Redo escalation level: {redo_level}\n"
                     f"Original title: {bad_title}\n"
                     f"Original body:\n{bad_body}\n\n"
                     f"Verifier failure note:\n{note}\n\n"
                     f"Run tag: {run_tag}\n\n"
-                    "Create a redo job now."
+                    "Create a redo job now. Put these tags at the top of the body:\n"
+                    f"{redo_tag}\n{redo_level_tag}\n"
                 )
                 tools["trace_event"]("thought", "langgraph: proposer creating redo job", {"failed_job_id": bad_id})
                 raw = llm_chat(sys, user, max_tokens=420)
@@ -327,7 +345,7 @@ def node_decide(state: AgentState, config: Any) -> AgentState:
                 if not title or not body:
                     title = f"{redo_prefix}{bad_title}".strip() if bad_title else f"{redo_prefix}Verifiable task"
                     body = (
-                        f"{redo_tag}\n"
+                        f"{redo_tag}\n{redo_level_tag}\n"
                         f"This is a redo of job `{bad_id}` which failed verification.\n"
                         f"Failure note: {note}\n\n"
                         "Acceptance criteria:\n"
@@ -340,15 +358,21 @@ def node_decide(state: AgentState, config: Any) -> AgentState:
                     reward = 0.01
 
                 # Force deterministic redo labeling for executor routing + auditing.
-                if bad_id and not title.lower().startswith(f"redo {bad_id}".lower()):
+                if root_id and not title.lower().startswith(f"redo {root_id}".lower()):
                     title = f"{redo_prefix}{title}".strip()
                 if redo_tag not in body:
                     body = f"{redo_tag}\n{body}".strip()
+                if redo_level_tag not in body:
+                    body = f"{redo_level_tag}\n{body}".strip()
+
+                # Strict-mode hinting: if redo_level >= 2, force a short "strict" note in body.
+                if redo_level >= 2 and "strict mode" not in body.lower():
+                    body = f"{body}\n\nSTRICT MODE: Keep the solution minimal and match acceptance criteria exactly.\n"
 
                 if run_tag and run_tag not in title:
                     title = f"{run_tag} {title}".strip()
                 state["handled_rejection_job_id"] = bad_id
-                state["action"] = {"kind": "propose_job", "note": f"redo_for={bad_id}", "job": {"title": title, "body": body, "reward": float(reward)}}
+                state["action"] = {"kind": "propose_job", "note": f"redo_for={root_id}|redo_level={redo_level}", "job": {"title": title, "body": body, "reward": float(reward)}}
                 return state
 
         # LLM: propose a verifiable job (must include acceptance criteria + evidence format).
@@ -517,6 +541,21 @@ def node_reflect(state: AgentState, config: Any) -> AgentState:
         elif st == "rejected":
             try:
                 tools["chat_send"](f"Job `{jid}` was rejected. I likely lost ai$. Reason: {note[:220]}")
+            except Exception:
+                pass
+            # Safety valve: if a redo failed again, write a strong "do not repeat" policy memory.
+            try:
+                body = str(lj.get("body") or "")
+                root = _extract_redo_for(body)
+                if root:
+                    tools["memory_append"](
+                        "reflection",
+                        f"Redo failed again (job {jid}, redo_for={root}). DO NOT repeat the same submission pattern. "
+                        f"Next time: simplify; include exact required code fences; explicitly echo every acceptance criterion bullet inside Evidence checklist. "
+                        f"Verifier note={note}",
+                        ["job", "redo_failed", "policy"],
+                        0.99,
+                    )
             except Exception:
                 pass
             try:
