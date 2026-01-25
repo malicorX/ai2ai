@@ -630,24 +630,46 @@ def _fmt_ts(created_at: Any) -> str:
         return ""
 
 
-def _build_viewer_html(messages: list[dict], thoughts: list[dict], title: str) -> str:
+def _build_viewer_html(messages: list[dict], thoughts: list[dict], jobs_state: dict[str, dict], title: str) -> str:
     # Minimal embedded version of export_chat_html.py (no external deps).
     import html as _html
     import json as _json
     import re as _re
     import time as _time
 
+    def _job_id_from_text(t: str) -> str:
+        s = (t or "")
+        m = _re.search(r"\[task:([0-9a-fA-F\-]{12,})\]", s)
+        if m:
+            return str(m.group(1)).strip()
+        m = _re.search(r"`([0-9a-fA-F\-]{12,})`", s)
+        if m:
+            return str(m.group(1)).strip()
+        m = _re.search(r"\b([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b", s)
+        if m:
+            return str(m.group(1)).strip()
+        return ""
+
+    def _group_key_for_message(m: dict) -> str:
+        text = str(m.get("text") or "")
+        conv = _extract_tag(text, "conv")
+        if conv:
+            return f"conv:{conv}"
+        jid = _job_id_from_text(text)
+        if jid:
+            return f"job:{jid}"
+        return "misc"
+
     groups: dict[str, list[dict]] = {}
     for m in messages:
-        text = str(m.get("text") or "")
-        conv = _extract_tag(text, "conv") or "no-conv"
-        groups.setdefault(conv, []).append(m)
+        groups.setdefault(_group_key_for_message(m), []).append(m)
 
     tgroups: dict[str, list[dict]] = {}
     for e in thoughts:
         data = e.get("data") if isinstance(e.get("data"), dict) else {}
-        conv = str(data.get("conv") or "").strip() or "no-conv"
-        tgroups.setdefault(conv, []).append(e)
+        conv = str(data.get("conv") or "").strip()
+        key = f"conv:{conv}" if conv else "misc"
+        tgroups.setdefault(key, []).append(e)
 
     def last_ts(items: list[dict]) -> float:
         try:
@@ -656,13 +678,14 @@ def _build_viewer_html(messages: list[dict], thoughts: list[dict], title: str) -
             return 0.0
 
     group_items = sorted(groups.items(), key=lambda kv: last_ts(kv[1]), reverse=True)
-    default_conv = "no-conv"
+    default_conv = "misc"
     if group_items:
         best = None
         for conv_id, items in group_items:
-            if conv_id == "no-conv":
+            if conv_id == "misc":
                 continue
-            score = len(items) + len(tgroups.get(conv_id) or [])
+            bonus = 10 if conv_id.startswith("conv:") else (6 if conv_id.startswith("job:") else 0)
+            score = bonus + len(items) + len(tgroups.get(conv_id) or [])
             if best is None or score > best[0]:
                 best = (score, conv_id)
         default_conv = best[1] if best else group_items[0][0]
@@ -677,7 +700,15 @@ def _build_viewer_html(messages: list[dict], thoughts: list[dict], title: str) -
                 senders.append(str(sn))
         last_text = str(items[-1].get("text") or "")
         topic = _extract_tag(last_text, "topic") or ""
-        label = f"{conv_id} - {', '.join(senders[:3])}"
+        label = conv_id
+        if conv_id.startswith("job:"):
+            jid = conv_id.split("job:", 1)[1]
+            jt = str((jobs_state.get(jid) or {}).get("title") or "").strip()
+            label = f"job:{jid[:8]} - {jt[:60]}".strip(" -")
+        elif conv_id.startswith("conv:"):
+            label = f"{conv_id.split('conv:',1)[1]} - {', '.join(senders[:3])}"
+        else:
+            label = f"{conv_id} - {', '.join(senders[:3])}"
         if topic:
             label += f" - topic: {topic}"
         sidebar_items.append(
@@ -687,16 +718,53 @@ def _build_viewer_html(messages: list[dict], thoughts: list[dict], title: str) -
             f"</button>"
         )
 
-        rows = []
+        # Dedupe consecutive identical messages to reduce spammy repetition.
+        def _norm_msg(sender: str, body: str) -> str:
+            s = shows = (sender + "|" + body).lower()
+            s = _re.sub(r"\s+", " ", s).strip()
+            return s[:800]
+
+        deduped: list[tuple[dict, int]] = []
+        prev_key = ""
         for mm in items:
+            sender = str(mm.get("sender_name") or mm.get("sender_id") or "?")
+            raw_text = str(mm.get("text") or "")
+            body = _re.sub(r"\\[conv:[^\\]]+\\]\\s*", "", raw_text).strip()
+            k = _norm_msg(sender, body)
+            if deduped and k == prev_key:
+                deduped[-1] = (deduped[-1][0], deduped[-1][1] + 1)
+                continue
+            deduped.append((mm, 1))
+            prev_key = k
+
+        rows = []
+        # If this is a job-thread, add a small job timeline card first.
+        if conv_id.startswith("job:"):
+            jid = conv_id.split("job:", 1)[1]
+            j = jobs_state.get(jid) or {}
+            if j:
+                st = str(j.get("status") or "")
+                av_note = str(j.get("auto_verify_note") or j.get("note") or "")
+                who = f"created_by={j.get('created_by','')} claimed_by={j.get('claimed_by','')} submitted_by={j.get('submitted_by','')}"
+                rows.append(
+                    "<div class='msg' style='border-color: rgba(122,162,255,0.35);'>"
+                    "<div class='msgHeader'><span class='sender'>Job timeline</span>"
+                    f"<span class='meta'>{_html.escape(st)} | {_html.escape(who)}</span></div>"
+                    f"<div class='msgBody'><strong>{_html.escape(str(j.get('title') or ''))}</strong><br>"
+                    f"<span class='meta'>{_html.escape(av_note[:260])}</span></div>"
+                    "</div>"
+                )
+
+        for mm, rep in deduped:
             sender = str(mm.get("sender_name") or mm.get("sender_id") or "?")
             created = _fmt_ts(mm.get("created_at"))
             raw_text = str(mm.get("text") or "")
             body = _re.sub(r"\\[conv:[^\\]]+\\]\\s*", "", raw_text).strip()
+            meta_html = f"<span class='meta'>x{rep}</span>" if rep > 1 else ""
             rows.append(
                 "<div class='msg'>"
                 f"<div class='msgHeader'><span class='sender'>{_html.escape(sender)}</span>"
-                f"<span class='time'>{_html.escape(created)}</span></div>"
+                f"<span class='time'>{_html.escape(created)}</span>{meta_html}</div>"
                 f"<div class='msgBody'>{_escape_and_format(body)}</div>"
                 "</div>"
             )
@@ -775,7 +843,7 @@ def _build_viewer_html(messages: list[dict], thoughts: list[dict], title: str) -
 <body>
   <header>
     <div class="title">{_html.escape(title)}</div>
-    <div class="sub">Generated {_html.escape(_fmt_ts(_time.time()))} - messages: {len(messages)} - thoughts: {len(thoughts)} - conversations: {len(groups)}</div>
+    <div class="sub">Generated {_html.escape(_fmt_ts(_time.time()))} - messages: {len(messages)} - thoughts: {len(thoughts)} - threads: {len(groups)} (conv/job/misc)</div>
   </header>
   <div class="layout">
     <aside>{''.join(sidebar_items)}</aside>
@@ -798,18 +866,20 @@ def _build_viewer_html(messages: list[dict], thoughts: list[dict], title: str) -
 
 
 @app.get("/runs/{run_id}/viewer")
-def runs_viewer(run_id: str):
+def runs_viewer(run_id: str, regen: bool = False):
     run_dir = (RUNS_DIR / run_id).resolve()
     if not run_dir.exists() or not run_dir.is_dir():
         return {"error": "not_found"}
     viewer_path = run_dir / "result_viewer.html"
-    if viewer_path.exists():
+    if viewer_path.exists() and not regen:
         return FileResponse(str(viewer_path), media_type="text/html")
     # Generate on demand
     msgs = _read_jsonl(run_dir / "chat_messages.jsonl")
     trace = _read_jsonl(run_dir / "trace_events.jsonl")
     thoughts = [e for e in trace if e.get("kind") == "chat_thought"]
-    html_txt = _build_viewer_html(msgs, thoughts, title=f"Run {run_id} - Conversations")
+    jobs_ev = _read_jsonl(run_dir / "jobs_events.jsonl")
+    jobs_state = _build_run_job_state(jobs_ev)
+    html_txt = _build_viewer_html(msgs, thoughts, jobs_state, title=f"Run {run_id} - Conversations")
     try:
         viewer_path.write_text(html_txt, encoding="utf-8")
     except Exception:
