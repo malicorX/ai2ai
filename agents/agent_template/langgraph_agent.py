@@ -104,6 +104,37 @@ def _pick_executor_job(state: AgentState) -> Optional[dict]:
     jobs.sort(key=lambda j: _safe_float(j.get("created_at"), 0.0), reverse=True)
     return jobs[0]
 
+def _pick_redo_job(state: AgentState, failed_job_id: str) -> Optional[dict]:
+    """
+    Prefer redo/fix jobs when a prior job was rejected:
+    - matches run tag (if known)
+    - created by agent_1
+    - title/body indicates redo OR references failed job id
+    - newest first
+    """
+    fid = (failed_job_id or "").strip()
+    if not fid:
+        return None
+    jobs = list(state.get("open_jobs") or [])
+    if not jobs:
+        return None
+    run_tag = _run_tag(state.get("run_id", ""))
+    out = []
+    for j in jobs:
+        if str(j.get("created_by") or "") != "agent_1":
+            continue
+        t = str(j.get("title") or "")
+        b = str(j.get("body") or "")
+        low = (t + " " + b).lower()
+        if run_tag and not ((run_tag in t) or (run_tag in b)):
+            continue
+        if ("redo" in low) or ("fix" in low) or (fid in t) or (fid in b):
+            out.append(j)
+    if not out:
+        return None
+    out.sort(key=lambda j: _safe_float(j.get("created_at"), 0.0), reverse=True)
+    return out[0]
+
 
 def _proposer_has_open_job(state: AgentState) -> bool:
     run_tag = _run_tag(state.get("run_id", ""))
@@ -223,6 +254,11 @@ def node_decide(state: AgentState, config: Any) -> AgentState:
 
     # Invariants first (code-enforced)
     if role == "proposer":
+        # Never create a redo (or any new job) if we already have an open job for this run.
+        if _proposer_has_open_job(state):
+            state["action"] = {"kind": "noop", "note": "proposer already has an open job"}
+            return state
+
         # If the executor got rejected on a recent job, create ONE redo job with clearer evidence rules.
         handled = str(state.get("handled_rejection_job_id") or "").strip()
         rej = list(state.get("rejected_jobs") or [])
@@ -292,10 +328,6 @@ def node_decide(state: AgentState, config: Any) -> AgentState:
                 state["action"] = {"kind": "propose_job", "note": f"redo_for={bad_id}", "job": {"title": title, "body": body, "reward": float(reward)}}
                 return state
 
-        if _proposer_has_open_job(state):
-            state["action"] = {"kind": "noop", "note": "proposer already has an open job"}
-            return state
-
         # LLM: propose a verifiable job (must include acceptance criteria + evidence format).
         persona = (state.get("persona") or "").strip()
         mem_lines = []
@@ -347,7 +379,10 @@ def node_decide(state: AgentState, config: Any) -> AgentState:
         return state
 
     # executor
-    job = _pick_executor_job(state)
+    # If we recently failed verification, prioritize a redo/fix job that references that failure.
+    last_id = str(state.get("last_job_id") or "").strip()
+    redo = _pick_redo_job(state, last_id)
+    job = redo or _pick_executor_job(state)
     if not job or not job.get("job_id"):
         state["action"] = {"kind": "noop", "note": "no suitable open job"}
         return state
