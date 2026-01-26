@@ -2620,6 +2620,11 @@ async def jobs_create(req: JobCreateRequest):
     created_by = str(req.created_by or "human")[:80]
     source = "agent" if created_by.startswith("agent_") else ("system" if created_by.startswith("system:") else "human")
 
+    # Allow intentional repeats for specific recurring agent tasks (e.g., periodic market scans).
+    # This is intentionally narrow to avoid disabling dedupe generally.
+    text_l = (title.lower() + "\n" + body.lower())
+    allow_repeat = ("[repeat_ok:1]" in text_l) and ("archetype:market_scan" in text_l) and (created_by == "agent_1")
+
     # Safety: ensure agent-created jobs are tagged with the current run id so the executor will pick them up.
     # (Some jobs created via conversation flow historically missed the run tag and became "invisible" to executor.)
     try:
@@ -2629,27 +2634,28 @@ async def jobs_create(req: JobCreateRequest):
                 title = f"{tag} {title}".strip()
     except Exception:
         pass
-    recent = sorted(list(_jobs.values()), key=lambda j: float(j.created_at or 0.0), reverse=True)[:200]
-    for jj in recent:
-        try:
-            # Prefer dedup within same creator OR within run-tagged tasks.
-            if created_by and jj.created_by and (jj.created_by == created_by):
-                pass
-            else:
-                # If creator differs, only dedupe run-tagged jobs (prevents cross-user surprises).
-                if "[run:" not in (title.lower() + body.lower()):
-                    continue
-                if "[run:" not in ((jj.title or "").lower() + (jj.body or "").lower()):
-                    continue
-            fp2 = str(getattr(jj, "fingerprint", "") or "")
-            if fp2 and fp2 == fp:
-                return {"error": "duplicate_job", "duplicate_of": jj.job_id, "reason": "fingerprint_match"}
-            t2 = _tokenize((jj.title or "") + "\n" + (jj.body or ""))
-            sim = _jaccard(toks, t2)
-            if sim >= 0.92:
-                return {"error": "duplicate_job", "duplicate_of": jj.job_id, "reason": f"similarity:{sim:.2f}"}
-        except Exception:
-            continue
+    if not allow_repeat:
+        recent = sorted(list(_jobs.values()), key=lambda j: float(j.created_at or 0.0), reverse=True)[:200]
+        for jj in recent:
+            try:
+                # Prefer dedup within same creator OR within run-tagged tasks.
+                if created_by and jj.created_by and (jj.created_by == created_by):
+                    pass
+                else:
+                    # If creator differs, only dedupe run-tagged jobs (prevents cross-user surprises).
+                    if "[run:" not in (title.lower() + body.lower()):
+                        continue
+                    if "[run:" not in ((jj.title or "").lower() + (jj.body or "").lower()):
+                        continue
+                fp2 = str(getattr(jj, "fingerprint", "") or "")
+                if fp2 and fp2 == fp:
+                    return {"error": "duplicate_job", "duplicate_of": jj.job_id, "reason": "fingerprint_match"}
+                t2 = _tokenize((jj.title or "") + "\n" + (jj.body or ""))
+                sim = _jaccard(toks, t2)
+                if sim >= 0.92:
+                    return {"error": "duplicate_job", "duplicate_of": jj.job_id, "reason": f"similarity:{sim:.2f}"}
+            except Exception:
+                continue
 
     # Auto-reward scaling (opt-in). Only apply for non-agent creators to avoid gaming.
     auto_reward = bool(req.auto_reward)

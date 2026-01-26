@@ -400,6 +400,7 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
                 (
                     "[archetype:market_scan] [verifier:json_list] Task: Market scan — paid gigs we can deliver (with citations)",
                     "[verifier:json_list]\n"
+                    "[repeat_ok:1]\n"
                     "[json_min_items:10]\n"
                     "[json_required_keys:title,platform,demand_signal,estimated_price_usd,why_fit,first_action,source_url,source_quote]\n"
                     "Use web_fetch to research and propose 10 concrete paid gig/service ideas we could deliver.\n"
