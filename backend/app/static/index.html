@@ -34,6 +34,15 @@
       gap: 12px;
       padding: 12px;
     }
+
+    /* Large-map mode: restore the previous "big map" emphasis. */
+    body.mapLarge .layout {
+      grid-template-columns: minmax(560px, 1fr) minmax(360px, 520px);
+    }
+    body.mapLarge #sidebar {
+      display: flex;
+      flex-direction: column;
+    }
     #canvasWrap {
       background: var(--panel);
       border: 1px solid var(--border);
@@ -110,7 +119,15 @@
 
   <div class="layout">
     <div id="canvasWrap">
-      <canvas id="world" width="640" height="640"></canvas>
+      <div style="display:flex; flex-direction:column; gap:8px; width:100%; min-height:0;">
+        <div style="display:flex; gap:8px; align-items:center;">
+          <button id="toggleMapBtn">Map: Large</button>
+          <span style="font-size:12px; color:#666;">toggle map emphasis</span>
+        </div>
+        <div style="flex:1; min-height:0; display:flex; align-items:flex-start; justify-content:flex-start;">
+          <canvas id="world" width="640" height="640"></canvas>
+        </div>
+      </div>
     </div>
     <div id="sidebar">
       <div style="background:white; border:1px solid #ccc; padding:10px; border-radius:6px; width:420px;">
@@ -303,6 +320,7 @@
     const topicStatus = document.getElementById("topicStatus");
     const balancesStatus = document.getElementById("balancesStatus");
     const runStatus = document.getElementById("runStatus");
+    const toggleMapBtn = document.getElementById("toggleMapBtn");
 
     const adminToken = document.getElementById("adminToken");
     const newRunBtn = document.getElementById("newRunBtn");
@@ -323,6 +341,27 @@
         return { "Authorization": `Bearer ${tok}` };
       }
       return {};
+    }
+
+    function applyMapMode(isLarge) {
+      if (isLarge) document.body.classList.add("mapLarge");
+      else document.body.classList.remove("mapLarge");
+      if (toggleMapBtn) toggleMapBtn.textContent = isLarge ? "Map: Small" : "Map: Large";
+      // Recompute canvas tile size after layout change.
+      setTimeout(resizeCanvas, 40);
+    }
+
+    // Map size toggle (persisted)
+    try {
+      const saved = localStorage.getItem("mapMode") || "";
+      applyMapMode(saved === "large");
+    } catch (e) {}
+    if (toggleMapBtn) {
+      toggleMapBtn.addEventListener("click", () => {
+        const isLarge = !document.body.classList.contains("mapLarge");
+        applyMapMode(isLarge);
+        try { localStorage.setItem("mapMode", isLarge ? "large" : "small"); } catch (e) {}
+      });
     }
 
     let currentRunId = "";
