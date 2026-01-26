@@ -646,6 +646,85 @@ def _fingerprint(title: str, body: str) -> str:
     return hashlib.sha1(base.encode("utf-8", errors="ignore")).hexdigest()[:16]
 
 
+def _calc_reward_from_ratings(ratings: dict) -> tuple[float, dict]:
+    """
+    Compute a suggested reward from 1..10 ratings.
+
+    Design goals:
+    - Reward scales with difficulty/complexity/usefulness.
+    - Penalize tasks that rely heavily on external tools (harder to verify/reproduce).
+    - Hard clamps to avoid runaway payouts.
+    """
+    def _r(key: str, default: int = 5) -> int:
+        try:
+            v = int(float(ratings.get(key, default)))
+            return max(1, min(10, v))
+        except Exception:
+            return default
+
+    complexity = _r("complexity", 5)
+    difficulty = _r("difficulty", 5)
+    external = _r("external_tools", 2)
+    uniqueness = _r("uniqueness", 5)
+    usefulness = _r("usefulness", 5)
+    money = _r("money_potential", 1)
+
+    # Weights (tunable via env if needed later)
+    base = float(os.getenv("REWARD_BASE", "1.0"))
+    w_complexity = float(os.getenv("REWARD_W_COMPLEXITY", "1.2"))
+    w_difficulty = float(os.getenv("REWARD_W_DIFFICULTY", "1.6"))
+    w_usefulness = float(os.getenv("REWARD_W_USEFULNESS", "1.4"))
+    w_money = float(os.getenv("REWARD_W_MONEY", "1.8"))
+    w_uniqueness = float(os.getenv("REWARD_W_UNIQUENESS", "0.6"))
+    w_external_penalty = float(os.getenv("REWARD_W_EXTERNAL_PENALTY", "1.2"))
+
+    # Normalize to 0..1
+    def _n(x: int) -> float:
+        return float(x - 1) / 9.0
+
+    score = (
+        w_complexity * _n(complexity)
+        + w_difficulty * _n(difficulty)
+        + w_usefulness * _n(usefulness)
+        + w_money * _n(money)
+        + w_uniqueness * _n(uniqueness)
+        - w_external_penalty * _n(external)
+    )
+    # Convert score to ai$ range
+    scale = float(os.getenv("REWARD_SCALE", "20.0"))
+    raw = base + max(0.0, score) * scale
+    max_reward = float(os.getenv("REWARD_MAX", "50.0"))
+    min_reward = float(os.getenv("REWARD_MIN", "0.01"))
+    reward = max(min_reward, min(max_reward, raw))
+
+    meta = {
+        "ratings_used": {
+            "complexity": complexity,
+            "difficulty": difficulty,
+            "external_tools": external,
+            "uniqueness": uniqueness,
+            "usefulness": usefulness,
+            "money_potential": money,
+        },
+        "score": round(score, 4),
+        "reward_raw": round(raw, 4),
+        "reward_final": round(reward, 4),
+        "params": {
+            "base": base,
+            "scale": scale,
+            "max": max_reward,
+            "min": min_reward,
+            "w_complexity": w_complexity,
+            "w_difficulty": w_difficulty,
+            "w_usefulness": w_usefulness,
+            "w_money": w_money,
+            "w_uniqueness": w_uniqueness,
+            "w_external_penalty": w_external_penalty,
+        },
+    }
+    return (reward, meta)
+
+
 @app.get("/runs")
 def runs_list(limit: int = 50):
     return {"runs": _list_run_dirs(limit=limit), "current": {"run_id": _run_id, "started_at": _run_started_at}}
@@ -865,6 +944,7 @@ def _build_viewer_html(messages: list[dict], thoughts: list[dict], jobs_state: d
                 auto_arts = j.get("auto_verify_artifacts") if isinstance(j.get("auto_verify_artifacts"), dict) else {}
                 review_note = str(j.get("review_note") or "")
                 ratings = j.get("ratings") if isinstance(j.get("ratings"), dict) else {}
+                reward_mode = str(j.get("reward_mode") or "")
                 body_txt = str(j.get("body") or "")
                 sub_txt = str(j.get("submission") or "")
                 events = j.get("events") if isinstance(j.get("events"), list) else []
@@ -893,6 +973,9 @@ def _build_viewer_html(messages: list[dict], thoughts: list[dict], jobs_state: d
                         ratings_line = "ratings: " + ", ".join(parts[:12])
                 except Exception:
                     ratings_line = ""
+                reward_line = ""
+                if reward_mode:
+                    reward_line = f"reward_mode={reward_mode}"
                 # Short status line with verifier result when available.
                 ver_line = ""
                 if auto_ok is True:
@@ -960,6 +1043,7 @@ def _build_viewer_html(messages: list[dict], thoughts: list[dict], jobs_state: d
                     f"<span class='meta'>{_html.escape('job_id=' + jid)}</span><br>"
                     f"<span class='meta'>{_html.escape(who_line)}</span><br>"
                     + (f"<span class='meta'>{_html.escape(ratings_line)}</span><br>" if ratings_line else "")
+                    + (f"<span class='meta'>{_html.escape(reward_line)}</span><br>" if reward_line else "")
                     + (f"<span class='meta'>{_html.escape(ver_line)}</span><br>" if ver_line else "")
                     + ("<details style='margin-top:8px;'><summary class='meta'>Timeline</summary>"
                        + ("".join(timeline_rows) if timeline_rows else "<div class='meta'>(no events)</div>")
@@ -1859,6 +1943,8 @@ class Job:
     auto_verified_at: float = 0.0
     fingerprint: str = ""
     ratings: dict = field(default_factory=dict)
+    reward_mode: str = "manual"
+    reward_calc: dict = field(default_factory=dict)
 
 
 JobEventType = Literal["create", "claim", "submit", "verify", "review", "update", "cancel"]
@@ -1879,6 +1965,7 @@ class JobCreateRequest(BaseModel):
     reward: float = 10.0
     created_by: str = "human"
     ratings: Optional[dict] = None
+    auto_reward: bool = False
 
 
 class JobClaimRequest(BaseModel):
@@ -1900,6 +1987,7 @@ class JobUpdateRequest(BaseModel):
     body: Optional[str] = None
     reward: Optional[float] = None
     ratings: Optional[dict] = None
+    auto_reward: bool = False
     by: str = "human"
     force: bool = False
 
@@ -1950,6 +2038,8 @@ def _apply_job_event(ev: JobEvent) -> None:
             auto_verified_at=0.0,
             fingerprint=str(d.get("fingerprint") or "")[:120],
             ratings=(dict(d.get("ratings") or {}) if isinstance(d.get("ratings"), dict) else {}),
+            reward_mode=str(d.get("reward_mode") or "manual")[:40],
+            reward_calc=(dict(d.get("reward_calc") or {}) if isinstance(d.get("reward_calc"), dict) else {}),
         )
         return
 
@@ -2001,6 +2091,10 @@ def _apply_job_event(ev: JobEvent) -> None:
                 pass
         if "ratings" in d and isinstance(d.get("ratings"), dict):
             job.ratings = dict(d.get("ratings") or {})
+        if "reward_mode" in d and isinstance(d.get("reward_mode"), str):
+            job.reward_mode = str(d.get("reward_mode") or "")[:40]
+        if "reward_calc" in d and isinstance(d.get("reward_calc"), dict):
+            job.reward_calc = dict(d.get("reward_calc") or {})
         return
 
     if t == "cancel" and job.status in ("open", "claimed", "submitted"):
@@ -2090,6 +2184,7 @@ async def jobs_update(job_id: str, req: JobUpdateRequest, request: Request):
         except Exception:
             reward = None
     ratings = req.ratings if isinstance(req.ratings, dict) else None
+    auto_reward = bool(req.auto_reward)
 
     if (title is None) and (body is None) and (reward is None) and (ratings is None):
         return {"error": "no_changes"}
@@ -2103,6 +2198,16 @@ async def jobs_update(job_id: str, req: JobUpdateRequest, request: Request):
         data["reward"] = float(max(0.0, reward))
     if ratings is not None:
         data["ratings"] = ratings
+    if auto_reward and ratings is not None:
+        # Auto reward scaling is admin-only via this endpoint; safe to apply.
+        rr, meta = _calc_reward_from_ratings(ratings)
+        data["reward"] = float(rr)
+        data["reward_mode"] = "auto_ratings"
+        data["reward_calc"] = meta
+    elif reward is not None:
+        # Explicit manual reward update clears auto mode.
+        data["reward_mode"] = "manual"
+        data["reward_calc"] = {}
 
     ev = _append_job_event("update", job_id, data)
     await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})
@@ -2115,8 +2220,8 @@ async def jobs_create(req: JobCreateRequest):
     _tick += 1
     title = (req.title or "").strip()
     body = (req.body or "").strip()
-    reward = float(req.reward or 0.0)
-    if not title or not body or reward <= 0:
+    reward_in = float(req.reward or 0.0)
+    if not title or not body or reward_in <= 0:
         return {"error": "invalid_job"}
 
     # Ratings (optional): clamp into 1..10
@@ -2160,11 +2265,30 @@ async def jobs_create(req: JobCreateRequest):
         except Exception:
             continue
 
+    # Auto-reward scaling (opt-in). Only apply for non-agent creators to avoid gaming.
+    auto_reward = bool(req.auto_reward)
+    reward_mode = "manual"
+    reward_calc: dict = {}
+    reward = reward_in
+    if auto_reward and (not str(created_by).startswith("agent_")) and ratings:
+        reward, reward_calc = _calc_reward_from_ratings(ratings)
+        reward_mode = "auto_ratings"
+
     job_id = str(uuid.uuid4())
     ev = _append_job_event(
         "create",
         job_id,
-        {"title": title, "body": body, "reward": reward, "created_by": created_by, "created_at": time.time(), "fingerprint": fp, "ratings": ratings},
+        {
+            "title": title,
+            "body": body,
+            "reward": reward,
+            "created_by": created_by,
+            "created_at": time.time(),
+            "fingerprint": fp,
+            "ratings": ratings,
+            "reward_mode": reward_mode,
+            "reward_calc": reward_calc,
+        },
     )
     await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})
     return {"ok": True, "job": asdict(_jobs[job_id])}

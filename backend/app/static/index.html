@@ -214,6 +214,13 @@
             <label style="font-size:12px; color:#444;">money_potential <input id="rateMoney" type="number" min="1" max="10" value="1" style="padding:6px; width:100%;" /></label>
           </div>
         </details>
+        <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
+          <label style="font-size:12px; color:#444; display:flex; align-items:center; gap:6px;">
+            <input id="jobAutoReward" type="checkbox" />
+            auto reward from ratings
+          </label>
+          <span style="font-size:12px; color:#666;">(only for human-created tasks)</span>
+        </div>
         <hr style="margin:12px 0;" />
         <div style="font-size:12px; color:#444; margin-bottom:6px;">
           <b>Edit existing job</b> (only <code>open</code> jobs by default)
@@ -243,6 +250,12 @@
             <label style="font-size:12px; color:#444;">money_potential <input id="editRateMoney" type="number" min="1" max="10" style="padding:6px; width:100%;" /></label>
           </div>
         </details>
+        <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
+          <label style="font-size:12px; color:#444; display:flex; align-items:center; gap:6px;">
+            <input id="jobEditAutoReward" type="checkbox" />
+            auto reward from ratings
+          </label>
+        </div>
         <div id="jobsList" style="margin-top:10px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size:12px; max-height:260px; overflow-y:auto;"></div>
       </div>
 
@@ -595,6 +608,8 @@
     const jobSaveBtn = document.getElementById("jobSaveBtn");
     const jobClearBtn = document.getElementById("jobClearBtn");
     const jobEditStatus = document.getElementById("jobEditStatus");
+    const jobAutoReward = document.getElementById("jobAutoReward");
+    const jobEditAutoReward = document.getElementById("jobEditAutoReward");
     const rateComplexity = document.getElementById("rateComplexity");
     const rateDifficulty = document.getElementById("rateDifficulty");
     const rateExternal = document.getElementById("rateExternal");
@@ -854,6 +869,7 @@
           editRateUnique.value = String(r.uniqueness || "");
           editRateUseful.value = String(r.usefulness || "");
           editRateMoney.value = String(r.money_potential || "");
+          if (jobEditAutoReward) jobEditAutoReward.checked = (String(j.reward_mode||"") === "auto_ratings");
           jobEditStatus.textContent = "loaded";
         };
         editRow.appendChild(editBtn);
@@ -972,7 +988,12 @@
       await fetchJson("/jobs/create", {
         method: "POST",
         headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({title, body, reward, created_by: jobReviewer.value || "human", ratings: collectRatings("create")})
+        body: JSON.stringify({
+          title, body, reward,
+          created_by: jobReviewer.value || "human",
+          ratings: collectRatings("create"),
+          auto_reward: !!(jobAutoReward && jobAutoReward.checked)
+        })
       });
       jobTitle.value = "";
       jobBody.value = "";
@@ -996,6 +1017,7 @@
         editRateUnique.value = String(r.uniqueness || "");
         editRateUseful.value = String(r.usefulness || "");
         editRateMoney.value = String(r.money_potential || "");
+        if (jobEditAutoReward) jobEditAutoReward.checked = (String(j.reward_mode||"") === "auto_ratings");
         jobEditStatus.textContent = `loaded (${j.status})`;
       } catch (e) {
         jobEditStatus.textContent = "load error";
@@ -1015,6 +1037,7 @@
             body: (jobEditBody.value || "").trim(),
             reward: parseFloat(jobEditReward.value || "0"),
             ratings: collectRatings("edit"),
+            auto_reward: !!(jobEditAutoReward && jobEditAutoReward.checked),
             by: jobReviewer.value || "human",
             force: false
           })

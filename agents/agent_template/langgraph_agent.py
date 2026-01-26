@@ -122,7 +122,8 @@ def _pick_executor_job(state: AgentState) -> Optional[dict]:
         jobs = [j for j in jobs if (run_tag in str(j.get("title") or "")) or (run_tag in str(j.get("body") or ""))]
     if not jobs:
         return None
-    jobs.sort(key=lambda j: _safe_float(j.get("created_at"), 0.0), reverse=True)
+    # Prefer higher reward (more "valuable" tasks) while still being fairly recent.
+    jobs.sort(key=lambda j: (_safe_float(j.get("reward"), 0.0), _safe_float(j.get("created_at"), 0.0)), reverse=True)
     return jobs[0]
 
 def _pick_redo_job(state: AgentState, failed_job_id: str) -> Optional[dict]:
