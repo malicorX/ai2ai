@@ -840,14 +840,78 @@
       wrap.style.borderTop = "1px solid #eee";
       wrap.style.padding = "8px 0";
 
-      const head = document.createElement("div");
-      head.innerHTML = `<b>[${j.status}]</b> ${j.title} <span style="color:#666;">(reward=${(j.reward||0).toFixed(1)} ai$)</span>`;
-      wrap.appendChild(head);
+      function fmtTs(sec) {
+        try {
+          const s = parseFloat(sec || "0");
+          if (!s) return "";
+          return new Date(s * 1000).toLocaleString();
+        } catch (e) { return ""; }
+      }
+
+      const details = document.createElement("details");
+      details.style.cursor = "pointer";
+      const summary = document.createElement("summary");
+      summary.style.listStyle = "none";
+      summary.style.outline = "none";
+      summary.innerHTML = `<b>[${j.status}]</b> ${j.title} <span style="color:#666;">(reward=${(j.reward||0).toFixed(1)} ai$)</span>`;
+      details.appendChild(summary);
 
       const meta = document.createElement("div");
       meta.style.color = "#666";
+      meta.style.marginTop = "6px";
       meta.textContent = `id=${j.job_id} created_by=${j.created_by} claimed_by=${j.claimed_by||"-"} submitted_by=${j.submitted_by||"-"}`;
-      wrap.appendChild(meta);
+      details.appendChild(meta);
+
+      const meta2 = document.createElement("div");
+      meta2.style.color = "#666";
+      meta2.textContent =
+        `created_at=${fmtTs(j.created_at)} claimed_at=${fmtTs(j.claimed_at)} submitted_at=${fmtTs(j.submitted_at)} reviewed_at=${fmtTs(j.reviewed_at)}`;
+      details.appendChild(meta2);
+
+      const meta3 = document.createElement("div");
+      meta3.style.color = "#666";
+      const ratings = (j.ratings && typeof j.ratings === "object") ? j.ratings : {};
+      const ratingParts = ["complexity","difficulty","external_tools","uniqueness","usefulness","money_potential"]
+        .filter(k => (ratings[k] !== undefined && ratings[k] !== null && String(ratings[k]) !== ""))
+        .map(k => `${k}=${ratings[k]}`);
+      meta3.textContent =
+        `reward_mode=${j.reward_mode||"manual"}`
+        + (ratingParts.length ? (" | ratings: " + ratingParts.join(", ")) : "");
+      details.appendChild(meta3);
+
+      const body = document.createElement("pre");
+      body.style.whiteSpace = "pre-wrap";
+      body.style.background = "#fafafa";
+      body.style.border = "1px solid #eee";
+      body.style.padding = "8px";
+      body.style.borderRadius = "6px";
+      body.style.marginTop = "8px";
+      body.textContent = (j.body || "").trim() ? (j.body || "") : "(no body)";
+      details.appendChild(body);
+
+      if (j.submission) {
+        const sub = document.createElement("pre");
+        sub.style.whiteSpace = "pre-wrap";
+        sub.style.background = "#fff";
+        sub.style.border = "1px solid #eee";
+        sub.style.padding = "8px";
+        sub.style.borderRadius = "6px";
+        sub.style.marginTop = "8px";
+        const s = String(j.submission || "");
+        sub.textContent = `Submission (excerpt):\n` + s.slice(0, 1200) + (s.length > 1200 ? "\n…(truncated)…" : "");
+        details.appendChild(sub);
+      }
+
+      const v = document.createElement("div");
+      v.style.color = "#444";
+      v.style.marginTop = "8px";
+      const auto = (j.auto_verify_ok === true) ? "auto_verify=OK" : ((j.auto_verify_ok === false) ? "auto_verify=FAIL" : "auto_verify=?");
+      const vn = j.auto_verify_name ? ` (${j.auto_verify_name})` : "";
+      const vnote = (j.review_note || j.auto_verify_note || "").trim();
+      v.textContent = `verified_by=${j.reviewed_by||"-"} ${auto}${vn}` + (vnote ? (` | note=${vnote}`) : "");
+      details.appendChild(v);
+
+      wrap.appendChild(details);
 
       // Quick edit helper for open jobs
       if (j.status === "open") {
@@ -871,17 +935,14 @@
           editRateMoney.value = String(r.money_potential || "");
           if (jobEditAutoReward) jobEditAutoReward.checked = (String(j.reward_mode||"") === "auto_ratings");
           jobEditStatus.textContent = "loaded";
+          details.open = true;
         };
         editRow.appendChild(editBtn);
-        wrap.appendChild(editRow);
+        details.appendChild(editRow);
       }
 
       if (j.status === "submitted") {
-        const sub = document.createElement("div");
-        const s = (j.submission || "");
-        sub.textContent = `submission: ${s.slice(0, 200)}${s.length > 200 ? "…" : ""}`;
-        wrap.appendChild(sub);
-
+        // Review controls (approve/reject) remain visible inside details.
         const opts = document.createElement("div");
         opts.style.display = "flex";
         opts.style.gap = "8px";
@@ -949,7 +1010,7 @@
 
         btnRow.appendChild(okBtn);
         btnRow.appendChild(noBtn);
-        wrap.appendChild(btnRow);
+        details.appendChild(btnRow);
       }
 
       return wrap;
