@@ -1690,6 +1690,18 @@ def maybe_langgraph_jobs(world) -> None:
         return
     now = time.time()
     every = float(os.getenv("LANGGRAPH_JOBS_EVERY_SECONDS", "20"))
+    # Executor should tick jobs more frequently (and robustly) so open tasks don't linger.
+    if ROLE == "executor":
+        try:
+            every = float(os.getenv("LANGGRAPH_EXECUTOR_EVERY_SECONDS", "3"))
+        except Exception:
+            every = 3.0
+    # Guard: if clock jumps (or a bad value slips in), reset the gate.
+    try:
+        if float(_last_langgraph_jobs_at or 0.0) > (now + 5.0):
+            _last_langgraph_jobs_at = 0.0
+    except Exception:
+        _last_langgraph_jobs_at = 0.0
     if now - _last_langgraph_jobs_at < every:
         return
     _last_langgraph_jobs_at = now
