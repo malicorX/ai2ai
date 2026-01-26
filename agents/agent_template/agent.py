@@ -1545,7 +1545,16 @@ def _do_job(job: dict) -> str:
                 )
                 user_prompt = f"Job title:\n{title}\n\nJob body:\n{body}\n\nReturn the deliverable now:"
                 deliverable_md = (llm_chat(sys_prompt, user_prompt, max_tokens=900) or "").strip()
-        except Exception:
+        except Exception as e:
+            # Preserve failure details so we can debug stuck/rejected jobs from the UI.
+            try:
+                evidence_kv["deliverable_error"] = str(e)[:240]
+            except Exception:
+                pass
+            try:
+                trace_event("error", "deliverable generation failed", {"job_id": job_id, "err": str(e)[:240]})
+            except Exception:
+                pass
             deliverable_md = ""
 
         content.append("## Deliverable")
