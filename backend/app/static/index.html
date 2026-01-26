@@ -207,7 +207,7 @@
           </select>
           <label style="margin-left:auto; font-size:12px; color:#444; display:flex; align-items:center; gap:6px;">
             <input id="jobRunOnly" type="checkbox" checked />
-            current run only
+            selected run only
           </label>
         </div>
         <div style="display:flex; gap:8px; margin-bottom:8px;">
@@ -1061,8 +1061,10 @@
         const q = st ? `/jobs?limit=80&status=${encodeURIComponent(st)}` : "/jobs?limit=80";
         const data = await fetchJson(q);
         let jobs = data.jobs || [];
-        if (jobRunOnly && jobRunOnly.checked && currentRunId) {
-          const tag = `[run:${currentRunId}]`;
+        // Run filter: prefer the selected run in the Run Controls dropdown; fallback to current run id.
+        const runFilterId = (runsSelect && runsSelect.value) ? String(runsSelect.value) : currentRunId;
+        if (jobRunOnly && jobRunOnly.checked && runFilterId) {
+          const tag = `[run:${runFilterId}]`;
           jobs = jobs.filter(j => (String(j.title||"").includes(tag) || String(j.body||"").includes(tag)));
         }
         jobsList.innerHTML = "";
