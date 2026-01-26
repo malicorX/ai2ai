@@ -2274,6 +2274,16 @@ async def jobs_create(req: JobCreateRequest):
     toks = _tokenize(title + "\n" + body)
     created_by = str(req.created_by or "human")[:80]
     source = "agent" if created_by.startswith("agent_") else ("system" if created_by.startswith("system:") else "human")
+
+    # Safety: ensure agent-created jobs are tagged with the current run id so the executor will pick them up.
+    # (Some jobs created via conversation flow historically missed the run tag and became "invisible" to executor.)
+    try:
+        if source == "agent" and _run_id:
+            tag = f"[run:{_run_id}]"
+            if (tag not in title) and (tag not in body) and ("[run:" not in title.lower()) and ("[run:" not in body.lower()):
+                title = f"{tag} {title}".strip()
+    except Exception:
+        pass
     recent = sorted(list(_jobs.values()), key=lambda j: float(j.created_at or 0.0), reverse=True)[:200]
     for jj in recent:
         try:
