@@ -19,6 +19,11 @@ services:
       - LLM_TEMPERATURE=0.5
       - LLM_TIMEOUT_SECONDS=180
       - LLM_MAX_TOKENS=450
+      # Executor safety defaults (avoid web/LLM stalls for cited JSON tasks unless explicitly enabled)
+      - CITED_JSON_USE_LLM=0
+      - CITED_JSON_TRY_FETCH=1
+      # Mix of marketplaces + APIs that are typically fetch-friendly.
+      - WEB_RESEARCH_SEED_URLS=https://www.freelancer.com/jobs/,https://remoteok.com/api,https://remotive.com/api/remote-jobs,https://www.reddit.com/r/forhire/new.json?limit=25,https://example.com
       - CHAT_PROBABILITY=0.45
       - CHAT_MIN_SECONDS=12
       - ADJACENT_CHAT_BOOST=3.0

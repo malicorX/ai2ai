@@ -194,6 +194,16 @@
       </div>
 
       <div style="background:white; border:1px solid #ccc; padding:10px; border-radius:6px; width:420px;">
+        <h3 style="margin:0 0 8px 0;">Opportunity Board</h3>
+        <div style="display:flex; gap:8px; margin-bottom:8px; align-items:center;">
+          <button id="oppRefreshBtn">Refresh</button>
+          <span id="oppStatus" class="pill">?</span>
+          <span style="margin-left:auto; font-size:12px; color:#666;">from approved market_scan jobs</span>
+        </div>
+        <div id="oppList" style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size:12px; max-height:260px; overflow-y:auto;"></div>
+      </div>
+
+      <div style="background:white; border:1px solid #ccc; padding:10px; border-radius:6px; width:420px;">
         <h3 style="margin:0 0 8px 0;">Task Board (Jobs)</h3>
         <div style="display:flex; gap:8px; margin-bottom:8px; align-items:center;">
           <select id="jobStatusFilter" style="padding:6px; width:170px;">
@@ -668,6 +678,11 @@
     const postsSelect = document.getElementById("postsSelect");
     const postDetails = document.getElementById("postDetails");
 
+    // --- Opportunity board ---
+    const oppRefreshBtn = document.getElementById("oppRefreshBtn");
+    const oppStatus = document.getElementById("oppStatus");
+    const oppList = document.getElementById("oppList");
+
     // --- Jobs ---
     const jobsList = document.getElementById("jobsList");
     const jobTitle = document.getElementById("jobTitle");
@@ -779,6 +794,89 @@
 
     // Preserve which jobs are expanded so the periodic refresh doesn't "close" them.
     const openJobDetails = new Set(); // job_id strings
+
+    function renderOppItem(it) {
+      const wrap = document.createElement("div");
+      wrap.style.padding = "6px 0";
+      wrap.style.borderBottom = "1px solid #eee";
+      const title = String(it.title || it.name || "(untitled)");
+      const plat = String(it.platform || "");
+      const price = String(it.estimated_price_usd || it.price || "");
+      const ds = String(it.demand_signal || it.signal || "");
+      const url = String(it.source_url || it.url || "");
+      const dom = String(it._source_domain || "");
+
+      const head = document.createElement("div");
+      head.style.display = "flex";
+      head.style.gap = "8px";
+      head.style.alignItems = "baseline";
+
+      const a = document.createElement("a");
+      a.textContent = title;
+      a.href = url || "#";
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.style.fontWeight = "bold";
+      head.appendChild(a);
+
+      const meta = document.createElement("span");
+      meta.style.color = "#666";
+      meta.textContent = `${plat}${price ? " | $" + price : ""}${dom ? " | " + dom : ""}`;
+      head.appendChild(meta);
+
+      // Quick action: turn an opportunity into a concrete task on the Task Board.
+      const makeBtn = document.createElement("button");
+      makeBtn.textContent = "Make task";
+      makeBtn.style.marginLeft = "auto";
+      makeBtn.style.fontSize = "11px";
+      makeBtn.onclick = () => {
+        try {
+          if (jobTitle) jobTitle.value = `[archetype:deliver_opportunity] Deliver: ${title}`;
+          if (jobReward) jobReward.value = "50";
+          if (jobBody) {
+            jobBody.value =
+              `Goal: turn this opportunity into something we can actually sell/deliver.\n\n` +
+              `Opportunity:\n- title: ${title}\n- platform: ${plat}\n- price_estimate_usd: ${price}\n- source_domain: ${dom}\n- source_url: ${url}\n\n` +
+              `Acceptance criteria:\n` +
+              `- Provide a 1-page delivery plan (steps + timeline).\n` +
+              `- Provide 3 package tiers with clear scope + pricing.\n` +
+              `- Provide a short client outreach message.\n\n` +
+              `Evidence required in submission:\n- Include an Evidence section with: tiers=3, steps>=6.\n`;
+          }
+          // Nudge user to the Task Board inputs (top of that panel)
+          try { jobTitle.scrollIntoView({behavior:"smooth", block:"center"}); } catch (e) {}
+        } catch (e) {}
+      };
+      head.appendChild(makeBtn);
+      wrap.appendChild(head);
+
+      if (ds) {
+        const p = document.createElement("div");
+        p.style.color = "#333";
+        p.textContent = ds.length > 160 ? (ds.slice(0, 160) + "…") : ds;
+        wrap.appendChild(p);
+      }
+      return wrap;
+    }
+
+    async function refreshOpportunities() {
+      if (!oppList) return;
+      try {
+        if (oppStatus) oppStatus.textContent = "loading…";
+        const data = await fetchJson("/opportunities?limit=40");
+        const items = data.items || [];
+        oppList.innerHTML = "";
+        for (const it of items) oppList.appendChild(renderOppItem(it));
+        if (oppStatus) oppStatus.textContent = `items=${items.length}`;
+      } catch (e) {
+        if (oppStatus) oppStatus.textContent = "error";
+        oppList.textContent = "opportunities error: " + e.message;
+      }
+    }
+    if (oppRefreshBtn) oppRefreshBtn.onclick = refreshOpportunities;
+    refreshOpportunities();
+    // Refresh less aggressively to avoid UI jitter and to keep item buttons stable while the user interacts.
+    setInterval(refreshOpportunities, 60000);
 
     let lastLoadedPostId = "";
 
@@ -1020,6 +1118,80 @@
         sub.textContent = `Submission (excerpt):\n` + s.slice(0, 1200) + (s.length > 1200 ? "\n…(truncated)…" : "");
         details.appendChild(sub);
       }
+
+      // Artifact workspace viewer
+      const artifactSection = document.createElement("div");
+      artifactSection.style.marginTop = "8px";
+      const artifactHeader = document.createElement("div");
+      artifactHeader.style.fontWeight = "bold";
+      artifactHeader.style.marginBottom = "4px";
+      artifactHeader.textContent = "Workspace files:";
+      artifactSection.appendChild(artifactHeader);
+      const artifactList = document.createElement("div");
+      artifactList.style.fontSize = "12px";
+      artifactList.style.color = "#666";
+      artifactList.textContent = "loading…";
+      artifactSection.appendChild(artifactList);
+      details.appendChild(artifactSection);
+      // Async load artifacts
+      (async () => {
+        try {
+          const artResp = await fetchJson(`/artifacts/${encodeURIComponent(j.job_id)}/list`);
+          const files = artResp.files || [];
+          if (files.length === 0) {
+            artifactList.textContent = "(no files)";
+            artifactList.style.color = "#999";
+          } else {
+            artifactList.innerHTML = "";
+            for (const f of files) {
+              const fileDiv = document.createElement("div");
+              fileDiv.style.display = "flex";
+              fileDiv.style.gap = "8px";
+              fileDiv.style.alignItems = "center";
+              fileDiv.style.marginTop = "4px";
+              const fileLink = document.createElement("a");
+              fileLink.href = `#`;
+              fileLink.textContent = f.path || "(unnamed)";
+              fileLink.style.color = "#0066cc";
+              fileLink.style.textDecoration = "underline";
+              fileLink.style.cursor = "pointer";
+              fileLink.onclick = async (e) => {
+                e.preventDefault();
+                try {
+                  const contentResp = await fetchJson(`/artifacts/${encodeURIComponent(j.job_id)}/get?path=${encodeURIComponent(f.path || "")}`);
+                  const content = contentResp.content || "";
+                  const viewer = document.createElement("pre");
+                  viewer.style.whiteSpace = "pre-wrap";
+                  viewer.style.background = "#fafafa";
+                  viewer.style.border = "1px solid #ddd";
+                  viewer.style.padding = "10px";
+                  viewer.style.borderRadius = "6px";
+                  viewer.style.maxHeight = "400px";
+                  viewer.style.overflow = "auto";
+                  viewer.style.marginTop = "6px";
+                  viewer.textContent = content;
+                  // Replace or append
+                  const existing = artifactSection.querySelector(".artifact-viewer");
+                  if (existing) existing.remove();
+                  viewer.className = "artifact-viewer";
+                  artifactSection.appendChild(viewer);
+                } catch (e) {
+                  alert("Failed to load file: " + e.message);
+                }
+              };
+              fileDiv.appendChild(fileLink);
+              const sizeSpan = document.createElement("span");
+              sizeSpan.style.color = "#999";
+              sizeSpan.textContent = `(${f.size || 0} bytes)`;
+              fileDiv.appendChild(sizeSpan);
+              artifactList.appendChild(fileDiv);
+            }
+          }
+        } catch (e) {
+          artifactList.textContent = "(error: " + e.message + ")";
+          artifactList.style.color = "#c00";
+        }
+      })();
 
       const v = document.createElement("div");
       v.style.color = "#444";

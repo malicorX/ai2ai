@@ -15,7 +15,9 @@ services:
       - EMBEDDINGS_TIMEOUT_SECONDS=30
       # Tool Gateway (web access). Use allowlist in production.
       - WEB_FETCH_ENABLED=1
-      # - WEB_FETCH_ALLOWLIST=wikipedia.org,open-meteo.com
+      # Allowlist for agent web_fetch (tighten as needed).
+      # Add a couple of fetch-friendly sources/APIs so market scans can still be cited even if some sites 403.
+      - WEB_FETCH_ALLOWLIST=example.com,fiverr.com,upwork.com,freelancer.com,remoteok.com,remotive.com,reddit.com
       - WEB_FETCH_TIMEOUT_SECONDS=15
       - WEB_FETCH_MAX_BYTES=200000
     volumes:

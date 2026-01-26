@@ -1184,6 +1184,10 @@ def _do_job(job: dict) -> str:
     title = (job.get("title") or "").strip()
     body = (job.get("body") or "").strip()
     job_id = job.get("job_id")
+    try:
+        trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "start", "title": title[:120]})
+    except Exception:
+        pass
     persona = (PERSONALITY or "").strip()
     bal = _cached_balance
 
@@ -1262,12 +1266,16 @@ def _do_job(job: dict) -> str:
     def _extract_tag(tag: str) -> str:
         try:
             hay = f"{title}\n{body}"
-            m = re.search(r"\\[" + re.escape(tag) + r"\\s*:\\s*([^\\]]+)\\]", hay, flags=re.IGNORECASE)
+            m = re.search(r"\[" + re.escape(tag) + r"\s*:\s*([^\]]+)\]", hay, flags=re.IGNORECASE)
             return (m.group(1).strip() if m else "")
         except Exception:
             return ""
 
     verifier_tag = _extract_tag("verifier").lower()
+    try:
+        trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "tags_parsed", "verifier": verifier_tag})
+    except Exception:
+        pass
     json_min_items = 0
     md_min_rows = 0
     try:
@@ -1405,6 +1413,10 @@ def _do_job(job: dict) -> str:
         evidence_kv = {}
         try:
             if verifier_tag in ("md_table", "markdown_table"):
+                try:
+                    trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "enter_md_table"})
+                except Exception:
+                    pass
                 cols = md_required_cols or ["Problem", "Change", "Why it helps", "How to verify"]
                 sys_prompt = (
                     "You are completing a task. Output ONLY a markdown table.\n"
@@ -1426,6 +1438,10 @@ def _do_job(job: dict) -> str:
                 row_count = max(0, len(rows) - 2)
                 evidence_kv["table_rows"] = row_count
             elif verifier_tag in ("json_list",):
+                try:
+                    trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "enter_json_list"})
+                except Exception:
+                    pass
                 req = json_required_keys or ["title", "category", "why_we_can_do_it", "first_step", "verification_plan"]
                 sys_prompt = (
                     "You are completing a task. Output ONLY a JSON array (no markdown, no backticks).\n"
@@ -1444,7 +1460,7 @@ def _do_job(job: dict) -> str:
                     try_fetch = os.getenv("CITED_JSON_TRY_FETCH", "0").strip() == "1"
                     seed_urls_raw = os.getenv(
                         "WEB_RESEARCH_SEED_URLS",
-                        "https://www.fiverr.com/categories,https://www.upwork.com/freelance-jobs/,https://www.freelancer.com/jobs/",
+                        "https://www.freelancer.com/jobs/,https://remoteok.com/api,https://remotive.com/api/remote-jobs,https://www.reddit.com/r/forhire/new.json?limit=25,https://example.com",
                     )
                     seed_urls = [u.strip() for u in seed_urls_raw.split(",") if u.strip()]
                     # Always include example.com as a last-resort fetchable page (for quotes) so the task cannot deadlock.
@@ -1457,12 +1473,90 @@ def _do_job(job: dict) -> str:
                                 resp = web_fetch(u, timeout_seconds=15.0, max_bytes=180000)
                                 if resp.get("ok"):
                                     txt = str(resp.get("text") or "")
+                                    ct = str(resp.get("content_type") or "")
+
+                                    def _smart_excerpt(url: str, content_type: str, text: str) -> str:
+                                        """
+                                        Build a short excerpt that is likely to contain a market signal (budget/salary/price),
+                                        instead of just the top of the HTML/JSON payload.
+                                        """
+                                        u2 = str(url or "")
+                                        ct2 = str(content_type or "")
+                                        t2 = str(text or "")
+                                        if not t2:
+                                            return ""
+                                        # JSON APIs: try to surface salary/budget fields or any "$" window.
+                                        if "json" in ct2.lower() or u2.lower().endswith(".json") or "/api" in u2.lower():
+                                            try:
+                                                obj = json.loads(t2)
+                                            except Exception:
+                                                obj = None
+                                            # RemoteOK: list with a first metadata element then jobs.
+                                            if isinstance(obj, list):
+                                                # Prefer a snippet around the first '$' if present.
+                                                s = t2
+                                                j = s.find("$")
+                                                if j >= 0:
+                                                    return s[max(0, j - 400) : min(len(s), j + 900)]
+                                                # Fallback: include a few job titles if present.
+                                                parts = []
+                                                for it in obj[:6]:
+                                                    if isinstance(it, dict):
+                                                        ttl = str(it.get("position") or it.get("title") or it.get("company") or "").strip()
+                                                        sal = str(it.get("salary") or it.get("salary_min") or it.get("salary_max") or "").strip()
+                                                        if ttl:
+                                                            parts.append(f"title={ttl} salary={sal}".strip())
+                                                    if len(parts) >= 4:
+                                                        break
+                                                return " | ".join(parts)[:1800]
+                                            # Remotive: dict with jobs list
+                                            if isinstance(obj, dict):
+                                                # Prefer a snippet around the first '$' if present.
+                                                s = t2
+                                                j = s.find("$")
+                                                if j >= 0:
+                                                    return s[max(0, j - 400) : min(len(s), j + 900)]
+                                                jobs = obj.get("jobs")
+                                                if isinstance(jobs, list):
+                                                    parts = []
+                                                    for it in jobs[:8]:
+                                                        if not isinstance(it, dict):
+                                                            continue
+                                                        ttl = str(it.get("title") or "").strip()
+                                                        sal = str(it.get("salary") or it.get("salary_range") or it.get("salary_min") or it.get("salary_max") or "").strip()
+                                                        cat = str(it.get("category") or "").strip()
+                                                        if ttl:
+                                                            parts.append(f"title={ttl} category={cat} salary={sal}".strip())
+                                                        if len(parts) >= 4:
+                                                            break
+                                                    if parts:
+                                                        return " | ".join(parts)[:1800]
+                                            # Fallback: just return a mid-window around "salary/budget" token if present.
+                                            low = t2.lower()
+                                            for needle in ("salary", "budget", "hourly", "rate", "usd", "price"):
+                                                j = low.find(needle)
+                                                if j >= 0:
+                                                    return t2[max(0, j - 400) : min(len(t2), j + 900)]
+                                            return t2[:1800]
+
+                                        # HTML/text: find first market-signal token somewhere in the page.
+                                        low = t2.lower()
+                                        for needle in ("budget", "hourly", "fixed", "rate", "$", "usd", "salary", "pricing", "payment"):
+                                            j = low.find(needle)
+                                            if j >= 0:
+                                                return t2[max(0, j - 700) : min(len(t2), j + 1100)]
+                                        # Avoid returning only the HTML head if possible.
+                                        if low.startswith("<!doctype") and len(t2) > 2600:
+                                            return t2[1200:3000]
+                                        return t2[:1800]
+
+                                    excerpt = _smart_excerpt(str(resp.get("final_url") or u), ct, txt)
                                     sources.append(
                                         {
                                             "url": str(resp.get("final_url") or u)[:1000],
                                             "sha1_16": str(resp.get("sha1_16") or "")[:32],
                                             "content_type": str(resp.get("content_type") or "")[:120],
-                                            "excerpt": txt[:1800],
+                                            "excerpt": (excerpt or txt[:1800])[:1800],
                                         }
                                     )
                                 if len(sources) >= 3:
@@ -1494,9 +1588,51 @@ def _do_job(job: dict) -> str:
                 req_l = [k.lower() for k in req]
 
                 def _pick_quote(ex: str) -> str:
-                    q = (ex or "").strip().replace("\n", " ")
-                    q = re.sub(r"\s+", " ", q)
-                    return q[:240]
+                    """
+                    Pick a short, relevant verbatim snippet from an excerpt.
+                    Heuristic: prefer fragments mentioning pricing/rates/budgets/salary/demand.
+                    """
+                    q = (ex or "").strip()
+                    if not q:
+                        return ""
+                    # collapse whitespace for stable substring windows
+                    q1 = q.replace("\r", "\n")
+                    q1 = re.sub(r"\s+", " ", q1).strip()
+                    if not q1:
+                        return ""
+                    # Prefer a window around likely "market signal" tokens.
+                    needles = [
+                        "$",
+                        "usd",
+                        "budget",
+                        "hour",
+                        "hourly",
+                        "fixed",
+                        "rate",
+                        "salary",
+                        "payment",
+                        "per hour",
+                        "per-day",
+                        "price",
+                        "pricing",
+                        "jobs",
+                        "hiring",
+                    ]
+                    low = q1.lower()
+                    hit = -1
+                    for n in needles:
+                        j = low.find(n)
+                        if j >= 0:
+                            hit = j
+                            break
+                    if hit >= 0:
+                        start = max(0, hit - 80)
+                        end = min(len(q1), hit + 180)
+                        return q1[start:end].strip()[:240]
+                    # Avoid useless HTML boilerplate if possible.
+                    if q1.lower().startswith("<!doctype") and len(q1) > 260:
+                        return q1[120:360].strip()[:240]
+                    return q1[:240]
 
                 # A small "base library" of plausible gig ideas; we rotate to fill min_items.
                 base_items = [
@@ -1554,6 +1690,10 @@ def _do_job(job: dict) -> str:
                     pass
                 deliverable_md = "```json\n" + json.dumps(obj_list, ensure_ascii=False, indent=2) + "\n```"
             else:
+                try:
+                    trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "enter_generic_llm"})
+                except Exception:
+                    pass
                 sys_prompt = (
                     "You are completing a task. Output ONLY the deliverable in markdown.\n"
                     "Rules:\n"
@@ -1604,19 +1744,42 @@ def _do_job(job: dict) -> str:
     content.append("- Any constraints (no web, specific stack, etc.)?")
 
     _append_file(out_path, "\n".join(content))
+    try:
+        trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "file_written", "path": out_path})
+    except Exception:
+        pass
 
     # Submission should be human-reviewable from the backend UI/API (don't just point to a container-local file path).
     # Embed the deliverable markdown (bounded by backend's 20k cap).
+    try:
+        trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "file_read_start", "path": out_path})
+    except Exception:
+        pass
     md = _read_file(out_path, max_bytes=18000).strip()
+    try:
+        trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "file_read_done", "chars": len(md or "")})
+    except Exception:
+        pass
     if not md:
         md = "(failed to read deliverable file content)"
+
+    # Upload the full deliverable (or best-effort) to the backend artifact store so it is shared/persistent.
+    try:
+        artifact_put(str(job_id or ""), "deliverable.md", _read_file(out_path, max_bytes=250000))
+    except Exception:
+        pass
     submission = (
         f"Deliverable path: `{out_path}`\n\n"
         f"## Deliverable (markdown)\n\n"
         f"```markdown\n{md}\n```\n"
     )
     # Ensure it stays within backend cap (main.py truncates at 20k, but keep some headroom)
-    return submission[:19000]
+    out = submission[:19000]
+    try:
+        trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "done", "submission_chars": len(out)})
+    except Exception:
+        pass
+    return out
 
 
 def maybe_work_jobs() -> None:
@@ -1747,6 +1910,8 @@ def maybe_langgraph_jobs(world) -> None:
         "memory_retrieve": lambda q, k=8: memory_retrieve(q, k=int(k)),
         "memory_append": _lg_memory_append,
         "web_fetch": lambda url: web_fetch(str(url or "")),
+        "opportunities_list": lambda limit=40: opportunities_list(int(limit)),
+        "artifact_put": lambda job_id, path, content, content_type="text/plain": artifact_put(job_id, path, content, content_type),
     }
 
     # State is intentionally compact for now; we'll expand this into a full world-model over time.
@@ -1888,6 +2053,27 @@ def jobs_create(title: str, body: str, reward: float) -> str:
         data = r.json()
     except Exception:
         return ""
+    try:
+        if not bool(data.get("ok")):
+            # Helpful for debugging backend dedupe/validation rejections (otherwise LangGraph only sees "no job_id").
+            try:
+                trace_event(
+                    "status",
+                    "jobs_create failed",
+                    {
+                        "title": title[:160],
+                        "error": str(data.get("error") or "")[:120],
+                        "reason": str(data.get("reason") or "")[:200],
+                    },
+                )
+            except Exception:
+                pass
+            return ""
+        job = data.get("job") or {}
+        jid = str(job.get("job_id") or "").strip()
+        return jid
+    except Exception:
+        return ""
 
 
 def web_fetch(url: str, timeout_seconds: float = 15.0, max_bytes: int = 200000) -> dict:
@@ -1907,6 +2093,42 @@ def web_fetch(url: str, timeout_seconds: float = 15.0, max_bytes: int = 200000) 
         return r.json() if r is not None else {"error": "no_response"}
     except Exception as e:
         return {"error": "web_fetch_failed", "detail": str(e)[:200]}
+
+
+def artifact_put(job_id: str, path: str, content: str, content_type: str = "text/plain") -> dict:
+    """
+    Shared workspace primitive backed by the backend API.
+    Stores a text file under /app/data/artifacts/<job_id>/<path>.
+    """
+    try:
+        payload = {
+            "job_id": str(job_id or "")[:80],
+            "path": str(path or "")[:200],
+            "content": str(content or "")[:250000],
+            "content_type": str(content_type or "")[:80],
+        }
+        r = requests.post(f"{WORLD_API}/artifacts/put", json=payload, timeout=15)
+        return r.json() if r is not None else {"error": "no_response"}
+    except Exception as e:
+        return {"error": "artifact_put_failed", "detail": str(e)[:200]}
+
+
+def opportunities_list(limit: int = 40) -> list[dict]:
+    """
+    Fetch aggregated opportunities from the backend Opportunity Board endpoint.
+    """
+    try:
+        lim = int(limit or 0)
+    except Exception:
+        lim = 40
+    lim = max(1, min(200, lim))
+    try:
+        r = requests.get(f"{WORLD_API}/opportunities?limit={lim}", timeout=10)
+        data = r.json() if r is not None else {}
+        items = data.get("items") or []
+        return items if isinstance(items, list) else []
+    except Exception:
+        return []
 
 
 def _extract_json_array(raw: str) -> list:

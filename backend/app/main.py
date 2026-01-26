@@ -44,6 +44,11 @@ MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 MEMORY_EMBED_DIR = DATA_DIR / "memory_embeddings"
 MEMORY_EMBED_DIR.mkdir(parents=True, exist_ok=True)
 
+# Persistent libraries / workspaces (NOT rotated on admin/new_run)
+OPPORTUNITIES_PATH = DATA_DIR / "opportunities.jsonl"
+ARTIFACTS_DIR = (DATA_DIR / "artifacts").resolve()
+ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+
 STARTING_AIDOLLARS = float(os.getenv("STARTING_AIDOLLARS", "100"))
 TREASURY_ID = os.getenv("TREASURY_ID", "treasury")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
@@ -721,6 +726,35 @@ def _auto_verify_task(job: Job, submission: str) -> AutoVerifyOutcome:
                     break
         if cite_issues:
             return AutoVerifyOutcome(True, False, f"auto_verify failed: citations malformed: {cite_issues[:5]}", "json_list", {"citation_issues": cite_issues[:8], "required_keys": req_keys})
+
+        # If this is a market scan (or requires citation fields), ensure we have at least one non-example citation domain.
+        # This prevents "all example.com" submissions from passing as "cited research".
+        try:
+            is_market_scan = ("archetype:market_scan" in (job.title or "").lower()) or ("archetype:market_scan" in (job.body or "").lower()) or ("market scan" in (job.title or "").lower())
+            wants_citations = bool(cite_url_keys or cite_quote_keys)
+            if is_market_scan and wants_citations and cite_url_keys:
+                domains: set[str] = set()
+                for it in obj:
+                    if not isinstance(it, dict):
+                        continue
+                    for k in cite_url_keys:
+                        v = it.get(k)
+                        if isinstance(v, str) and _is_urlish(v):
+                            host = urllib.parse.urlparse(v).hostname or ""
+                            host = host.lower().strip()
+                            if host:
+                                domains.add(host)
+                non_example = sorted([d for d in domains if d not in ("example.com", "www.example.com")])
+                if not non_example:
+                    return AutoVerifyOutcome(
+                        True,
+                        False,
+                        "auto_verify failed: citations must include at least one non-example domain for market_scan",
+                        "json_list",
+                        {"domains": sorted(domains)[:20], "required_keys": req_keys},
+                    )
+        except Exception:
+            pass
 
         return AutoVerifyOutcome(True, True, f"auto_verify ok: json list parsed (items={len(obj)})", "json_list", {"item_count": len(obj), "required_keys": req_keys})
 
@@ -1487,6 +1521,32 @@ class BoardReply:
     created_at: float
 
 
+@dataclass
+class Opportunity:
+    """
+    Persistent, cross-run representation of a paid gig/service idea discovered by market_scan.
+    Stored as JSONL in OPPORTUNITIES_PATH (append-only; we upsert in-memory and rewrite file best-effort).
+    """
+
+    opp_id: str
+    fingerprint: str
+    title: str
+    platform: str
+    demand_signal: str
+    estimated_price_usd: str
+    why_fit: str
+    first_action: str
+    source_url: str
+    source_quote: str
+    source_domain: str
+    status: str  # new | selected | delivering | done | ignored
+    tags: list[str]
+    notes: str
+    created_at: float
+    last_seen_at: float
+    run_ids: list[str]
+    job_ids: list[str]
+
 class CreatePostRequest(BaseModel):
     title: str
     body: str
@@ -1504,6 +1564,150 @@ class CreateReplyRequest(BaseModel):
 
 _board_posts: Dict[str, BoardPost] = {}
 _board_replies: Dict[str, List[BoardReply]] = {}
+
+# Persistent Opportunity Library (cross-run)
+_opportunities: Dict[str, Opportunity] = {}  # fingerprint -> Opportunity
+
+
+def _norm_text(x: Any) -> str:
+    try:
+        return str(x or "").strip()
+    except Exception:
+        return ""
+
+
+def _opportunity_fingerprint(title: str, platform: str, source_url: str) -> str:
+    s = f"{_norm_text(title).lower()}|{_norm_text(platform).lower()}|{_norm_text(source_url)}"
+    try:
+        return hashlib.sha1(s.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    except Exception:
+        return str(uuid.uuid4())[:16]
+
+
+def _url_host(url: str) -> str:
+    try:
+        return (urllib.parse.urlparse(str(url or "")).hostname or "").lower().strip()
+    except Exception:
+        return ""
+
+
+def _save_opportunities() -> None:
+    """
+    Rewrite opportunities.jsonl from in-memory state (best-effort).
+    This is infrequent and the file is expected to remain small (< few thousand lines).
+    """
+    try:
+        rows = [asdict(o) for o in _opportunities.values()]
+        rows.sort(key=lambda r: float(r.get("last_seen_at") or r.get("created_at") or 0.0), reverse=True)
+        tmp = OPPORTUNITIES_PATH.with_suffix(".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        tmp.replace(OPPORTUNITIES_PATH)
+    except Exception:
+        pass
+
+
+def _load_opportunities() -> None:
+    global _opportunities
+    _opportunities = {}
+    if not OPPORTUNITIES_PATH.exists():
+        return
+    try:
+        for ln in OPPORTUNITIES_PATH.read_text(encoding="utf-8", errors="replace").splitlines():
+            ln = (ln or "").strip()
+            if not ln:
+                continue
+            try:
+                r = json.loads(ln)
+                if not isinstance(r, dict):
+                    continue
+                fp = str(r.get("fingerprint") or "").strip()
+                if not fp:
+                    continue
+                _opportunities[fp] = Opportunity(
+                    opp_id=str(r.get("opp_id") or "").strip() or str(uuid.uuid4()),
+                    fingerprint=fp,
+                    title=_norm_text(r.get("title")),
+                    platform=_norm_text(r.get("platform")),
+                    demand_signal=_norm_text(r.get("demand_signal")),
+                    estimated_price_usd=_norm_text(r.get("estimated_price_usd")),
+                    why_fit=_norm_text(r.get("why_fit")),
+                    first_action=_norm_text(r.get("first_action")),
+                    source_url=_norm_text(r.get("source_url")),
+                    source_quote=_norm_text(r.get("source_quote")),
+                    source_domain=_norm_text(r.get("source_domain")),
+                    status=_norm_text(r.get("status")) or "new",
+                    tags=list(r.get("tags") or []) if isinstance(r.get("tags"), list) else [],
+                    notes=_norm_text(r.get("notes")),
+                    created_at=float(r.get("created_at") or time.time()),
+                    last_seen_at=float(r.get("last_seen_at") or r.get("created_at") or time.time()),
+                    run_ids=list(r.get("run_ids") or []) if isinstance(r.get("run_ids"), list) else [],
+                    job_ids=list(r.get("job_ids") or []) if isinstance(r.get("job_ids"), list) else [],
+                )
+            except Exception:
+                continue
+    except Exception:
+        return
+
+
+def _upsert_opportunity(item: dict, run_id: str, job_id: str) -> Optional[Opportunity]:
+    if not isinstance(item, dict):
+        return None
+    title = _norm_text(item.get("title") or item.get("name"))
+    if not title:
+        return None
+    platform = _norm_text(item.get("platform"))
+    demand_signal = _norm_text(item.get("demand_signal"))
+    estimated_price_usd = _norm_text(item.get("estimated_price_usd") or item.get("price"))
+    why_fit = _norm_text(item.get("why_fit"))
+    first_action = _norm_text(item.get("first_action"))
+    source_url = _norm_text(item.get("source_url") or item.get("url"))
+    source_quote = _norm_text(item.get("source_quote"))
+    source_domain = _url_host(source_url)
+
+    fp = _opportunity_fingerprint(title, platform, source_url)
+    now = time.time()
+    existing = _opportunities.get(fp)
+    if existing:
+        existing.title = title or existing.title
+        existing.platform = platform or existing.platform
+        existing.demand_signal = demand_signal or existing.demand_signal
+        existing.estimated_price_usd = estimated_price_usd or existing.estimated_price_usd
+        existing.why_fit = why_fit or existing.why_fit
+        existing.first_action = first_action or existing.first_action
+        existing.source_url = source_url or existing.source_url
+        existing.source_quote = source_quote or existing.source_quote
+        existing.source_domain = source_domain or existing.source_domain
+        existing.last_seen_at = now
+        if run_id and run_id not in existing.run_ids:
+            existing.run_ids.append(run_id)
+        if job_id and job_id not in existing.job_ids:
+            existing.job_ids.append(job_id)
+        return existing
+
+    opp = Opportunity(
+        opp_id=str(uuid.uuid4()),
+        fingerprint=fp,
+        title=title,
+        platform=platform,
+        demand_signal=demand_signal,
+        estimated_price_usd=estimated_price_usd,
+        why_fit=why_fit,
+        first_action=first_action,
+        source_url=source_url,
+        source_quote=source_quote,
+        source_domain=source_domain,
+        status="new",
+        tags=[],
+        notes="",
+        created_at=now,
+        last_seen_at=now,
+        run_ids=[run_id] if run_id else [],
+        job_ids=[job_id] if job_id else [],
+    )
+    _opportunities[fp] = opp
+    return opp
 
 @dataclass
 class ChatMessage:
@@ -2202,7 +2406,7 @@ class Job:
     source: str = "unknown"
 
 
-JobEventType = Literal["create", "claim", "submit", "verify", "review", "update", "cancel"]
+JobEventType = Literal["create", "claim", "submit", "verify", "review", "update", "cancel", "unclaim"]
 
 
 @dataclass
@@ -2373,6 +2577,70 @@ def _apply_job_event(ev: JobEvent) -> None:
         job.status = "cancelled"
         return
 
+    if t == "unclaim" and job.status == "claimed":
+        # Safety valve: requeue a stale claim (e.g., executor crashed mid-job).
+        job.status = "open"
+        job.claimed_by = ""
+        job.claimed_at = 0.0
+        return
+
+
+def _requeue_stale_claims(now: Optional[float] = None) -> int:
+    """
+    Requeue jobs that have been stuck in 'claimed' for too long.
+    This prevents a single crashed/stalled executor from blocking progress forever.
+    """
+    now = float(now or time.time())
+    stale_seconds = float(os.getenv("CLAIM_STALE_SECONDS", "1800"))  # 30 minutes
+    if stale_seconds <= 0:
+        return 0
+
+    requeued = 0
+    for j in list(_jobs.values()):
+        try:
+            if j.status != "claimed":
+                continue
+            if not j.claimed_at:
+                continue
+            age = now - float(j.claimed_at)
+            if age <= stale_seconds:
+                continue
+            _append_job_event(
+                "unclaim",
+                j.job_id,
+                {
+                    "reason": "stale_claim",
+                    "stale_seconds": age,
+                    "prev_claimed_by": j.claimed_by,
+                    "prev_claimed_at": j.claimed_at,
+                },
+            )
+            requeued += 1
+        except Exception:
+            continue
+    return requeued
+
+
+async def _housekeeping_loop() -> None:
+    """Background maintenance tasks."""
+    every = float(os.getenv("HOUSEKEEPING_EVERY_SECONDS", "10"))
+    every = max(2.0, min(every, 120.0))
+    await asyncio.sleep(2.0)
+    while True:
+        try:
+            _requeue_stale_claims()
+        except Exception:
+            pass
+        await asyncio.sleep(every)
+
+
+@app.on_event("startup")
+async def _startup_housekeeping() -> None:
+    try:
+        asyncio.create_task(_housekeeping_loop())
+    except Exception:
+        pass
+
 
 def _load_jobs() -> None:
     global _job_events, _jobs
@@ -2410,6 +2678,9 @@ def _append_job_event(event_type: JobEventType, job_id: str, data: dict) -> JobE
 
 _load_jobs()
 
+# Load Opportunity Library (cross-run)
+_load_opportunities()
+
 
 @app.get("/jobs")
 def jobs_list(status: Optional[JobStatus] = None, limit: int = 50):
@@ -2427,6 +2698,242 @@ def jobs_get(job_id: str):
     if not j:
         return {"error": "not_found"}
     return {"job": asdict(j)}
+
+
+@app.get("/opportunities")
+def opportunities(limit: int = 80):
+    """
+    Opportunity Board:
+    - Source of truth is the persistent Opportunity Library (opportunities.jsonl), which survives new runs.
+    - If library is empty, fall back to aggregating from approved market_scan jobs in current run.
+    """
+    limit = max(1, min(int(limit or 0), 500))
+
+    def _host(url: str) -> str:
+        try:
+            return (urllib.parse.urlparse(str(url or "")).hostname or "").lower().strip()
+        except Exception:
+            return ""
+
+    # Prefer library (cross-run)
+    if _opportunities:
+        rows = [asdict(o) for o in _opportunities.values()]
+        # Default: hide ignored unless explicitly requested by UI later (keeps board clean).
+        rows = [r for r in rows if str(r.get("status") or "new") != "ignored"]
+        rows.sort(key=lambda r: float(r.get("last_seen_at") or r.get("created_at") or 0.0), reverse=True)
+
+        # Adapt to UI expectations (keep a couple of legacy helper keys)
+        items: list[dict] = []
+        for r in rows[: limit * 2]:
+            rec = dict(r)
+            try:
+                s = str(rec.get("estimated_price_usd") or "").strip()
+                nums = [float(x) for x in re.findall(r"(\d+(?:\.\d+)?)", s)]
+                rec["_price_max"] = (max(nums) if nums else 0.0)
+            except Exception:
+                rec["_price_max"] = 0.0
+            rec["_source_domain"] = _host(rec.get("source_url") or "")
+            items.append(rec)
+            if len(items) >= limit:
+                break
+
+        # Prefer non-example domains first.
+        def _is_example(d: str) -> bool:
+            return (d or "") in ("example.com", "www.example.com", "")
+
+        items.sort(
+            key=lambda r: (
+                _is_example(str(r.get("_source_domain") or "")),
+                -float(r.get("_price_max") or 0.0),
+                -float(r.get("last_seen_at") or r.get("created_at") or 0.0),
+            )
+        )
+        domains = sorted({str(r.get("_source_domain") or "") for r in items if str(r.get("_source_domain") or "")})
+        return {"items": items[:limit], "count": len(items[:limit]), "domains": domains[:50]}
+
+    # Fallback: aggregate from current run jobs (legacy behavior)
+    items: list[dict] = []
+    jobs = sorted(list(_jobs.values()), key=lambda j: float(j.reviewed_at or j.submitted_at or j.created_at or 0.0), reverse=True)
+    # scan a bit more than requested to account for filtering
+    for j in jobs[: min(len(jobs), limit * 6)]:
+        try:
+            if str(j.status) != "approved":
+                continue
+            txt = (str(j.title or "") + "\n" + str(j.body or "")).lower()
+            if "archetype:market_scan" not in txt:
+                continue
+            if "[verifier:json_list]" not in txt and str(j.auto_verify_name or "").lower() != "json_list":
+                continue
+            sub = str(j.submission or "")
+            code = _extract_code_fence(sub, "json") or _extract_code_fence(sub, "javascript")
+            if not code:
+                continue
+            obj = json.loads(code)
+            if not isinstance(obj, list):
+                continue
+            for it in obj:
+                if not isinstance(it, dict):
+                    continue
+                rec = dict(it)
+                # best-effort numeric price for sorting (use max of a range if present)
+                try:
+                    s = str(rec.get("estimated_price_usd") or rec.get("price") or "").strip()
+                    nums = [float(x) for x in re.findall(r"(\d+(?:\.\d+)?)", s)]
+                    rec["_price_max"] = (max(nums) if nums else 0.0)
+                except Exception:
+                    rec["_price_max"] = 0.0
+                rec["_job_id"] = j.job_id
+                rec["_job_title"] = j.title
+                rec["_approved_at"] = float(j.reviewed_at or j.submitted_at or 0.0)
+                rec["_source_domain"] = _host(rec.get("source_url") or rec.get("url") or "")
+                items.append(rec)
+                if len(items) >= limit:
+                    break
+            if len(items) >= limit:
+                break
+        except Exception:
+            continue
+
+    # Prefer non-example domains first.
+    def _is_example(d: str) -> bool:
+        return (d or "") in ("example.com", "www.example.com", "")
+
+    items.sort(
+        key=lambda r: (
+            _is_example(str(r.get("_source_domain") or "")),
+            -float(r.get("_price_max") or 0.0),
+            -float(r.get("_approved_at") or 0.0),
+        )
+    )
+    domains = sorted({str(r.get("_source_domain") or "") for r in items if str(r.get("_source_domain") or "")})
+    return {"items": items[:limit], "count": len(items[:limit]), "domains": domains[:50]}
+
+
+class OpportunityUpdateRequest(BaseModel):
+    fingerprint: str = ""
+    status: Optional[str] = None
+    notes: Optional[str] = None
+    tags: Optional[list[str]] = None
+
+
+@app.get("/opportunities/library")
+def opportunities_library(status: Optional[str] = None, q: Optional[str] = None, limit: int = 200):
+    """
+    Full Opportunity Library (cross-run).
+    """
+    limit = max(1, min(int(limit or 0), 500))
+    rows = [asdict(o) for o in _opportunities.values()]
+    if status:
+        rows = [r for r in rows if str(r.get("status") or "").strip() == status]
+    if q:
+        qq = str(q or "").lower().strip()
+        if qq:
+            rows = [r for r in rows if qq in str(r.get("title") or "").lower() or qq in str(r.get("platform") or "").lower()]
+    rows.sort(key=lambda r: float(r.get("last_seen_at") or r.get("created_at") or 0.0), reverse=True)
+    return {"items": rows[:limit], "count": len(rows[:limit])}
+
+
+@app.post("/opportunities/update")
+def opportunities_update(req: OpportunityUpdateRequest, request: Request):
+    """
+    Update an opportunity (admin-only): status/notes/tags.
+    """
+    if not _require_admin(request):
+        return {"error": "unauthorized"}
+    fp = str(req.fingerprint or "").strip()
+    if not fp:
+        return {"error": "bad_request"}
+    o = _opportunities.get(fp)
+    if not o:
+        return {"error": "not_found"}
+    if req.status is not None:
+        st = str(req.status or "").strip() or "new"
+        if st not in ("new", "selected", "delivering", "done", "ignored"):
+            return {"error": "bad_status"}
+        o.status = st
+    if req.notes is not None:
+        o.notes = str(req.notes or "")[:2000]
+    if req.tags is not None and isinstance(req.tags, list):
+        o.tags = [str(t or "").strip()[:40] for t in req.tags if str(t or "").strip()][:20]
+    o.last_seen_at = time.time()
+    _save_opportunities()
+    return {"ok": True, "item": asdict(o)}
+
+
+class ArtifactPutRequest(BaseModel):
+    job_id: str
+    path: str
+    content: str
+    content_type: str = "text/plain"
+
+
+@app.post("/artifacts/put")
+def artifacts_put(req: ArtifactPutRequest):
+    """
+    Shared workspace primitive (agent-friendly):
+    Store a text artifact under DATA_DIR/artifacts/<job_id>/<path>.
+    """
+    job_id = str(req.job_id or "").strip()
+    rel = str(req.path or "").strip().lstrip("/").replace("\\", "/")
+    if not job_id or not rel:
+        return {"error": "bad_request"}
+    if len(rel) > 200 or ".." in rel:
+        return {"error": "bad_path"}
+    content = str(req.content or "")
+    if len(content) > 250_000:
+        return {"error": "too_large"}
+    base = (ARTIFACTS_DIR / job_id).resolve()
+    base.mkdir(parents=True, exist_ok=True)
+    p = (base / rel).resolve()
+    if not str(p).startswith(str(base)):
+        return {"error": "bad_path"}
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+    except Exception as e:
+        return {"error": "write_failed", "detail": str(e)[:200]}
+    return {"ok": True, "job_id": job_id, "path": rel, "bytes": len(content), "content_type": str(req.content_type or "")[:80]}
+
+
+@app.get("/artifacts/{job_id}/list")
+def artifacts_list(job_id: str):
+    base = (ARTIFACTS_DIR / str(job_id or "").strip()).resolve()
+    if not str(base).startswith(str(ARTIFACTS_DIR)) or not base.exists() or not base.is_dir():
+        return {"items": []}
+    items: list[dict] = []
+    try:
+        for p in base.rglob("*"):
+            if not p.is_file():
+                continue
+            rel = str(p.relative_to(base)).replace("\\", "/")
+            try:
+                st = p.stat()
+                items.append({"path": rel, "bytes": int(st.st_size), "mtime": float(st.st_mtime)})
+            except Exception:
+                items.append({"path": rel})
+        items.sort(key=lambda r: float(r.get("mtime") or 0.0), reverse=True)
+    except Exception:
+        pass
+    return {"job_id": str(job_id or ""), "items": items[:500], "count": len(items)}
+
+
+@app.get("/artifacts/{job_id}/get")
+def artifacts_get(job_id: str, path: str):
+    rel = str(path or "").strip().lstrip("/").replace("\\", "/")
+    base = (ARTIFACTS_DIR / str(job_id or "").strip()).resolve()
+    if not rel or ".." in rel:
+        return {"error": "bad_path"}
+    p = (base / rel).resolve()
+    if not str(p).startswith(str(base)) or not p.exists() or not p.is_file():
+        return {"error": "not_found"}
+    try:
+        data = p.read_text(encoding="utf-8", errors="replace")
+        # Keep responses bounded
+        if len(data) > 250_000:
+            data = data[:250_000]
+        return {"ok": True, "job_id": str(job_id or ""), "path": rel, "content": data}
+    except Exception as e:
+        return {"error": "read_failed", "detail": str(e)[:200]}
 
 
 @app.post("/jobs/{job_id}/update")
@@ -2803,6 +3310,28 @@ async def jobs_review(job_id: str, req: JobReviewRequest):
                 )
                 await economy_penalty(pen_req)
     await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})
+
+    # Cross-run persistence: ingest approved market_scan results into Opportunity Library.
+    try:
+        j3 = _jobs.get(job_id)
+        if j3 and j3.status == "approved":
+            txt = (str(j3.title or "") + "\n" + str(j3.body or "")).lower()
+            if "archetype:market_scan" in txt:
+                sub = str(j3.submission or "")
+                code = _extract_code_fence(sub, "json") or _extract_code_fence(sub, "javascript")
+                if code:
+                    obj = json.loads(code)
+                    if isinstance(obj, list):
+                        changed = 0
+                        for it in obj[:200]:
+                            o = _upsert_opportunity(it, _run_id, job_id)
+                            if o is not None:
+                                changed += 1
+                        if changed:
+                            _save_opportunities()
+    except Exception:
+        pass
+
     return {"ok": True, "job": asdict(_jobs[job_id])}
 
 
@@ -3113,9 +3642,20 @@ async def tools_web_fetch(req: WebFetchRequest, request: Request):
     max_bytes = int(req.max_bytes or WEB_FETCH_MAX_BYTES)
     max_bytes = max(10_000, min(1_000_000, max_bytes))
 
+    # Some sites return 403 to unknown/robotic user agents. Use a common browser UA to reduce false blocks.
+    # (We still keep SSRF protection + allowlist.)
     headers = {
-        "User-Agent": "ai_ai2ai/1.0 (ToolGateway web_fetch)",
-        "Accept": "text/html,application/json,text/plain;q=0.9,*/*;q=0.1",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.1",
+        "Accept-Language": "en-US,en;q=0.9",
+        # Avoid compressed responses unless we explicitly implement decompression.
+        "Accept-Encoding": "identity",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
     }
 
     _emit_trace(req.agent_id, req.agent_name, "action", "tool:web_fetch start", {"url": url[:500], "timeout": timeout, "max_bytes": max_bytes})

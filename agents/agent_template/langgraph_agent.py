@@ -66,6 +66,7 @@ class Tools(TypedDict):
     memory_retrieve: Callable[[str, int], List[dict]]
     memory_append: Callable[[str, str, List[str], float], None]
     web_fetch: Callable[[str], dict]
+    opportunities_list: Callable[[int], List[dict]]
 
 
 _TOOLS: Optional[Tools] = None
@@ -116,7 +117,10 @@ def _pick_executor_job(state: AgentState) -> Optional[dict]:
     - matches current run tag (if known)
     - newest first
     """
-    jobs = list(state.get("open_jobs") or [])
+    # Prefer resuming jobs we already claimed (e.g., after a container restart),
+    # otherwise take a new open job.
+    my_claimed = list(state.get("my_claimed_jobs") or [])
+    jobs = my_claimed + list(state.get("open_jobs") or [])
     if not jobs:
         return None
     run_tag = _run_tag(state.get("run_id", ""))
@@ -129,8 +133,16 @@ def _pick_executor_job(state: AgentState) -> Optional[dict]:
     jobs = tagged or jobs
     if not jobs:
         return None
-    # Prefer higher reward (more "valuable" tasks) while still being fairly recent.
-    jobs.sort(key=lambda j: (_safe_float(j.get("reward"), 0.0), _safe_float(j.get("created_at"), 0.0)), reverse=True)
+    # Always finish our claimed work first (oldest claim first), then prefer higher reward while still being fairly recent.
+    def _key(j: dict) -> tuple:
+        is_claimed = 1 if str(j.get("status") or "") == "claimed" else 0
+        # For claimed jobs, older claimed_at first; for open jobs, newer created_at first.
+        claimed_at = _safe_float(j.get("claimed_at"), 0.0)
+        created_at = _safe_float(j.get("created_at"), 0.0)
+        reward = _safe_float(j.get("reward"), 0.0)
+        return (is_claimed, -claimed_at, reward, created_at)
+
+    jobs.sort(key=_key, reverse=True)
     return jobs[0]
 
 def _pick_redo_job(state: AgentState, failed_job_id: str) -> Optional[dict]:
@@ -192,6 +204,17 @@ def node_perceive(state: AgentState, config: Any = None) -> AgentState:
         state["open_jobs"] = tools["jobs_list"](status="open", limit=50)
     except Exception:
         state["open_jobs"] = []
+    # Executor robustness: also fetch jobs already claimed by THIS agent so we can resume after restarts.
+    if state.get("role") == "executor":
+        try:
+            claimed = tools["jobs_list"](status="claimed", limit=80)
+        except Exception:
+            claimed = []
+        aid = str(state.get("agent_id") or "").strip()
+        if aid:
+            state["my_claimed_jobs"] = [j for j in claimed if str(j.get("claimed_by") or "") == aid]
+        else:
+            state["my_claimed_jobs"] = []
     # Recent jobs (any status) for uniqueness checks (best-effort).
     try:
         state["recent_jobs"] = tools["jobs_list"](status=None, limit=60)
@@ -394,8 +417,8 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
         except Exception:
             pfc = 0
         if pfc > 0:
-            seed_src = (state.get("run_id") or "") + "|" + str(pfc) + "|" + str(len(state.get("recent_jobs") or []))
-            idx = int(hashlib.sha1(seed_src.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
+            # Deterministic rotation: on each create-failure, choose a different template (avoid getting stuck
+            # retrying the same deduped job over and over).
             pool = [
                 (
                     "[archetype:market_scan] [verifier:json_list] Task: Market scan — paid gigs we can deliver (with citations)",
@@ -472,17 +495,21 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
                     "- Evidence section with count=10.\n",
                 ),
                 (
-                    "Task: Python Fibonacci (first 12)",
-                    "Write a Python script that prints the first 12 Fibonacci numbers, one per line.\n"
+                    "[archetype:opportunity_board] [verifier:md_table] Task: Opportunity Board — top 8 gigs",
+                    "[verifier:md_table]\n"
+                    "[md_min_rows:8]\n"
+                    "[md_required_cols:Title,Platform,Estimated Price (USD),Why we can deliver,First action,Source domain]\n"
+                    "From recent market_scan tasks, summarize 8 best gigs we could realistically deliver.\n"
+                    "\n"
                     "Acceptance criteria:\n"
-                    "- Running the script prints exactly these 12 lines:\n"
-                    "  0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89\n"
+                    "- Markdown table with >=8 rows.\n"
+                    "- Columns exactly: Title | Platform | Estimated Price (USD) | Why we can deliver | First action | Source domain.\n"
+                    "\n"
                     "Evidence required in submission:\n"
-                    "- Include runnable Python code in a ```python``` fence.\n"
-                    "- Include an Evidence section that shows the observed stdout.\n",
+                    "- Evidence section with row_count.\n",
                 ),
             ]
-            t, b = pool[idx % len(pool)]
+            t, b = pool[(max(0, pfc - 1)) % len(pool)]
             title = t
             body = b
             reward = 0.01
@@ -496,6 +523,37 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
         if _proposer_has_open_job(state):
             state["action"] = {"kind": "noop", "note": "proposer already has an open job"}
             return state
+
+        # Bridge scan -> execution: if there are approved market_scan items, propose a concrete "deliver this" task.
+        # This keeps the system doing useful work instead of drifting into toy problems.
+        try:
+            opps = tools["opportunities_list"](25)
+        except Exception:
+            opps = []
+        if isinstance(opps, list) and opps:
+            it = opps[0] if isinstance(opps[0], dict) else {}
+            title0 = str(it.get("title") or it.get("name") or "").strip()
+            plat0 = str(it.get("platform") or "").strip()
+            price0 = str(it.get("estimated_price_usd") or it.get("price") or "").strip()
+            url0 = str(it.get("source_url") or it.get("url") or "").strip()
+            dom0 = str(it.get("_source_domain") or "").strip()
+            if title0:
+                jt = f"[archetype:deliver_opportunity] Deliver: {title0}"
+                jb = (
+                    "Goal: turn this opportunity into something we can actually sell/deliver.\n\n"
+                    f"Opportunity:\n- title: {title0}\n- platform: {plat0}\n- price_estimate_usd: {price0}\n- source_domain: {dom0}\n- source_url: {url0}\n\n"
+                    "Acceptance criteria:\n"
+                    "- Provide a 1-page delivery plan (steps + timeline).\n"
+                    "- Provide 3 package tiers with clear scope + pricing.\n"
+                    "- Provide a short client outreach message.\n\n"
+                    "Evidence required in submission:\n"
+                    "- Include an Evidence section with: tiers=3, steps>=6.\n"
+                )
+                if run_tag and run_tag not in jt:
+                    jt = f"{run_tag} {jt}".strip()
+                jb = _normalize_bullets_outside_code_fences(jb)
+                state["action"] = {"kind": "propose_job", "note": "deliver_top_opportunity", "job": {"title": jt, "body": jb, "reward": 0.05}}
+                return state
 
         # If the executor got rejected on a recent job, create ONE redo job with clearer evidence rules.
         handled = str(state.get("handled_rejection_job_id") or "").strip()
@@ -713,7 +771,7 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
             "     [verifier:md_table] [md_min_rows:N] [md_required_cols:col1,col2,...]\n"
             "  C) If neither fits, use acceptance-criteria heuristic:\n"
             "     ensure the submission includes an 'Evidence' section referencing each AC bullet.\n"
-            "- Avoid Python-only tasks unless truly necessary (aim for variety).\n"
+            "- Do NOT propose Python coding puzzles by default. Prefer non-code deliverables (tables, checklists, JSON plans).\n"
             "- Keep body under 2200 chars.\n"
             "\n"
             "Examples below are ONLY format references. You MUST NOT reuse these exact ideas.\n"
@@ -764,62 +822,67 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
         title = str(obj.get("title") or "").strip()
         body = str(obj.get("body") or "").strip()
         reward = _safe_float(obj.get("reward"), 0.01)
+        # Hard guardrail: if the model proposes Python tasks/puzzles, override to deterministic non-Python.
+        # (We can re-enable Python later intentionally via tags/env.)
+        if ("python" in (title + "\n" + body).lower()):
+            title = ""
+            body = ""
         if not title or not body:
             # Fallback: rotate through multiple deterministic, verifiable tasks (avoid repeating primes).
             seed_src = (state.get("run_id") or "") + "|" + str(len(state.get("recent_jobs") or []))
             idx = int(hashlib.sha1(seed_src.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
             pool = [
                 (
-                    "Task: Python Fibonacci (first 12)",
-                    "Write a Python script that prints the first 12 Fibonacci numbers, one per line.\n"
+                    "[archetype:market_scan] [verifier:json_list] Task: Market scan — paid gigs we can deliver (with citations)",
+                    "[verifier:json_list]\n"
+                    "[repeat_ok:1]\n"
+                    "[json_min_items:10]\n"
+                    "[json_required_keys:title,platform,demand_signal,estimated_price_usd,why_fit,first_action,source_url,source_quote]\n"
+                    "Use web_fetch to research and propose 10 concrete paid gig/service ideas we could deliver.\n"
+                    "\n"
                     "Acceptance criteria:\n"
-                    "- Running the script prints exactly these 12 lines:\n"
-                    "  0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89\n"
+                    "- Provide a JSON list with at least 10 objects.\n"
+                    "- Each object includes keys: title, platform, demand_signal, estimated_price_usd, why_fit, first_action, source_url, source_quote.\n"
+                    "\n"
                     "Evidence required in submission:\n"
-                    "- Include runnable Python code in a ```python``` fence.\n"
-                    "- Include an Evidence section that shows the observed stdout.\n",
+                    "- Include the JSON in a ```json``` code fence.\n"
+                    "- Evidence section with item_count and distinct domains used.\n",
                 ),
                 (
-                    "Task: Python Palindrome filter",
-                    "Write a Python script that reads a hardcoded list of strings and prints only the palindromes (case-insensitive), one per line.\n"
-                    "Use this list: ['Racecar','hello','Level','world','Deed','python']\n"
+                    "[archetype:ui_improvements] [verifier:md_table] Task: UI improvements for our web dashboard",
+                    "[verifier:md_table]\n"
+                    "[md_min_rows:8]\n"
+                    "[md_required_cols:Problem,Change,Why it helps,How to verify]\n"
+                    "Propose 8 concrete UI improvements for the current AI Village web UI.\n"
+                    "\n"
                     "Acceptance criteria:\n"
-                    "- Output is exactly:\n"
-                    "  Racecar\n"
-                    "  Level\n"
-                    "  Deed\n"
+                    "- Markdown table with at least 8 rows.\n"
+                    "- Columns: Problem | Change | Why it helps | How to verify.\n"
+                    "\n"
                     "Evidence required in submission:\n"
-                    "- Include runnable Python code in a ```python``` fence.\n"
-                    "- Include an Evidence section that shows the observed stdout.\n",
+                    "- Evidence section with row_count.\n",
                 ),
                 (
-                    "Task: Python CSV summary (embedded data)",
-                    "Write a Python script that parses this CSV (embedded in the script) and prints total rows and sum of 'amount'.\n"
-                    "CSV:\n"
-                    "id,amount\n"
-                    "a,10\n"
-                    "b,5\n"
-                    "c,12\n"
+                    "[archetype:ops_runbook] Task: Ops runbook — keep the system healthy",
+                    "Create a short runbook checklist for keeping the system healthy day-to-day.\n"
+                    "\n"
                     "Acceptance criteria:\n"
-                    "- Output is exactly two lines:\n"
-                    "  rows=3\n"
-                    "  sum=27\n"
+                    "- 10 checklist items.\n"
+                    "- Each item has: purpose + command/API endpoint.\n"
+                    "\n"
                     "Evidence required in submission:\n"
-                    "- Include runnable Python code in a ```python``` fence.\n"
-                    "- Include an Evidence section that shows the observed stdout.\n",
+                    "- Evidence section with count=10.\n",
                 ),
                 (
-                    "Task: Python word count",
-                    "Write a Python script that counts words in the text: \"to be or not to be\" (split on whitespace) and prints each word and count sorted by descending count then alphabetical.\n"
+                    "[archetype:conversation_starters] Task: Community — 10 conversation starters",
+                    "Write 10 conversation starters for the agents that lead to useful work (not fluff).\n"
+                    "\n"
                     "Acceptance criteria:\n"
-                    "- Output lines are exactly:\n"
-                    "  be=2\n"
-                    "  to=2\n"
-                    "  not=1\n"
-                    "  or=1\n"
+                    "- Exactly 10 numbered items.\n"
+                    "- Each item includes a concrete follow-up question.\n"
+                    "\n"
                     "Evidence required in submission:\n"
-                    "- Include runnable Python code in a ```python``` fence.\n"
-                    "- Include an Evidence section that shows the observed stdout.\n",
+                    "- Evidence section that lists count=10.\n",
                 ),
             ]
             t, b = pool[idx % len(pool)]
@@ -875,6 +938,9 @@ def node_act(state: AgentState, config: Any = None) -> AgentState:
         title = str(job.get("title") or "")
         body = str(job.get("body") or "")
         reward = _safe_float(job.get("reward"), 0.01)
+        # Backend rejects reward <= 0; clamp to a small positive value to avoid "invalid_job" create failures.
+        if reward <= 0:
+            reward = 0.01
         jid = ""
         try:
             jid = tools["jobs_create"](title, body, reward)
@@ -906,22 +972,79 @@ def node_act(state: AgentState, config: Any = None) -> AgentState:
         job = act.get("job_obj") or {}
         if not job_id:
             return state
+        try:
+            tools["trace_event"](
+                "status",
+                "executor_execute_job",
+                {
+                    "phase": "start",
+                    "job_id": job_id,
+                    "job_status": str(job.get("status") or ""),
+                    "claimed_by": str(job.get("claimed_by") or ""),
+                },
+            )
+        except Exception:
+            pass
         claimed = False
         try:
-            claimed = bool(tools["jobs_claim"](job_id))
+            # If we already own the claim (e.g., resumed job), don't try to claim again.
+            if str(job.get("status") or "") == "claimed" and str(job.get("claimed_by") or "") == str(state.get("agent_id") or ""):
+                claimed = True
+            else:
+                claimed = bool(tools["jobs_claim"](job_id))
         except Exception:
             claimed = False
         if not claimed:
+            try:
+                tools["trace_event"](
+                    "status",
+                    "executor_execute_job",
+                    {"phase": "claim_failed", "job_id": job_id},
+                )
+            except Exception:
+                pass
             return state
         try:
+            tools["trace_event"](
+                "status",
+                "executor_execute_job",
+                {"phase": "claimed_ok", "job_id": job_id},
+            )
+        except Exception:
+            pass
+        try:
+            try:
+                tools["trace_event"](
+                    "status",
+                    "executor_execute_job",
+                    {"phase": "do_job_start", "job_id": job_id},
+                )
+            except Exception:
+                pass
             submission = tools["do_job"](job)
         except Exception:
             submission = "Evidence:\n- Execution failed inside agent runtime.\n"
+        try:
+            tools["trace_event"](
+                "status",
+                "executor_execute_job",
+                {"phase": "do_job_done", "job_id": job_id, "submission_chars": len(submission or "")},
+            )
+        except Exception:
+            pass
         ok = False
         try:
             ok = bool(tools["jobs_submit"](job_id, submission))
         except Exception:
             ok = False
+        try:
+            tools["trace_event"](
+                "status",
+                "executor_execute_job",
+                {"phase": "submit_done", "job_id": job_id, "ok": bool(ok)},
+            )
+        except Exception:
+            pass
         if ok:
             tools["chat_send"](f"I submitted `{job_id}` for review. If verification fails, I will revise and resubmit with better evidence.")
             try:
