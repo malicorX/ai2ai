@@ -1439,6 +1439,7 @@ def _do_job(job: dict) -> str:
                 wants_citations = ("source_url" in [k.lower() for k in req]) or ("source_quote" in [k.lower() for k in req])
                 sources = []
                 if wants_citations:
+                    try_fetch = os.getenv("CITED_JSON_TRY_FETCH", "0").strip() == "1"
                     seed_urls_raw = os.getenv(
                         "WEB_RESEARCH_SEED_URLS",
                         "https://www.fiverr.com/categories,https://www.upwork.com/freelance-jobs/,https://www.freelancer.com/jobs/",
@@ -1447,24 +1448,25 @@ def _do_job(job: dict) -> str:
                     # Always include example.com as a last-resort fetchable page (for quotes) so the task cannot deadlock.
                     if "https://example.com" not in seed_urls:
                         seed_urls.append("https://example.com")
-                    try:
-                        trace_event("thought", "web research: fetching seed sources", {"job_id": job_id, "seed_urls": seed_urls[:4]})
-                        for u in seed_urls[:4]:
-                            resp = web_fetch(u, timeout_seconds=15.0, max_bytes=180000)
-                            if resp.get("ok"):
-                                txt = str(resp.get("text") or "")
-                                sources.append(
-                                    {
-                                        "url": str(resp.get("final_url") or u)[:1000],
-                                        "sha1_16": str(resp.get("sha1_16") or "")[:32],
-                                        "content_type": str(resp.get("content_type") or "")[:120],
-                                        "excerpt": txt[:1800],
-                                    }
-                                )
-                            if len(sources) >= 3:
-                                break
-                    except Exception:
-                        sources = []
+                    if try_fetch:
+                        try:
+                            trace_event("thought", "web research: fetching seed sources", {"job_id": job_id, "seed_urls": seed_urls[:4]})
+                            for u in seed_urls[:4]:
+                                resp = web_fetch(u, timeout_seconds=15.0, max_bytes=180000)
+                                if resp.get("ok"):
+                                    txt = str(resp.get("text") or "")
+                                    sources.append(
+                                        {
+                                            "url": str(resp.get("final_url") or u)[:1000],
+                                            "sha1_16": str(resp.get("sha1_16") or "")[:32],
+                                            "content_type": str(resp.get("content_type") or "")[:120],
+                                            "excerpt": txt[:1800],
+                                        }
+                                    )
+                                if len(sources) >= 3:
+                                    break
+                        except Exception:
+                            sources = []
                     # If all fetches failed (tool disabled, blocked, transient network), still provide a fallback
                     # so we can complete the task without hanging on LLM calls.
                     if not sources:
