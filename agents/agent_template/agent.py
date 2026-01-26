@@ -2794,16 +2794,25 @@ def main():
             upsert()
             maybe_reset_on_new_run()
             world = get_world()
-            # Sticky conversations: if we're in an active conversation, focus on it until it ends.
-            if maybe_conversation_step(world):
-                time.sleep(SLEEP_SECONDS)
-                continue
-            # Jobs control-plane: if LangGraph is enabled, it drives proposer/executor job behavior.
-            if USE_LANGGRAPH:
+            # NOTE: For the executor, jobs must take priority over sticky conversations;
+            # otherwise the system can "chat-lock" and stall task throughput.
+            if USE_LANGGRAPH and ROLE == "executor":
                 maybe_langgraph_jobs(world)
+                # Sticky conversations: if we're in an active conversation, focus on it until it ends.
+                if maybe_conversation_step(world):
+                    time.sleep(SLEEP_SECONDS)
+                    continue
             else:
-                # Task proposer mode: agent_1 periodically creates a single open task for agent_2 to execute.
-                maybe_propose_task()
+                # Sticky conversations: if we're in an active conversation, focus on it until it ends.
+                if maybe_conversation_step(world):
+                    time.sleep(SLEEP_SECONDS)
+                    continue
+                # Jobs control-plane: if LangGraph is enabled, it drives proposer/executor job behavior.
+                if USE_LANGGRAPH:
+                    maybe_langgraph_jobs(world)
+                else:
+                    # Task proposer mode: agent_1 periodically creates a single open task for agent_2 to execute.
+                    maybe_propose_task()
             maybe_process_event_invites(world)
             maybe_reflect(world)
             # plan schedule at the computer once per simulated day
