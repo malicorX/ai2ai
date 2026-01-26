@@ -224,6 +224,7 @@
           <input id="jobReviewer" type="text" value="human" style="padding:6px; flex:1;" />
           <button id="jobCreateBtn">Create Job</button>
           <button id="jobsRefreshBtn">Refresh</button>
+          <button id="jobsPurgeCancelledBtn" title="Permanently delete cancelled tasks (admin)">Remove all cancelled</button>
         </div>
         <details style="margin-top:10px;">
           <summary style="cursor:pointer; font-size:12px; color:#444;">Task ratings (1–10)</summary>
@@ -663,6 +664,7 @@
     const jobReviewer = document.getElementById("jobReviewer");
     const jobCreateBtn = document.getElementById("jobCreateBtn");
     const jobsRefreshBtn = document.getElementById("jobsRefreshBtn");
+    const jobsPurgeCancelledBtn = document.getElementById("jobsPurgeCancelledBtn");
     const jobStatusFilter = document.getElementById("jobStatusFilter");
     const jobRunOnly = document.getElementById("jobRunOnly");
     const jobFilterHint = document.getElementById("jobFilterHint");
@@ -1164,6 +1166,22 @@
     setInterval(refreshJobs, 5000);
 
     jobsRefreshBtn.onclick = refreshJobs;
+    if (jobsPurgeCancelledBtn) jobsPurgeCancelledBtn.onclick = async () => {
+      if (!confirm("Permanently delete ALL cancelled tasks? This cannot be undone.")) return;
+      try {
+        jobsPurgeCancelledBtn.disabled = true;
+        await fetchJson("/admin/jobs/purge_cancelled", {
+          method: "POST",
+          headers: {"Content-Type":"application/json", ...authHeaders()},
+          body: JSON.stringify({ by: (jobReviewer.value || "human"), note: "purge cancelled from UI", older_than_seconds: 0, limit: 20000 })
+        });
+        await refreshJobs();
+      } catch (e) {
+        alert("Purge failed (need ADMIN_TOKEN if configured): " + e.message);
+      } finally {
+        jobsPurgeCancelledBtn.disabled = false;
+      }
+    };
     if (jobStatusFilter) jobStatusFilter.onchange = refreshJobs;
     if (jobRunOnly) jobRunOnly.onchange = refreshJobs;
     if (jobHidePython) jobHidePython.onchange = refreshJobs;

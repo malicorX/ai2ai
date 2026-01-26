@@ -80,6 +80,22 @@ def _read_jsonl(path: Path, limit: Optional[int] = None) -> List[dict]:
     return out
 
 
+def _write_jsonl_atomic(path: Path, rows: List[dict]) -> None:
+    """
+    Rewrite a JSONL file atomically.
+    Used for maintenance tasks (e.g., purging cancelled jobs) to prevent unbounded growth.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        for r in rows:
+            try:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            except Exception:
+                continue
+    tmp.replace(path)
+
+
 def _rotate_logs(run_id: str, files: List[Path]) -> dict:
     """
     Copy the current JSONL logs into DATA_DIR/runs/<run_id>/ and truncate originals.
@@ -1989,6 +2005,17 @@ class JobCancelRequest(BaseModel):
     note: str = ""
 
 
+class PurgeCancelledJobsRequest(BaseModel):
+    """Admin maintenance: permanently remove cancelled jobs from the active job store + jobs_events.jsonl."""
+
+    by: str = "human"
+    note: str = ""
+    # Only purge jobs cancelled at least this many seconds ago (0 = purge all cancelled).
+    older_than_seconds: float = 0.0
+    # Safety cap on number of jobs removed in one call.
+    limit: int = 5000
+
+
 class JobUpdateRequest(BaseModel):
     """
     Admin edit of an existing job/task (intended for human-curated task board).
@@ -2242,6 +2269,92 @@ async def jobs_cancel(job_id: str, req: JobCancelRequest, request: Request):
     ev = _append_job_event("cancel", job_id, {"by": str(req.by or "human")[:80], "note": str(req.note or "")[:2000], "created_at": time.time()})
     await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})
     return {"ok": True, "job": asdict(_jobs[job_id])}
+
+
+@app.post("/admin/jobs/purge_cancelled")
+async def admin_purge_cancelled_jobs(req: PurgeCancelledJobsRequest, request: Request):
+    """
+    Permanently remove cancelled jobs so the system doesn't clog up.
+    This rewrites jobs_events.jsonl and drops matching entries from the in-memory job/event stores.
+    """
+    global _tick, _jobs, _job_events
+    _tick += 1
+    if not _require_admin(request):
+        return {"error": "unauthorized"}
+
+    now = time.time()
+    older = float(req.older_than_seconds or 0.0)
+    limit = int(req.limit or 0)
+    if limit <= 0:
+        limit = 5000
+    if limit > 20000:
+        limit = 20000
+
+    # Determine cancellation time per job (based on last cancel event).
+    cancel_ts: Dict[str, float] = {}
+    for ev in _job_events:
+        if getattr(ev, "event_type", "") == "cancel":
+            try:
+                cancel_ts[str(ev.job_id)] = float(ev.created_at or 0.0)
+            except Exception:
+                continue
+
+    # Collect job_ids to purge.
+    candidates: List[str] = []
+    for jid, job in list(_jobs.items()):
+        try:
+            if str(job.status) != "cancelled":
+                continue
+            ts = float(cancel_ts.get(jid) or getattr(job, "created_at", 0.0) or 0.0)
+            if older > 0 and (now - ts) < older:
+                continue
+            candidates.append(jid)
+        except Exception:
+            continue
+
+    # Deterministic order: oldest cancelled first.
+    candidates.sort(key=lambda jid: float(cancel_ts.get(jid) or (_jobs.get(jid).created_at if _jobs.get(jid) else 0.0) or 0.0))
+    purge_ids = set(candidates[:limit])
+
+    if not purge_ids:
+        return {"ok": True, "removed_jobs": 0, "removed_events": 0, "note": "no cancelled jobs matched"}
+
+    # Filter events and rewrite JSONL.
+    before_events = len(_job_events)
+    kept_events: List[JobEvent] = [ev for ev in _job_events if str(ev.job_id) not in purge_ids]
+    removed_events = before_events - len(kept_events)
+    _job_events = kept_events
+
+    # Drop jobs.
+    removed_jobs = 0
+    for jid in list(purge_ids):
+        if jid in _jobs:
+            try:
+                del _jobs[jid]
+                removed_jobs += 1
+            except Exception:
+                continue
+
+    # Rewrite jobs_events.jsonl to match the in-memory event log.
+    try:
+        _write_jsonl_atomic(JOBS_PATH, [asdict(ev) for ev in _job_events])
+    except Exception:
+        pass
+
+    try:
+        await ws_manager.broadcast({"type": "jobs", "data": {"purge_cancelled": {"removed_jobs": removed_jobs, "removed_events": removed_events}}})
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "removed_jobs": removed_jobs,
+        "removed_events": removed_events,
+        "by": str(req.by or "human")[:80],
+        "note": str(req.note or "")[:2000],
+        "older_than_seconds": older,
+        "limit": limit,
+    }
 
 
 @app.post("/jobs/create")
