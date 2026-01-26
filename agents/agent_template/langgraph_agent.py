@@ -118,8 +118,12 @@ def _pick_executor_job(state: AgentState) -> Optional[dict]:
         return None
     run_tag = _run_tag(state.get("run_id", ""))
     jobs = [j for j in jobs if str(j.get("created_by") or "") == "agent_1"]
+    # Prefer run-tagged jobs for the current run, but fall back to any agent_1 jobs if none are tagged.
+    # (Some jobs created via conversation flow historically missed the run tag.)
+    tagged = jobs
     if run_tag:
-        jobs = [j for j in jobs if (run_tag in str(j.get("title") or "")) or (run_tag in str(j.get("body") or ""))]
+        tagged = [j for j in jobs if (run_tag in str(j.get("title") or "")) or (run_tag in str(j.get("body") or ""))]
+    jobs = tagged or jobs
     if not jobs:
         return None
     # Prefer higher reward (more "valuable" tasks) while still being fairly recent.
