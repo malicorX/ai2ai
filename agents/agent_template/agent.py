@@ -1427,52 +1427,53 @@ def _do_job(job: dict) -> str:
                 user_prompt = f"Job title:\n{title}\n\nJob body:\n{body}\n\nReturn the JSON array now:"
                 raw = (llm_chat(sys_prompt, user_prompt, max_tokens=900) or "").strip()
                 # Sanitize accidental fences
-                raw = re.sub(r\"^```[a-zA-Z0-9_-]*\\s*\", \"\", raw).strip()
-                raw = re.sub(r\"\\s*```$\", \"\", raw).strip()
+                raw = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", raw).strip()
+                raw = re.sub(r"\s*```$", "", raw).strip()
                 # Validate / best-effort repair: ensure JSON parses
                 try:
                     obj = json.loads(raw)
                 except Exception:
                     # Try to extract first JSON object/array from the text
-                    m = re.search(r\"(\\[.*\\])\", raw, flags=re.DOTALL)
+                    m = re.search(r"(\[.*\])", raw, flags=re.DOTALL)
                     obj = json.loads(m.group(1)) if m else []
                 if not isinstance(obj, list):
                     obj = [obj]
                 item_count = len(obj)
-                evidence_kv[\"item_count\"] = item_count
-                deliverable_md = \"```json\\n\" + json.dumps(obj, ensure_ascii=False, indent=2) + \"\\n```\"\n+            else:
+                evidence_kv["item_count"] = item_count
+                deliverable_md = "```json\n" + json.dumps(obj, ensure_ascii=False, indent=2) + "\n```"
+            else:
                 sys_prompt = (
-                    \"You are completing a task. Output ONLY the deliverable in markdown.\\n\"
-                    \"Rules:\\n\"
-                    \"- Be concrete and satisfy the acceptance criteria.\\n\"
-                    \"- If the job asks for a specific format (table/list/json fence), follow it exactly.\\n\"
-                    \"- No fluff.\\n\"
+                    "You are completing a task. Output ONLY the deliverable in markdown.\n"
+                    "Rules:\n"
+                    "- Be concrete and satisfy the acceptance criteria.\n"
+                    "- If the job asks for a specific format (table/list/json fence), follow it exactly.\n"
+                    "- No fluff.\n"
                 )
-                user_prompt = f\"Job title:\\n{title}\\n\\nJob body:\\n{body}\\n\\nReturn the deliverable now:\"
-                deliverable_md = (llm_chat(sys_prompt, user_prompt, max_tokens=900) or \"\").strip()
+                user_prompt = f"Job title:\n{title}\n\nJob body:\n{body}\n\nReturn the deliverable now:"
+                deliverable_md = (llm_chat(sys_prompt, user_prompt, max_tokens=900) or "").strip()
         except Exception:
-            deliverable_md = \"\"
+            deliverable_md = ""
 
-        content.append(\"## Deliverable\")
+        content.append("## Deliverable")
         if deliverable_md:
             content.append(deliverable_md)
         else:
-            content.append(\"(failed to generate deliverable content)\")
-        content.append(\"\")
+            content.append("(failed to generate deliverable content)")
+        content.append("")
 
-        content.append(\"## Evidence\")
+        content.append("## Evidence")
         # Key: reference acceptance criteria bullets so backend heuristic can verify non-empty evidence.
         if acceptance:
-            content.append(\"### Acceptance criteria checklist\")
+            content.append("### Acceptance criteria checklist")
             for b in acceptance[:10]:
-                content.append(f\"- [x] {b}\")
+                content.append(f"- [x] {b}")
         if evidence_req:
-            content.append(\"### Evidence requirements checklist\")
+            content.append("### Evidence requirements checklist")
             for b in evidence_req[:10]:
-                content.append(f\"- [x] {b}\")
+                content.append(f"- [x] {b}")
         for k, v in evidence_kv.items():
-            content.append(f\"- {k}={v}\")
-        content.append(\"- I produced the deliverable content above.\")
+            content.append(f"- {k}={v}")
+        content.append("- I produced the deliverable content above.")
     content.append("")
     content.append("## Long-term memory context (recent)")
     content.extend(mem_lines or ["- (none yet)"])
