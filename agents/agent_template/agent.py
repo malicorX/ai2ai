@@ -2244,6 +2244,17 @@ def maybe_conversation_step(world) -> bool:
     approach the partner and only do chat until the conversation ends.
     """
     global _active_conv_id, _active_conv_other_id, _active_conv_last_total, _active_conv_turns
+    # Executor in LangGraph mode must not get "chat-locked" by sticky conversations; it should keep working jobs.
+    if USE_LANGGRAPH and ROLE == "executor":
+        if _active_conv_id:
+            try:
+                trace_event("status", "executor ignored conversation (job priority)", {"conv": _active_conv_id})
+            except Exception:
+                pass
+        _active_conv_id = None
+        _active_conv_other_id = None
+        _active_conv_turns = 0
+        return False
     if not _active_conv_id:
         return False
     day, minute_of_day = world_time(world)
