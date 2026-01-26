@@ -714,8 +714,6 @@ def runs_summary(run_id: str):
 def _extract_tag(text: str, tag: str) -> Optional[str]:
     try:
         import re
-import string
-
         m = re.search(r"\[" + re.escape(tag) + r":([^\]]+)\]", text or "")
         return str(m.group(1)).strip() if m else None
     except Exception:
