@@ -780,6 +780,13 @@ def _calc_reward_from_ratings(ratings: dict) -> tuple[float, dict]:
     uniqueness = _r("uniqueness", 5)
     usefulness = _r("usefulness", 5)
     money = _r("money_potential", 1)
+    # Newer optional ratings (still 1..10; safe defaults)
+    clarity = _r("clarity", 6)
+    verifiability = _r("verifiability", 6)
+    impact = _r("impact", 5)
+    time_cost = _r("time_cost", 5)
+    risk = _r("risk", 3)
+    learning_value = _r("learning_value", 5)
 
     # Weights (tunable via env if needed later)
     base = float(os.getenv("REWARD_BASE", "1.0"))
@@ -789,6 +796,12 @@ def _calc_reward_from_ratings(ratings: dict) -> tuple[float, dict]:
     w_money = float(os.getenv("REWARD_W_MONEY", "1.8"))
     w_uniqueness = float(os.getenv("REWARD_W_UNIQUENESS", "0.6"))
     w_external_penalty = float(os.getenv("REWARD_W_EXTERNAL_PENALTY", "1.2"))
+    w_clarity = float(os.getenv("REWARD_W_CLARITY", "0.4"))
+    w_verifiability = float(os.getenv("REWARD_W_VERIFIABILITY", "0.8"))
+    w_impact = float(os.getenv("REWARD_W_IMPACT", "1.2"))
+    w_time_cost = float(os.getenv("REWARD_W_TIME_COST", "0.6"))
+    w_risk_penalty = float(os.getenv("REWARD_W_RISK_PENALTY", "0.7"))
+    w_learning = float(os.getenv("REWARD_W_LEARNING", "0.4"))
 
     # Normalize to 0..1
     def _n(x: int) -> float:
@@ -800,7 +813,13 @@ def _calc_reward_from_ratings(ratings: dict) -> tuple[float, dict]:
         + w_usefulness * _n(usefulness)
         + w_money * _n(money)
         + w_uniqueness * _n(uniqueness)
+        + w_clarity * _n(clarity)
+        + w_verifiability * _n(verifiability)
+        + w_impact * _n(impact)
+        + w_time_cost * _n(time_cost)
+        + w_learning * _n(learning_value)
         - w_external_penalty * _n(external)
+        - w_risk_penalty * _n(risk)
     )
     # Convert score to ai$ range
     scale = float(os.getenv("REWARD_SCALE", "20.0"))
@@ -817,6 +836,12 @@ def _calc_reward_from_ratings(ratings: dict) -> tuple[float, dict]:
             "uniqueness": uniqueness,
             "usefulness": usefulness,
             "money_potential": money,
+            "clarity": clarity,
+            "verifiability": verifiability,
+            "impact": impact,
+            "time_cost": time_cost,
+            "risk": risk,
+            "learning_value": learning_value,
         },
         "score": round(score, 4),
         "reward_raw": round(raw, 4),
@@ -832,6 +857,12 @@ def _calc_reward_from_ratings(ratings: dict) -> tuple[float, dict]:
             "w_money": w_money,
             "w_uniqueness": w_uniqueness,
             "w_external_penalty": w_external_penalty,
+            "w_clarity": w_clarity,
+            "w_verifiability": w_verifiability,
+            "w_impact": w_impact,
+            "w_time_cost": w_time_cost,
+            "w_risk_penalty": w_risk_penalty,
+            "w_learning": w_learning,
         },
     }
     return (reward, meta)

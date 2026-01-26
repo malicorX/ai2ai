@@ -235,6 +235,12 @@
             <label style="font-size:12px; color:#444;">uniqueness <input id="rateUnique" type="number" min="1" max="10" value="6" style="padding:6px; width:100%;" /></label>
             <label style="font-size:12px; color:#444;">usefulness <input id="rateUseful" type="number" min="1" max="10" value="6" style="padding:6px; width:100%;" /></label>
             <label style="font-size:12px; color:#444;">money_potential <input id="rateMoney" type="number" min="1" max="10" value="1" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">clarity <input id="rateClarity" type="number" min="1" max="10" value="6" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">verifiability <input id="rateVerifiability" type="number" min="1" max="10" value="6" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">impact <input id="rateImpact" type="number" min="1" max="10" value="5" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">time_cost <input id="rateTimeCost" type="number" min="1" max="10" value="5" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">risk <input id="rateRisk" type="number" min="1" max="10" value="3" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">learning_value <input id="rateLearning" type="number" min="1" max="10" value="5" style="padding:6px; width:100%;" /></label>
           </div>
         </details>
         <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
@@ -271,6 +277,12 @@
             <label style="font-size:12px; color:#444;">uniqueness <input id="editRateUnique" type="number" min="1" max="10" style="padding:6px; width:100%;" /></label>
             <label style="font-size:12px; color:#444;">usefulness <input id="editRateUseful" type="number" min="1" max="10" style="padding:6px; width:100%;" /></label>
             <label style="font-size:12px; color:#444;">money_potential <input id="editRateMoney" type="number" min="1" max="10" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">clarity <input id="editRateClarity" type="number" min="1" max="10" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">verifiability <input id="editRateVerifiability" type="number" min="1" max="10" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">impact <input id="editRateImpact" type="number" min="1" max="10" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">time_cost <input id="editRateTimeCost" type="number" min="1" max="10" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">risk <input id="editRateRisk" type="number" min="1" max="10" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">learning_value <input id="editRateLearning" type="number" min="1" max="10" style="padding:6px; width:100%;" /></label>
           </div>
         </details>
         <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
@@ -685,12 +697,24 @@
     const rateUnique = document.getElementById("rateUnique");
     const rateUseful = document.getElementById("rateUseful");
     const rateMoney = document.getElementById("rateMoney");
+    const rateClarity = document.getElementById("rateClarity");
+    const rateVerifiability = document.getElementById("rateVerifiability");
+    const rateImpact = document.getElementById("rateImpact");
+    const rateTimeCost = document.getElementById("rateTimeCost");
+    const rateRisk = document.getElementById("rateRisk");
+    const rateLearning = document.getElementById("rateLearning");
     const editRateComplexity = document.getElementById("editRateComplexity");
     const editRateDifficulty = document.getElementById("editRateDifficulty");
     const editRateExternal = document.getElementById("editRateExternal");
     const editRateUnique = document.getElementById("editRateUnique");
     const editRateUseful = document.getElementById("editRateUseful");
     const editRateMoney = document.getElementById("editRateMoney");
+    const editRateClarity = document.getElementById("editRateClarity");
+    const editRateVerifiability = document.getElementById("editRateVerifiability");
+    const editRateImpact = document.getElementById("editRateImpact");
+    const editRateTimeCost = document.getElementById("editRateTimeCost");
+    const editRateRisk = document.getElementById("editRateRisk");
+    const editRateLearning = document.getElementById("editRateLearning");
 
     function clampRate(x) {
       const n = parseInt(String(x||"0"), 10);
@@ -711,6 +735,12 @@
         pick("uniqueness", rateUnique);
         pick("usefulness", rateUseful);
         pick("money_potential", rateMoney);
+        pick("clarity", rateClarity);
+        pick("verifiability", rateVerifiability);
+        pick("impact", rateImpact);
+        pick("time_cost", rateTimeCost);
+        pick("risk", rateRisk);
+        pick("learning_value", rateLearning);
       } else {
         pick("complexity", editRateComplexity);
         pick("difficulty", editRateDifficulty);
@@ -718,6 +748,12 @@
         pick("uniqueness", editRateUnique);
         pick("usefulness", editRateUseful);
         pick("money_potential", editRateMoney);
+        pick("clarity", editRateClarity);
+        pick("verifiability", editRateVerifiability);
+        pick("impact", editRateImpact);
+        pick("time_cost", editRateTimeCost);
+        pick("risk", editRateRisk);
+        pick("learning_value", editRateLearning);
       }
       return m;
     }
@@ -951,10 +987,10 @@
       meta3.style.color = "#666";
       const ratings = (j.ratings && typeof j.ratings === "object") ? j.ratings : {};
       // Always show all rating keys so humans can see what exists even when unset.
-      const ratingKeys = ["complexity","difficulty","external_tools","uniqueness","usefulness","money_potential"];
+      const ratingKeys = ["complexity","difficulty","external_tools","uniqueness","usefulness","money_potential","clarity","verifiability","impact","time_cost","risk","learning_value"];
       const ratingParts = ratingKeys.map(k => {
         const v = ratings[k];
-        const s = (v === undefined || v === null || String(v) === "") ? "—" : String(v);
+        const s = (v === undefined || v === null || String(v) === "") ? "unset" : String(v);
         return `${k}=${s}`;
       });
       meta3.textContent =
@@ -1016,6 +1052,12 @@
           editRateUnique.value = String(r.uniqueness || "");
           editRateUseful.value = String(r.usefulness || "");
           editRateMoney.value = String(r.money_potential || "");
+          editRateClarity.value = String(r.clarity || "");
+          editRateVerifiability.value = String(r.verifiability || "");
+          editRateImpact.value = String(r.impact || "");
+          editRateTimeCost.value = String(r.time_cost || "");
+          editRateRisk.value = String(r.risk || "");
+          editRateLearning.value = String(r.learning_value || "");
           if (jobEditAutoReward) jobEditAutoReward.checked = (String(j.reward_mode||"") === "auto_ratings");
           jobEditStatus.textContent = "loaded";
           details.open = true;
@@ -1225,6 +1267,12 @@
         editRateUnique.value = String(r.uniqueness || "");
         editRateUseful.value = String(r.usefulness || "");
         editRateMoney.value = String(r.money_potential || "");
+        editRateClarity.value = String(r.clarity || "");
+        editRateVerifiability.value = String(r.verifiability || "");
+        editRateImpact.value = String(r.impact || "");
+        editRateTimeCost.value = String(r.time_cost || "");
+        editRateRisk.value = String(r.risk || "");
+        editRateLearning.value = String(r.learning_value || "");
         if (jobEditAutoReward) jobEditAutoReward.checked = (String(j.reward_mode||"") === "auto_ratings");
         jobEditStatus.textContent = `loaded (${j.status})`;
       } catch (e) {
@@ -1268,6 +1316,12 @@
       editRateUnique.value = "";
       editRateUseful.value = "";
       editRateMoney.value = "";
+      editRateClarity.value = "";
+      editRateVerifiability.value = "";
+      editRateImpact.value = "";
+      editRateTimeCost.value = "";
+      editRateRisk.value = "";
+      editRateLearning.value = "";
       jobEditStatus.textContent = "idle";
     }
     if (jobLoadBtn) jobLoadBtn.onclick = loadJobForEdit;
