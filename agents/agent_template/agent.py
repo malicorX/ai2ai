@@ -189,6 +189,9 @@ def maybe_plan_new_day(world) -> None:
     # Upgrade the plan with LLM once per day, but only from computer access zone.
     if not USE_LANGGRAPH:
         return
+    # Executor should not block on day-planning LLM calls; it must prioritize job throughput.
+    if ROLE == "executor":
+        return
     if _last_day_llm_planned == day:
         return
     if not _at_landmark(world, COMPUTER_LANDMARK_ID, radius=COMPUTER_ACCESS_RADIUS):
