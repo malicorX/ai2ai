@@ -27,3 +27,8 @@ build/
 # Secrets
 .env
 
+# Deployment / Generated files
+ai_ai2ai_deploy.tgz
+result_viewer.html
+tmp_job_*.json
+
