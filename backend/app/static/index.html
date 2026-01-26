@@ -169,7 +169,22 @@
       </div>
 
       <div style="background:white; border:1px solid #ccc; padding:10px; border-radius:6px; width:420px;">
-        <h3 style="margin:0 0 8px 0;">Jobs (earn ai$)</h3>
+        <h3 style="margin:0 0 8px 0;">Task Board (Jobs)</h3>
+        <div style="display:flex; gap:8px; margin-bottom:8px; align-items:center;">
+          <select id="jobStatusFilter" style="padding:6px; width:170px;">
+            <option value="">all statuses</option>
+            <option value="open">open</option>
+            <option value="claimed">claimed</option>
+            <option value="submitted">submitted</option>
+            <option value="approved">approved</option>
+            <option value="rejected">rejected</option>
+            <option value="cancelled">cancelled</option>
+          </select>
+          <label style="margin-left:auto; font-size:12px; color:#444; display:flex; align-items:center; gap:6px;">
+            <input id="jobRunOnly" type="checkbox" checked />
+            current run only
+          </label>
+        </div>
         <div style="display:flex; gap:8px; margin-bottom:8px;">
           <input id="jobTitle" type="text" placeholder="Job title" style="padding:6px; flex:1;" />
           <input id="jobReward" type="number" value="10" min="0" step="1" style="padding:6px; width:110px;" />
@@ -179,6 +194,24 @@
           <input id="jobReviewer" type="text" value="human" style="padding:6px; flex:1;" />
           <button id="jobCreateBtn">Create Job</button>
           <button id="jobsRefreshBtn">Refresh</button>
+        </div>
+        <hr style="margin:12px 0;" />
+        <div style="font-size:12px; color:#444; margin-bottom:6px;">
+          <b>Edit existing job</b> (only <code>open</code> jobs by default)
+        </div>
+        <div style="display:flex; gap:8px; margin-bottom:8px; align-items:center;">
+          <input id="jobEditId" type="text" placeholder="job_id (click an item below or paste id)" style="padding:6px; flex:1;" />
+          <button id="jobLoadBtn">Load</button>
+        </div>
+        <div style="display:flex; gap:8px; margin-bottom:8px;">
+          <input id="jobEditTitle" type="text" placeholder="Edit title" style="padding:6px; flex:1;" />
+          <input id="jobEditReward" type="number" min="0" step="1" style="padding:6px; width:110px;" />
+        </div>
+        <textarea id="jobEditBody" placeholder="Edit body" rows="3" style="padding:6px; width:100%;"></textarea>
+        <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
+          <button id="jobSaveBtn">Save edits</button>
+          <button id="jobClearBtn">Clear</button>
+          <span id="jobEditStatus" class="pill">idle</span>
         </div>
         <div id="jobsList" style="margin-top:10px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size:12px; max-height:260px; overflow-y:auto;"></div>
       </div>
@@ -249,11 +282,13 @@
       return {};
     }
 
+    let currentRunId = "";
     async function fetchRunInfo() {
       try {
         const r = await fetch(`${BACKEND_HTTP}/run`);
         const j = await r.json();
-        runStatus.textContent = j.run_id ? j.run_id : "unknown";
+        currentRunId = j.run_id ? String(j.run_id) : "";
+        runStatus.textContent = currentRunId ? currentRunId : "unknown";
       } catch (e) {
         runStatus.textContent = "error";
       }
@@ -520,6 +555,16 @@
     const jobReviewer = document.getElementById("jobReviewer");
     const jobCreateBtn = document.getElementById("jobCreateBtn");
     const jobsRefreshBtn = document.getElementById("jobsRefreshBtn");
+    const jobStatusFilter = document.getElementById("jobStatusFilter");
+    const jobRunOnly = document.getElementById("jobRunOnly");
+    const jobEditId = document.getElementById("jobEditId");
+    const jobLoadBtn = document.getElementById("jobLoadBtn");
+    const jobEditTitle = document.getElementById("jobEditTitle");
+    const jobEditReward = document.getElementById("jobEditReward");
+    const jobEditBody = document.getElementById("jobEditBody");
+    const jobSaveBtn = document.getElementById("jobSaveBtn");
+    const jobClearBtn = document.getElementById("jobClearBtn");
+    const jobEditStatus = document.getElementById("jobEditStatus");
 
     // --- Events ---
     const eventsList = document.getElementById("eventsList");
@@ -717,6 +762,25 @@
       meta.textContent = `id=${j.job_id} created_by=${j.created_by} claimed_by=${j.claimed_by||"-"} submitted_by=${j.submitted_by||"-"}`;
       wrap.appendChild(meta);
 
+      // Quick edit helper for open jobs
+      if (j.status === "open") {
+        const editRow = document.createElement("div");
+        editRow.style.display = "flex";
+        editRow.style.gap = "8px";
+        editRow.style.marginTop = "6px";
+        const editBtn = document.createElement("button");
+        editBtn.textContent = "Edit";
+        editBtn.onclick = () => {
+          jobEditId.value = j.job_id;
+          jobEditTitle.value = j.title || "";
+          jobEditReward.value = String(j.reward || 0);
+          jobEditBody.value = j.body || "";
+          jobEditStatus.textContent = "loaded";
+        };
+        editRow.appendChild(editBtn);
+        wrap.appendChild(editRow);
+      }
+
       if (j.status === "submitted") {
         const sub = document.createElement("div");
         const s = (j.submission || "");
@@ -798,8 +862,14 @@
 
     async function refreshJobs() {
       try {
-        const data = await fetchJson("/jobs?limit=50");
-        const jobs = data.jobs || [];
+        const st = (jobStatusFilter && jobStatusFilter.value) ? jobStatusFilter.value : "";
+        const q = st ? `/jobs?limit=80&status=${encodeURIComponent(st)}` : "/jobs?limit=80";
+        const data = await fetchJson(q);
+        let jobs = data.jobs || [];
+        if (jobRunOnly && jobRunOnly.checked && currentRunId) {
+          const tag = `[run:${currentRunId}]`;
+          jobs = jobs.filter(j => (String(j.title||"").includes(tag) || String(j.body||"").includes(tag)));
+        }
         jobsList.innerHTML = "";
         for (const j of jobs) jobsList.appendChild(renderJob(j));
       } catch (e) {
@@ -810,6 +880,8 @@
     setInterval(refreshJobs, 5000);
 
     jobsRefreshBtn.onclick = refreshJobs;
+    if (jobStatusFilter) jobStatusFilter.onchange = refreshJobs;
+    if (jobRunOnly) jobRunOnly.onchange = refreshJobs;
     jobCreateBtn.onclick = async () => {
       const title = (jobTitle.value || "").trim();
       const body = (jobBody.value || "").trim();
@@ -827,6 +899,56 @@
       jobBody.value = "";
       await refreshJobs();
     };
+
+    async function loadJobForEdit() {
+      const jid = (jobEditId.value || "").trim();
+      if (!jid) return alert("Enter a job_id to load.");
+      jobEditStatus.textContent = "loading…";
+      try {
+        const data = await fetchJson(`/jobs/${encodeURIComponent(jid)}`);
+        const j = data.job;
+        jobEditTitle.value = j.title || "";
+        jobEditReward.value = String(j.reward || 0);
+        jobEditBody.value = j.body || "";
+        jobEditStatus.textContent = `loaded (${j.status})`;
+      } catch (e) {
+        jobEditStatus.textContent = "load error";
+        alert("Load job failed: " + e.message);
+      }
+    }
+    async function saveJobEdits() {
+      const jid = (jobEditId.value || "").trim();
+      if (!jid) return alert("Enter a job_id to save.");
+      jobEditStatus.textContent = "saving…";
+      try {
+        await fetchJson(`/jobs/${encodeURIComponent(jid)}/update`, {
+          method: "POST",
+          headers: {"Content-Type":"application/json", ...authHeaders()},
+          body: JSON.stringify({
+            title: (jobEditTitle.value || "").trim(),
+            body: (jobEditBody.value || "").trim(),
+            reward: parseFloat(jobEditReward.value || "0"),
+            by: jobReviewer.value || "human",
+            force: false
+          })
+        });
+        jobEditStatus.textContent = "saved";
+        await refreshJobs();
+      } catch (e) {
+        jobEditStatus.textContent = "save error";
+        alert("Save failed (need ADMIN_TOKEN if configured): " + e.message);
+      }
+    }
+    function clearJobEdits() {
+      jobEditId.value = "";
+      jobEditTitle.value = "";
+      jobEditReward.value = "";
+      jobEditBody.value = "";
+      jobEditStatus.textContent = "idle";
+    }
+    if (jobLoadBtn) jobLoadBtn.onclick = loadJobForEdit;
+    if (jobSaveBtn) jobSaveBtn.onclick = saveJobEdits;
+    if (jobClearBtn) jobClearBtn.onclick = clearJobEdits;
 
     function totalMinutes(day, minute) {
       return (day|0) * 1440 + (minute|0);

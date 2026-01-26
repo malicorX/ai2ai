@@ -402,6 +402,17 @@ def _build_run_job_state(job_events: list[dict]) -> dict[str, dict]:
                 arts = d.get("artifacts")
                 j["auto_verify_artifacts"] = arts if isinstance(arts, dict) else {}
                 j["auto_verified_at"] = ca or float(d.get("created_at") or 0.0)
+            elif t == "update":
+                # Edits to title/body/reward (task board).
+                if isinstance(d.get("title"), str):
+                    j["title"] = str(d.get("title") or "")
+                if isinstance(d.get("body"), str):
+                    j["body"] = str(d.get("body") or "")
+                if d.get("reward") is not None:
+                    try:
+                        j["reward"] = float(d.get("reward") or j.get("reward") or 0.0)
+                    except Exception:
+                        pass
             elif t == "review":
                 j["status"] = "approved" if bool(d.get("approved")) else "rejected"
                 j["reviewed_by"] = str(d.get("reviewed_by") or "")
@@ -1796,7 +1807,7 @@ class Job:
     auto_verified_at: float = 0.0
 
 
-JobEventType = Literal["create", "claim", "submit", "verify", "review", "cancel"]
+JobEventType = Literal["create", "claim", "submit", "verify", "review", "update", "cancel"]
 
 
 @dataclass
@@ -1822,6 +1833,19 @@ class JobClaimRequest(BaseModel):
 class JobSubmitRequest(BaseModel):
     agent_id: str
     submission: str
+
+
+class JobUpdateRequest(BaseModel):
+    """
+    Admin edit of an existing job/task (intended for human-curated task board).
+    We restrict edits to open jobs by default to avoid changing requirements mid-execution.
+    """
+
+    title: Optional[str] = None
+    body: Optional[str] = None
+    reward: Optional[float] = None
+    by: str = "human"
+    force: bool = False
 
 
 class JobReviewRequest(BaseModel):
@@ -1905,6 +1929,20 @@ def _apply_job_event(ev: JobEvent) -> None:
         job.status = "approved" if bool(d.get("approved")) else "rejected"
         return
 
+    if t == "update" and job.status in ("open", "claimed"):
+        # Allow updating title/body/reward for open tasks (or claimed if forced by admin).
+        # Status is not changed here.
+        if "title" in d and isinstance(d.get("title"), str):
+            job.title = str(d.get("title") or "")[:200]
+        if "body" in d and isinstance(d.get("body"), str):
+            job.body = str(d.get("body") or "")[:4000]
+        if "reward" in d and d.get("reward") is not None:
+            try:
+                job.reward = float(d.get("reward") or job.reward)
+            except Exception:
+                pass
+        return
+
     if t == "cancel" and job.status in ("open", "claimed", "submitted"):
         job.status = "cancelled"
         return
@@ -1963,6 +2001,49 @@ def jobs_get(job_id: str):
     if not j:
         return {"error": "not_found"}
     return {"job": asdict(j)}
+
+
+@app.post("/jobs/{job_id}/update")
+async def jobs_update(job_id: str, req: JobUpdateRequest, request: Request):
+    """
+    Admin edit of an existing job (title/body/reward).
+    Intended for a "human task board" where you curate tasks the agents should solve.
+    """
+    global _tick
+    _tick += 1
+    if not _require_admin(request):
+        return {"error": "unauthorized"}
+    j = _jobs.get(job_id)
+    if not j:
+        return {"error": "not_found"}
+    # By default only allow edits while open. 'force' allows claimed as well.
+    allow = (j.status == "open") or (bool(req.force) and j.status == "claimed")
+    if not allow:
+        return {"error": "not_editable", "status": j.status}
+
+    title = (req.title or "").strip() if isinstance(req.title, str) else None
+    body = (req.body or "").strip() if isinstance(req.body, str) else None
+    reward = None
+    if req.reward is not None:
+        try:
+            reward = float(req.reward)
+        except Exception:
+            reward = None
+
+    if (title is None) and (body is None) and (reward is None):
+        return {"error": "no_changes"}
+
+    data: dict = {"by": str(req.by or "human")[:80], "created_at": time.time()}
+    if title is not None:
+        data["title"] = title[:200]
+    if body is not None:
+        data["body"] = body[:4000]
+    if reward is not None:
+        data["reward"] = float(max(0.0, reward))
+
+    ev = _append_job_event("update", job_id, data)
+    await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})
+    return {"ok": True, "job": asdict(_jobs[job_id])}
 
 
 @app.post("/jobs/create")
