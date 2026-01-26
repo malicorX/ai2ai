@@ -46,6 +46,8 @@ class AgentState(TypedDict, total=False):
     outcome_ack_job_id: str
     # Guardrail: once we announce a redo cap for a root task, don't spam it again in this run.
     redo_capped_root_ids: List[str]
+    # If propose_job fails (e.g., backend dedupe), bump this so we pick a different fallback next tick.
+    propose_failed_count: int
     # Internal-only: runtime tool callables injected by the host process.
     __tools: dict
     action: Action
@@ -384,6 +386,79 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
 
     # Invariants first (code-enforced)
     if role == "proposer":
+        # If our last proposal failed to create a job (often due to dedupe), immediately choose a deterministic
+        # alternative instead of repeating the same proposal.
+        try:
+            pfc = int(state.get("propose_failed_count") or 0)
+        except Exception:
+            pfc = 0
+        if pfc > 0:
+            seed_src = (state.get("run_id") or "") + "|" + str(pfc) + "|" + str(len(state.get("recent_jobs") or []))
+            idx = int(hashlib.sha1(seed_src.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
+            pool = [
+                (
+                    "Task: Python Fibonacci (first 12)",
+                    "Write a Python script that prints the first 12 Fibonacci numbers, one per line.\n"
+                    "Acceptance criteria:\n"
+                    "- Running the script prints exactly these 12 lines:\n"
+                    "  0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89\n"
+                    "Evidence required in submission:\n"
+                    "- Include runnable Python code in a ```python``` fence.\n"
+                    "- Include an Evidence section that shows the observed stdout.\n",
+                ),
+                (
+                    "Task: Python Palindrome filter",
+                    "Write a Python script that reads a hardcoded list of strings and prints only the palindromes (case-insensitive), one per line.\n"
+                    "Use this list: ['Racecar','hello','Level','world','Deed','python']\n"
+                    "Acceptance criteria:\n"
+                    "- Output is exactly:\n"
+                    "  Racecar\n"
+                    "  Level\n"
+                    "  Deed\n"
+                    "Evidence required in submission:\n"
+                    "- Include runnable Python code in a ```python``` fence.\n"
+                    "- Include an Evidence section that shows the observed stdout.\n",
+                ),
+                (
+                    "Task: Python CSV summary (embedded data)",
+                    "Write a Python script that parses this CSV (embedded in the script) and prints total rows and sum of 'amount'.\n"
+                    "CSV:\n"
+                    "id,amount\n"
+                    "a,10\n"
+                    "b,5\n"
+                    "c,12\n"
+                    "Acceptance criteria:\n"
+                    "- Output is exactly two lines:\n"
+                    "  rows=3\n"
+                    "  sum=27\n"
+                    "Evidence required in submission:\n"
+                    "- Include runnable Python code in a ```python``` fence.\n"
+                    "- Include an Evidence section that shows the observed stdout.\n",
+                ),
+                (
+                    "Task: Python word count",
+                    "Write a Python script that counts words in the text: \"to be or not to be\" (split on whitespace) and prints each word and count sorted by descending count then alphabetical.\n"
+                    "Acceptance criteria:\n"
+                    "- Output lines are exactly:\n"
+                    "  be=2\n"
+                    "  to=2\n"
+                    "  not=1\n"
+                    "  or=1\n"
+                    "Evidence required in submission:\n"
+                    "- Include runnable Python code in a ```python``` fence.\n"
+                    "- Include an Evidence section that shows the observed stdout.\n",
+                ),
+            ]
+            t, b = pool[idx % len(pool)]
+            title = t
+            body = b
+            reward = 0.01
+            if run_tag and run_tag not in title:
+                title = f"{run_tag} {title}".strip()
+            body = _normalize_bullets_outside_code_fences(body)
+            state["action"] = {"kind": "propose_job", "note": f"fallback_after_create_fail n={pfc}", "job": {"title": title, "body": body, "reward": float(reward)}}
+            return state
+
         # Never create a redo (or any new job) if we already have an open job for this run.
         if _proposer_has_open_job(state):
             state["action"] = {"kind": "noop", "note": "proposer already has an open job"}
@@ -762,6 +837,17 @@ def node_act(state: AgentState, config: Any = None) -> AgentState:
                 pass
             state["last_job_id"] = jid
             state["acted"] = True
+            state["propose_failed_count"] = 0
+        else:
+            # Likely backend dedupe rejection or transient failure; bump counter so we choose a different fallback next tick.
+            try:
+                state["propose_failed_count"] = int(state.get("propose_failed_count") or 0) + 1
+            except Exception:
+                state["propose_failed_count"] = 1
+            try:
+                tools["trace_event"]("status", "propose_job failed (no job_id)", {"title": title[:120]})
+            except Exception:
+                pass
         return state
 
     if kind == "execute_job":
