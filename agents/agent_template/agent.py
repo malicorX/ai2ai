@@ -324,6 +324,7 @@ TRADE_EVERY_SECONDS = float(os.getenv("TRADE_EVERY_SECONDS", "20"))
 TRADE_GIFT_THRESHOLD = float(os.getenv("TRADE_GIFT_THRESHOLD", "25"))
 TRADE_GIFT_AMOUNT = float(os.getenv("TRADE_GIFT_AMOUNT", "5"))
 ARTIFACT_ANNOUNCE_IN_CHAT = os.getenv("ARTIFACT_ANNOUNCE_IN_CHAT", "0").strip() == "1"
+JOB_STATUS_DEDUPE_SECONDS = float(os.getenv("JOB_STATUS_DEDUPE_SECONDS", "300"))
 
 _last_replied_to_msg_id = None
 _last_seen_other_msg_id = None
@@ -336,6 +337,7 @@ _last_jobs_at = 0.0
 _active_job_id = ""
 _last_trade_at = 0.0
 _recent_sent_norm = []
+_job_status_last_sent: dict[str, float] = {}
 
 
 def upsert():
@@ -365,6 +367,7 @@ def maybe_reset_on_new_run() -> None:
     """
     global _last_run_id, _last_run_check_at
     global _last_replied_to_msg_id, _last_seen_other_msg_id, _last_sent_at, _recent_sent_norm
+    global _job_status_last_sent
     global _last_forced_meetup_msg_at_total, _last_meetup_id_sent
     global _active_conv_id, _active_conv_other_id, _active_conv_started_total, _active_conv_last_total, _active_conv_turns
     global _active_conv_job_id, _pending_claim_job_id, _force_computer_until_total
@@ -386,6 +389,7 @@ def maybe_reset_on_new_run() -> None:
         _last_seen_other_msg_id = None
         _last_sent_at = 0.0
         _recent_sent_norm = []
+        _job_status_last_sent = {}
         _last_forced_meetup_msg_at_total = -10**9
         _last_meetup_id_sent = None
         _active_conv_id = None
@@ -588,6 +592,44 @@ def chat_recent(limit: int = MAX_CHAT_TO_SCAN):
 
 
 def chat_send(text: str):
+    """
+    Centralized chat sender with a small dedupe gate.
+
+    Why: both the LangGraph reflect loop and the freeform chat loop can produce repeated
+    job-status announcements (approved/rejected/redo-cap), which reads like noisy back-and-forth.
+    """
+    global _job_status_last_sent
+
+    # Hard dedupe for job-status announcements, regardless of where they originated.
+    # Keyed by (kind, id) and suppressed for a cooldown window.
+    try:
+        t = str(text or "")
+        # Normalize minor variants (e.g. trailing "What do you think?")
+        norm = re.sub(r"\s+what do you think\?\s*$", "", t.strip(), flags=re.IGNORECASE)
+        norm = re.sub(r"\s+", " ", norm).strip()
+
+        key = ""
+        m = re.search(r"(?i)\bjob\s+`?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`?\s+was\s+(approved|rejected)\b", norm)
+        if m:
+            jid = m.group(1).lower()
+            outcome = m.group(2).lower()
+            key = f"job:{outcome}:{jid}"
+        else:
+            m2 = re.search(r"(?i)\bredo cap reached for root\s+`?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`?\b", norm)
+            if m2:
+                rid = m2.group(1).lower()
+                key = f"redo_cap:root:{rid}"
+
+        if key:
+            now = time.time()
+            last = float(_job_status_last_sent.get(key, 0.0) or 0.0)
+            if (now - last) < JOB_STATUS_DEDUPE_SECONDS:
+                return
+            _job_status_last_sent[key] = now
+    except Exception:
+        # Never break chat sending if dedupe parsing fails.
+        pass
+
     payload = {
         "sender_type": "agent",
         "sender_id": AGENT_ID,
