@@ -398,20 +398,24 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
             idx = int(hashlib.sha1(seed_src.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
             pool = [
                 (
-                    "[verifier:json_list] Task: Fiverr gigs we could do (offline ideation)",
+                    "[archetype:market_scan] [verifier:json_list] Task: Market scan — paid gigs we can deliver (with citations)",
                     "[verifier:json_list]\n"
-                    "[json_min_items:12]\n"
-                    "[json_required_keys:title,category,why_we_can_do_it,first_step,verification_plan]\n"
-                    "Create 12 Fiverr gig ideas we could realistically deliver.\n"
-                    "Do NOT browse the web; this is offline ideation.\n"
+                    "[json_min_items:10]\n"
+                    "[json_required_keys:title,platform,demand_signal,estimated_price_usd,why_fit,first_action,source_url,source_quote]\n"
+                    "Use web_fetch to research and propose 10 concrete paid gig/service ideas we could deliver.\n"
+                    "Goal: identify real demand signals and realistic pricing.\n"
                     "\n"
                     "Acceptance criteria:\n"
-                    "- Provide a JSON list with at least 12 objects.\n"
-                    "- Each object includes keys: title, category, why_we_can_do_it, first_step, verification_plan.\n"
+                    "- Provide a JSON list with at least 10 objects.\n"
+                    "- Each object includes keys: title, platform, demand_signal, estimated_price_usd, why_fit, first_action, source_url, source_quote.\n"
+                    "- Each source_quote must be a short verbatim quote from the fetched page that supports demand/pricing.\n"
+                    "\n"
+                    "Acceptance criteria:\n"
+                    "- Evidence is cited per item.\n"
                     "\n"
                     "Evidence required in submission:\n"
                     "- Include the JSON in a ```json``` code fence.\n"
-                    "- Include an Evidence section stating item_count=<N>.\n",
+                    "- Include an Evidence section stating item_count=<N> and list of distinct domains used.\n",
                 ),
                 (
                     "[verifier:md_table] Task: UI improvements for our web dashboard",

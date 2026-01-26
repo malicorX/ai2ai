@@ -693,6 +693,35 @@ def _auto_verify_task(job: Job, submission: str) -> AutoVerifyOutcome:
                     break
             if missing:
                 return AutoVerifyOutcome(True, False, f"auto_verify failed: json list missing required keys: {missing[:5]}", "json_list", {"missing": missing[:8], "required_keys": req_keys})
+
+        # Light validation for common citation fields if present/required.
+        # (We can't verify truthfulness yet, but we can ensure the structure is sane and includes evidence text.)
+        def _is_urlish(s: str) -> bool:
+            sl = (s or "").strip().lower()
+            return sl.startswith("http://") or sl.startswith("https://")
+
+        cite_url_keys = [k for k in req_keys if k.lower() in ("source_url", "url", "citation_url")]
+        cite_quote_keys = [k for k in req_keys if k.lower() in ("source_quote", "quote", "citation_quote", "evidence_quote")]
+        cite_issues: list[str] = []
+        if cite_url_keys or cite_quote_keys:
+            for i, it in enumerate(obj[: min(20, len(obj))]):
+                if not isinstance(it, dict):
+                    continue
+                for k in cite_url_keys:
+                    v = it.get(k)
+                    if not isinstance(v, str) or (not _is_urlish(v)) or len(v) > 2000:
+                        cite_issues.append(f"item[{i}] bad {k}")
+                        break
+                for k in cite_quote_keys:
+                    v = it.get(k)
+                    if not isinstance(v, str) or len(v.strip()) < 20:
+                        cite_issues.append(f"item[{i}] weak {k}")
+                        break
+                if len(cite_issues) >= 8:
+                    break
+        if cite_issues:
+            return AutoVerifyOutcome(True, False, f"auto_verify failed: citations malformed: {cite_issues[:5]}", "json_list", {"citation_issues": cite_issues[:8], "required_keys": req_keys})
+
         return AutoVerifyOutcome(True, True, f"auto_verify ok: json list parsed (items={len(obj)})", "json_list", {"item_count": len(obj), "required_keys": req_keys})
 
     def _verifier_md_table() -> Optional[AutoVerifyOutcome]:

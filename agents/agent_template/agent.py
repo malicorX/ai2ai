@@ -1429,23 +1429,60 @@ def _do_job(job: dict) -> str:
                     f"- Provide at least {max(1, json_min_items or 8)} items.\n"
                     "- Keep values concise strings.\n"
                 )
-                user_prompt = f"Job title:\n{title}\n\nJob body:\n{body}\n\nReturn the JSON array now:"
-                raw = (llm_chat(sys_prompt, user_prompt, max_tokens=900) or "").strip()
-                # Sanitize accidental fences
-                raw = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", raw).strip()
-                raw = re.sub(r"\s*```$", "", raw).strip()
-                # Validate / best-effort repair: ensure JSON parses
-                try:
-                    obj = json.loads(raw)
-                except Exception:
-                    # Try to extract first JSON object/array from the text
-                    m = re.search(r"(\[.*\])", raw, flags=re.DOTALL)
-                    obj = json.loads(m.group(1)) if m else []
-                if not isinstance(obj, list):
-                    obj = [obj]
-                item_count = len(obj)
+                # If the task requests citations, do a web_fetch-assisted workflow:
+                # 1) ask the model for candidate URLs
+                # 2) fetch a few
+                # 3) synthesize the JSON list using extracted quotes
+                wants_citations = ("source_url" in [k.lower() for k in req]) or ("source_quote" in [k.lower() for k in req])
+                sources = []
+                if wants_citations:
+                    try:
+                        trace_event("thought", "LLM: propose web sources for job", {"job_id": job_id})
+                        url_sys = (
+                            "Return ONLY a JSON array of 4-6 URLs to fetch for research.\n"
+                            "Rules:\n"
+                            "- Use https URLs.\n"
+                            "- Prefer sources that contain demand/pricing signals (marketplaces, docs, pricing pages, reports).\n"
+                            "- Do not include localhost or private IPs.\n"
+                        )
+                        url_user = f"Job title:\n{title}\n\nJob body:\n{body}\n\nReturn the URL list now:"
+                        url_raw = (llm_chat(url_sys, url_user, max_tokens=220) or "").strip()
+                        urls = _extract_json_array(url_raw)[:6]
+                        for u in urls[:3]:
+                            if not isinstance(u, str) or not u.strip():
+                                continue
+                            resp = web_fetch(u.strip())
+                            if resp.get("ok"):
+                                txt = str(resp.get("text") or "")
+                                sources.append(
+                                    {
+                                        "url": str(resp.get("final_url") or u)[:1000],
+                                        "sha1_16": str(resp.get("sha1_16") or "")[:32],
+                                        "content_type": str(resp.get("content_type") or "")[:120],
+                                        "excerpt": txt[:1800],
+                                    }
+                                )
+                    except Exception:
+                        sources = []
+
+                synth_sys = sys_prompt + "\n" + (
+                    "If sources are provided, you MUST use them for source_url and source_quote fields.\n"
+                    "source_quote MUST be a short verbatim quote from the excerpt.\n"
+                )
+                synth_user = f"Job title:\n{title}\n\nJob body:\n{body}\n\nSources (excerpts):\n{json.dumps(sources, ensure_ascii=False, indent=2)[:6000]}\n\nReturn the JSON array now:"
+                raw = (llm_chat(synth_sys, synth_user, max_tokens=950) or "").strip()
+                obj_list = _extract_json_array(raw)
+                # If model returned non-array, fallback to empty list.
+                item_count = len(obj_list)
                 evidence_kv["item_count"] = item_count
-                deliverable_md = "```json\n" + json.dumps(obj, ensure_ascii=False, indent=2) + "\n```"
+                try:
+                    domains = sorted({urllib.parse.urlparse(s.get("url","")).hostname or "" for s in sources})
+                    domains = [d for d in domains if d]
+                    if domains:
+                        evidence_kv["domains_used"] = ", ".join(domains[:8])
+                except Exception:
+                    pass
+                deliverable_md = "```json\n" + json.dumps(obj_list, ensure_ascii=False, indent=2) + "\n```"
             else:
                 sys_prompt = (
                     "You are completing a task. Output ONLY the deliverable in markdown.\n"
@@ -1779,6 +1816,29 @@ def web_fetch(url: str, timeout_seconds: float = 15.0, max_bytes: int = 200000) 
         return r.json() if r is not None else {"error": "no_response"}
     except Exception as e:
         return {"error": "web_fetch_failed", "detail": str(e)[:200]}
+
+
+def _extract_json_array(raw: str) -> list:
+    """
+    Best-effort parse of a JSON array from model output.
+    Returns [] if parsing fails.
+    """
+    try:
+        s = (raw or "").strip()
+        # strip accidental fences
+        s = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", s).strip()
+        s = re.sub(r"\s*```$", "", s).strip()
+        obj = json.loads(s)
+        return obj if isinstance(obj, list) else []
+    except Exception:
+        try:
+            m = re.search(r"(\[[\s\S]*\])", raw or "")
+            if not m:
+                return []
+            obj = json.loads(m.group(1))
+            return obj if isinstance(obj, list) else []
+        except Exception:
+            return []
     if not data.get("ok"):
         return ""
     job = data.get("job") or {}
