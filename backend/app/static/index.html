@@ -206,10 +206,11 @@
             <option value="cancelled">cancelled</option>
           </select>
           <label style="margin-left:auto; font-size:12px; color:#444; display:flex; align-items:center; gap:6px;">
-            <input id="jobRunOnly" type="checkbox" checked />
+            <input id="jobRunOnly" type="checkbox" />
             selected run only
           </label>
         </div>
+        <div id="jobFilterHint" style="font-size:12px; color:#666; margin:-4px 0 8px 0;"></div>
         <div style="display:flex; gap:8px; margin-bottom:8px;">
           <input id="jobTitle" type="text" placeholder="Job title" style="padding:6px; flex:1;" />
           <input id="jobReward" type="number" value="10" min="0" step="1" style="padding:6px; width:110px;" />
@@ -371,6 +372,16 @@
         const j = await r.json();
         currentRunId = j.run_id ? String(j.run_id) : "";
         runStatus.textContent = currentRunId ? currentRunId : "unknown";
+        // If the user hasn't explicitly selected a run yet, default the dropdown to the live current run.
+        try {
+          if (runsSelect && currentRunId) {
+            const prev = String(runsSelect.value || "");
+            // If nothing selected (or selection is empty), prefer current run.
+            if (!prev) {
+              runsSelect.value = currentRunId;
+            }
+          }
+        } catch (e) {}
       } catch (e) {
         runStatus.textContent = "error";
       }
@@ -381,7 +392,10 @@
       try {
         const r = await fetch(`${BACKEND_HTTP}/runs?limit=50`);
         const j = await r.json();
-        const runs = j.runs || [];
+        const runs = (j.runs || []).slice();
+        // Display newest runs first (run_id is sortable).
+        runs.sort((a, b) => String(b.run_id || "").localeCompare(String(a.run_id || "")));
+        const prevSel = String((runsSelect && runsSelect.value) ? runsSelect.value : "");
         runsSelect.innerHTML = "";
         for (const it of runs) {
           const opt = document.createElement("option");
@@ -391,6 +405,14 @@
           opt.textContent = ended ? `${it.run_id} (ended ${ended})` : it.run_id;
           runsSelect.appendChild(opt);
         }
+        // Prefer keeping the user's existing selection. If not available, prefer current run. Otherwise keep newest.
+        try {
+          const hasPrev = prevSel && Array.from(runsSelect.options).some(o => String(o.value) === prevSel);
+          const hasCur = currentRunId && Array.from(runsSelect.options).some(o => String(o.value) === currentRunId);
+          if (hasPrev) runsSelect.value = prevSel;
+          else if (hasCur) runsSelect.value = currentRunId;
+          else if (runsSelect.options.length) runsSelect.selectedIndex = 0;
+        } catch (e) {}
         runsStatus.textContent = `runs=${runs.length}`;
       } catch (e) {
         runsStatus.textContent = "error";
@@ -639,6 +661,7 @@
     const jobsRefreshBtn = document.getElementById("jobsRefreshBtn");
     const jobStatusFilter = document.getElementById("jobStatusFilter");
     const jobRunOnly = document.getElementById("jobRunOnly");
+    const jobFilterHint = document.getElementById("jobFilterHint");
     const jobEditId = document.getElementById("jobEditId");
     const jobLoadBtn = document.getElementById("jobLoadBtn");
     const jobEditTitle = document.getElementById("jobEditTitle");
@@ -1086,14 +1109,21 @@
       try {
         const st = (jobStatusFilter && jobStatusFilter.value) ? jobStatusFilter.value : "";
         // Fetch a larger window so "all statuses" doesn't hide older open jobs.
-        const q = st ? `/jobs?limit=200&status=${encodeURIComponent(st)}` : "/jobs?limit=200";
+        const q = st ? `/jobs?limit=500&status=${encodeURIComponent(st)}` : "/jobs?limit=500";
         const data = await fetchJson(q);
         let jobs = data.jobs || [];
+        const totalBefore = jobs.length;
         // Run filter: prefer the selected run in the Run Controls dropdown; fallback to current run id.
         const runFilterId = (runsSelect && runsSelect.value) ? String(runsSelect.value) : currentRunId;
         if (jobRunOnly && jobRunOnly.checked && runFilterId) {
           const tag = `[run:${runFilterId}]`;
           jobs = jobs.filter(j => (String(j.title||"").includes(tag) || String(j.body||"").includes(tag)));
+        }
+        if (jobFilterHint) {
+          const rid = (runsSelect && runsSelect.value) ? String(runsSelect.value) : (currentRunId || "");
+          const stTxt = st ? st : "all";
+          const runTxt = (jobRunOnly && jobRunOnly.checked) ? (`run=${rid || "?"}`) : "run=any";
+          jobFilterHint.textContent = `Filters: status=${stTxt}, ${runTxt} — showing ${jobs.length}/${totalBefore}`;
         }
         // Preserve scroll position across refresh to avoid jumpiness.
         const prevScroll = jobsList.scrollTop || 0;
