@@ -397,53 +397,80 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
             idx = int(hashlib.sha1(seed_src.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
             pool = [
                 (
+                    "[verifier:json_list] Task: Fiverr gigs we could do (offline ideation)",
+                    "[verifier:json_list]\n"
+                    "[json_min_items:12]\n"
+                    "[json_required_keys:title,category,why_we_can_do_it,first_step,verification_plan]\n"
+                    "Create 12 Fiverr gig ideas we could realistically deliver.\n"
+                    "Do NOT browse the web; this is offline ideation.\n"
+                    "\n"
+                    "Acceptance criteria:\n"
+                    "- Provide a JSON list with at least 12 objects.\n"
+                    "- Each object includes keys: title, category, why_we_can_do_it, first_step, verification_plan.\n"
+                    "\n"
+                    "Evidence required in submission:\n"
+                    "- Include the JSON in a ```json``` code fence.\n"
+                    "- Include an Evidence section stating item_count=<N>.\n",
+                ),
+                (
+                    "[verifier:md_table] Task: UI improvements for our web dashboard",
+                    "[verifier:md_table]\n"
+                    "[md_min_rows:8]\n"
+                    "[md_required_cols:Problem,Change,Why it helps,How to verify]\n"
+                    "Propose 8 concrete UI improvements for the current AI Village web UI.\n"
+                    "\n"
+                    "Acceptance criteria:\n"
+                    "- Provide a markdown table with at least 8 rows.\n"
+                    "- Columns: Problem | Change | Why it helps | How to verify.\n"
+                    "\n"
+                    "Evidence required in submission:\n"
+                    "- Include the table in the submission.\n"
+                    "- Include an Evidence section with the number of rows.\n",
+                ),
+                (
+                    "[verifier:json_list] Task: Weather check plan (no web)",
+                    "[verifier:json_list]\n"
+                    "[json_min_items:7]\n"
+                    "[json_required_keys:time,location,question,source_type,fallback_if_no_data]\n"
+                    "Design a 7-step plan to answer: 'What will the weather be like tomorrow?'\n"
+                    "No browsing: list *types* of sources and fallback steps.\n"
+                    "\n"
+                    "Acceptance criteria:\n"
+                    "- JSON list with >=7 steps.\n"
+                    "- Each step has keys time, location, question, source_type, fallback_if_no_data.\n"
+                    "\n"
+                    "Evidence required in submission:\n"
+                    "- JSON in ```json``` fence.\n"
+                    "- Evidence section with item_count.\n",
+                ),
+                (
+                    "Task: Community — 10 conversation starters",
+                    "Write 10 conversation starters for the agents that lead to useful work (not fluff).\n"
+                    "\n"
+                    "Acceptance criteria:\n"
+                    "- Exactly 10 numbered items.\n"
+                    "- Each item includes a concrete follow-up question.\n"
+                    "\n"
+                    "Evidence required in submission:\n"
+                    "- Evidence section that lists count=10.\n",
+                ),
+                (
+                    "Task: Ops runbook — keep the system healthy",
+                    "Create a short runbook checklist for keeping the system healthy day-to-day.\n"
+                    "\n"
+                    "Acceptance criteria:\n"
+                    "- 10 checklist items.\n"
+                    "- Each item has: purpose + command/API endpoint.\n"
+                    "\n"
+                    "Evidence required in submission:\n"
+                    "- Evidence section with count=10.\n",
+                ),
+                (
                     "Task: Python Fibonacci (first 12)",
                     "Write a Python script that prints the first 12 Fibonacci numbers, one per line.\n"
                     "Acceptance criteria:\n"
                     "- Running the script prints exactly these 12 lines:\n"
                     "  0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89\n"
-                    "Evidence required in submission:\n"
-                    "- Include runnable Python code in a ```python``` fence.\n"
-                    "- Include an Evidence section that shows the observed stdout.\n",
-                ),
-                (
-                    "Task: Python Palindrome filter",
-                    "Write a Python script that reads a hardcoded list of strings and prints only the palindromes (case-insensitive), one per line.\n"
-                    "Use this list: ['Racecar','hello','Level','world','Deed','python']\n"
-                    "Acceptance criteria:\n"
-                    "- Output is exactly:\n"
-                    "  Racecar\n"
-                    "  Level\n"
-                    "  Deed\n"
-                    "Evidence required in submission:\n"
-                    "- Include runnable Python code in a ```python``` fence.\n"
-                    "- Include an Evidence section that shows the observed stdout.\n",
-                ),
-                (
-                    "Task: Python CSV summary (embedded data)",
-                    "Write a Python script that parses this CSV (embedded in the script) and prints total rows and sum of 'amount'.\n"
-                    "CSV:\n"
-                    "id,amount\n"
-                    "a,10\n"
-                    "b,5\n"
-                    "c,12\n"
-                    "Acceptance criteria:\n"
-                    "- Output is exactly two lines:\n"
-                    "  rows=3\n"
-                    "  sum=27\n"
-                    "Evidence required in submission:\n"
-                    "- Include runnable Python code in a ```python``` fence.\n"
-                    "- Include an Evidence section that shows the observed stdout.\n",
-                ),
-                (
-                    "Task: Python word count",
-                    "Write a Python script that counts words in the text: \"to be or not to be\" (split on whitespace) and prints each word and count sorted by descending count then alphabetical.\n"
-                    "Acceptance criteria:\n"
-                    "- Output lines are exactly:\n"
-                    "  be=2\n"
-                    "  to=2\n"
-                    "  not=1\n"
-                    "  or=1\n"
                     "Evidence required in submission:\n"
                     "- Include runnable Python code in a ```python``` fence.\n"
                     "- Include an Evidence section that shows the observed stdout.\n",
@@ -664,12 +691,27 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
             "You are the proposer agent creating ONE verifiable task for the executor.\n"
             "Return STRICT JSON ONLY with schema:\n"
             "{\"title\": <string>, \"body\": <string>, \"reward\": <number>}\n"
+            "\n"
+            "Core goal: create USEFUL work, not just easy-to-verify Python.\n"
             "Rules:\n"
-            "- The task MUST be verifiable without web access.\n"
+            "- The task MUST be verifiable without web access (no browsing).\n"
             "- Include an 'Acceptance criteria:' section.\n"
             "- Include an 'Evidence required in submission:' section.\n"
-            "- Prefer deterministic checks (e.g., runnable code + expected stdout).\n"
+            "- Prefer deterministic verification, but NOT necessarily code.\n"
+            "- Prefer ONE of these machine-checkable output contracts:\n"
+            "  A) JSON list in a ```json``` fence (use tags so the verifier can check it):\n"
+            "     [verifier:json_list] [json_min_items:N] [json_required_keys:k1,k2,...]\n"
+            "  B) Markdown table with minimum rows (use tags):\n"
+            "     [verifier:md_table] [md_min_rows:N] [md_required_cols:col1,col2,...]\n"
+            "  C) If neither fits, use acceptance-criteria heuristic:\n"
+            "     ensure the submission includes an 'Evidence' section referencing each AC bullet.\n"
+            "- Avoid Python-only tasks unless truly necessary (aim for variety).\n"
             "- Keep body under 2200 chars.\n"
+            "\n"
+            "Good non-code examples (pick one style):\n"
+            "- Fiverr research plan WITHOUT web: propose 12 Fiverr gig ideas + verification plan in JSON.\n"
+            "- Product/UX: propose 8 UI improvements for the current web UI in a markdown table.\n"
+            "- Operations: write a runbook checklist in JSON with 10 steps.\n"
         )
         # Provide recent jobs to enforce novelty (avoid repeating the same task).
         recent_titles = []

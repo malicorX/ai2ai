@@ -514,6 +514,18 @@ def _auto_verify_task(job: Job, submission: str) -> AutoVerifyOutcome:
     body = (job.body or "").lower()
     text = (submission or "")
 
+    def _extract_bracket_tag(tag: str) -> str:
+        """
+        Extracts [tag:value] from job title/body (case-insensitive tag name).
+        Returns "" if not present.
+        """
+        try:
+            hay = (job.title or "") + "\n" + (job.body or "")
+            m = re.search(r"\[" + re.escape(tag) + r"\s*:\s*([^\]]+)\]", hay, flags=re.IGNORECASE)
+            return (m.group(1).strip() if m else "")
+        except Exception:
+            return ""
+
     def _trunc(s: Any, n: int = 1500) -> str:
         try:
             x = str(s or "")
@@ -560,6 +572,86 @@ def _auto_verify_task(job: Job, submission: str) -> AutoVerifyOutcome:
             return (True, True, "auto_verify ok: submission references all acceptance criteria (heuristic)", bullets)
         except Exception:
             return (False, True, "", [])
+
+    def _verifier_json_list() -> Optional[AutoVerifyOutcome]:
+        # Explicit tag preferred.
+        vtag = _extract_bracket_tag("verifier").lower()
+        if vtag not in ("json_list",):
+            return None
+        code = _extract_code_fence(text, "json") or _extract_code_fence(text, "javascript")
+        if not code:
+            return AutoVerifyOutcome(True, False, "auto_verify failed: missing ```json``` code fence in submission", "json_list", {})
+        if len(code) > 20000:
+            return AutoVerifyOutcome(True, False, "auto_verify failed: json too large", "json_list", {})
+        try:
+            obj = json.loads(code)
+        except Exception as e:
+            return AutoVerifyOutcome(True, False, f"auto_verify failed: invalid json ({e})", "json_list", {})
+        if not isinstance(obj, list):
+            return AutoVerifyOutcome(True, False, "auto_verify failed: expected a JSON list (array)", "json_list", {"type": str(type(obj))})
+        min_items = 0
+        try:
+            min_items = int(float(_extract_bracket_tag("json_min_items") or "0"))
+        except Exception:
+            min_items = 0
+        if min_items < 0:
+            min_items = 0
+        if min_items and len(obj) < min_items:
+            return AutoVerifyOutcome(True, False, f"auto_verify failed: expected at least {min_items} items, got {len(obj)}", "json_list", {"item_count": len(obj), "min_items": min_items})
+        req_keys = [k.strip() for k in (_extract_bracket_tag("json_required_keys") or "").split(",") if k.strip()]
+        if req_keys:
+            missing = []
+            for i, it in enumerate(obj[: min(20, len(obj))]):
+                if not isinstance(it, dict):
+                    missing.append(f"item[{i}] not object")
+                    continue
+                for k in req_keys:
+                    if k not in it:
+                        missing.append(f"item[{i}] missing {k}")
+                        break
+                if len(missing) >= 8:
+                    break
+            if missing:
+                return AutoVerifyOutcome(True, False, f"auto_verify failed: json list missing required keys: {missing[:5]}", "json_list", {"missing": missing[:8], "required_keys": req_keys})
+        return AutoVerifyOutcome(True, True, f"auto_verify ok: json list parsed (items={len(obj)})", "json_list", {"item_count": len(obj), "required_keys": req_keys})
+
+    def _verifier_md_table() -> Optional[AutoVerifyOutcome]:
+        vtag = _extract_bracket_tag("verifier").lower()
+        if vtag not in ("md_table", "markdown_table"):
+            return None
+        # Heuristic: find first markdown table block and count rows.
+        lines = (submission or "").splitlines()
+        table_lines: list[str] = []
+        in_table = False
+        for ln in lines:
+            if "|" in ln:
+                # Allow header and rows that look like markdown table
+                if ln.strip().startswith("|") or ("|" in ln.strip()):
+                    table_lines.append(ln.rstrip("\n"))
+                    in_table = True
+                    continue
+            if in_table:
+                break
+        if len(table_lines) < 2:
+            return AutoVerifyOutcome(True, False, "auto_verify failed: missing markdown table", "md_table", {})
+        # Extract header columns.
+        header = table_lines[0]
+        cols = [c.strip() for c in header.strip().strip("|").split("|") if c.strip()]
+        req_cols = [c.strip() for c in (_extract_bracket_tag("md_required_cols") or "").split(",") if c.strip()]
+        if req_cols:
+            missing_cols = [c for c in req_cols if c not in cols]
+            if missing_cols:
+                return AutoVerifyOutcome(True, False, f"auto_verify failed: missing required table columns: {missing_cols}", "md_table", {"cols": cols})
+        # Count body rows (skip separator line if present)
+        body_rows = [ln for ln in table_lines[1:] if not re.match(r"^\s*\|?\s*:-", ln)]
+        min_rows = 0
+        try:
+            min_rows = int(float(_extract_bracket_tag("md_min_rows") or "0"))
+        except Exception:
+            min_rows = 0
+        if min_rows and len(body_rows) < min_rows:
+            return AutoVerifyOutcome(True, False, f"auto_verify failed: expected at least {min_rows} table rows, got {len(body_rows)}", "md_table", {"row_count": len(body_rows), "min_rows": min_rows, "cols": cols})
+        return AutoVerifyOutcome(True, True, f"auto_verify ok: markdown table present (rows={len(body_rows)})", "md_table", {"row_count": len(body_rows), "cols": cols})
 
     # ---- Verifier registry (ordered) ----
     # Each verifier returns AutoVerifyOutcome(matched=..., ok=..., note=..., verifier=..., artifacts=...)
@@ -629,7 +721,7 @@ def _auto_verify_task(job: Job, submission: str) -> AutoVerifyOutcome:
             return None
         return AutoVerifyOutcome(True, bool(ac_ok), ac_note if ac_note else "auto_verify ok: acceptance criteria satisfied", "acceptance_criteria", {"acceptance_criteria": bullets[:10]})
 
-    for v in (_verifier_primes_smallest_five, _verifier_python_run, _verifier_acceptance_criteria_only):
+    for v in (_verifier_primes_smallest_five, _verifier_python_run, _verifier_json_list, _verifier_md_table, _verifier_acceptance_criteria_only):
         out = v()
         if out is not None:
             return out
