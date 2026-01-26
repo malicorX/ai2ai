@@ -608,17 +608,22 @@ def chat_send(text: str):
         norm = re.sub(r"\s+what do you think\?\s*$", "", t.strip(), flags=re.IGNORECASE)
         norm = re.sub(r"\s+", " ", norm).strip()
 
+        def _first_uuid(s: str) -> str:
+            m0 = re.search(r"(?i)\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b", s)
+            return (m0.group(1).lower() if m0 else "")
+
         key = ""
-        m = re.search(r"(?i)\bjob\s+`?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`?\s+was\s+(approved|rejected)\b", norm)
-        if m:
-            jid = m.group(1).lower()
-            outcome = m.group(2).lower()
-            key = f"job:{outcome}:{jid}"
-        else:
-            m2 = re.search(r"(?i)\bredo cap reached for root\s+`?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`?\b", norm)
-            if m2:
-                rid = m2.group(1).lower()
+        low = norm.lower()
+        if "redo cap reached" in low:
+            rid = _first_uuid(norm)
+            if rid:
                 key = f"redo_cap:root:{rid}"
+        elif (" was approved" in low) or (" was rejected" in low):
+            # Key by (approved|rejected, job_id) even if formatting varies.
+            outcome = "approved" if " was approved" in low else "rejected"
+            jid = _first_uuid(norm)
+            if jid:
+                key = f"job:{outcome}:{jid}"
 
         if key:
             now = time.time()
