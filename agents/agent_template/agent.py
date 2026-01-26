@@ -1618,6 +1618,7 @@ def maybe_langgraph_jobs(world) -> None:
         "trace_event": trace_event,
         "memory_retrieve": lambda q, k=8: memory_retrieve(q, k=int(k)),
         "memory_append": _lg_memory_append,
+        "web_fetch": lambda url: web_fetch(str(url or "")),
     }
 
     # State is intentionally compact for now; we'll expand this into a full world-model over time.
@@ -1759,6 +1760,25 @@ def jobs_create(title: str, body: str, reward: float) -> str:
         data = r.json()
     except Exception:
         return ""
+
+
+def web_fetch(url: str, timeout_seconds: float = 15.0, max_bytes: int = 200000) -> dict:
+    """
+    Tool Gateway: fetch a public URL via backend (guardrails + logging live there).
+    Returns dict {ok:bool, ...} or {error:...}.
+    """
+    try:
+        payload = {
+            "agent_id": AGENT_ID,
+            "agent_name": DISPLAY_NAME or AGENT_ID,
+            "url": str(url or "")[:2000],
+            "timeout_seconds": float(timeout_seconds),
+            "max_bytes": int(max_bytes),
+        }
+        r = requests.post(f"{WORLD_API}/tools/web_fetch", json=payload, timeout=20)
+        return r.json() if r is not None else {"error": "no_response"}
+    except Exception as e:
+        return {"error": "web_fetch_failed", "detail": str(e)[:200]}
     if not data.get("ok"):
         return ""
     job = data.get("job") or {}

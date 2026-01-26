@@ -65,6 +65,7 @@ class Tools(TypedDict):
     trace_event: Callable[[str, str, dict], None]
     memory_retrieve: Callable[[str, int], List[dict]]
     memory_append: Callable[[str, str, List[str], float], None]
+    web_fetch: Callable[[str], dict]
 
 
 _TOOLS: Optional[Tools] = None

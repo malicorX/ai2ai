@@ -7,6 +7,9 @@ import os
 from pathlib import Path
 import math
 import urllib.request
+import urllib.parse
+import socket
+import ipaddress
 import uuid
 import time
 import re
@@ -45,6 +48,14 @@ STARTING_AIDOLLARS = float(os.getenv("STARTING_AIDOLLARS", "100"))
 TREASURY_ID = os.getenv("TREASURY_ID", "treasury")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 TASK_FAIL_PENALTY = float(os.getenv("TASK_FAIL_PENALTY", "1.0"))
+
+# --- Tool Gateway: web fetch (guardrails) ---
+WEB_FETCH_ENABLED = os.getenv("WEB_FETCH_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+# Comma-separated list of allowed domains/suffixes. Example: "wikipedia.org,open-meteo.com"
+WEB_FETCH_ALLOWLIST = [d.strip().lower() for d in os.getenv("WEB_FETCH_ALLOWLIST", "").split(",") if d.strip()]
+WEB_FETCH_TIMEOUT_SECONDS = float(os.getenv("WEB_FETCH_TIMEOUT_SECONDS", "15"))
+WEB_FETCH_MAX_BYTES = int(float(os.getenv("WEB_FETCH_MAX_BYTES", "200000")))  # 200 KB default
+WEB_FETCH_MAX_PER_REQUEST = int(float(os.getenv("WEB_FETCH_MAX_PER_REQUEST", "3")))  # per call, for batch support later
 
 # Run/session id (helps agents reset local state after /admin/new_run without restarting containers)
 _run_id: str = time.strftime("%Y%m%d-%H%M%S")
@@ -289,6 +300,75 @@ def _require_admin(request: Request) -> bool:
         return True
     auth = (request.headers.get("authorization") or "").strip()
     return auth == f"Bearer {ADMIN_TOKEN}"
+
+
+def _emit_trace(agent_id: str, agent_name: str, kind: TraceKind, summary: str, data: Optional[dict] = None) -> None:
+    """Internal helper: append a trace event without going through HTTP."""
+    try:
+        now = time.time()
+        ev = TraceEvent(
+            event_id=str(uuid.uuid4()),
+            agent_id=str(agent_id or "unknown")[:80],
+            agent_name=str(agent_name or agent_id or "unknown")[:80],
+            kind=kind,
+            summary=(summary or "").strip()[:400],
+            data=data or {},
+            created_at=now,
+        )
+        _trace.append(ev)
+        if len(_trace) > _trace_max:
+            del _trace[: len(_trace) - _trace_max]
+        _append_jsonl(TRACE_PATH, asdict(ev))
+        # Best-effort broadcast; ignore failures.
+        try:
+            asyncio.create_task(ws_manager.broadcast({"type": "trace", "data": asdict(ev)}))
+        except Exception:
+            pass
+    except Exception:
+        return
+
+
+def _is_allowed_web_url(url: str) -> tuple[bool, str]:
+    """
+    Guardrails for web tools:
+    - only http(s)
+    - block localhost / private / link-local / loopback targets (SSRF)
+    - optional domain allowlist
+    """
+    try:
+        u = urllib.parse.urlparse(url.strip())
+        if u.scheme not in ("http", "https"):
+            return (False, "invalid_scheme")
+        host = (u.hostname or "").strip().lower()
+        if not host:
+            return (False, "missing_host")
+        if host in ("localhost",):
+            return (False, "blocked_host")
+        # Optional allowlist
+        if WEB_FETCH_ALLOWLIST:
+            ok = False
+            for allowed in WEB_FETCH_ALLOWLIST:
+                if host == allowed or host.endswith("." + allowed):
+                    ok = True
+                    break
+            if not ok:
+                return (False, "host_not_allowlisted")
+        # Resolve and block private IPs
+        try:
+            infos = socket.getaddrinfo(host, None)
+            addrs = {i[4][0] for i in infos if i and i[4]}
+        except Exception:
+            addrs = set()
+        for ip_s in list(addrs)[:8]:
+            try:
+                ip = ipaddress.ip_address(ip_s)
+                if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                    return (False, "blocked_ip")
+            except Exception:
+                continue
+        return (True, "")
+    except Exception:
+        return (False, "parse_error")
 
 
 @app.get("/")
@@ -2840,6 +2920,15 @@ class TraceEventRequest(BaseModel):
     data: dict = Field(default_factory=dict)
 
 
+class WebFetchRequest(BaseModel):
+    agent_id: str = "unknown"
+    agent_name: str = ""
+    url: str
+    # Optional: override defaults (still clamped)
+    timeout_seconds: Optional[float] = None
+    max_bytes: Optional[int] = None
+
+
 _trace: List[TraceEvent] = []
 _trace_max = 600
 
@@ -2959,6 +3048,69 @@ async def trace_event(req: TraceEventRequest):
 def trace_recent(limit: int = 50):
     limit = max(1, min(limit, 300))
     return {"events": [asdict(e) for e in _trace[-limit:]]}
+
+
+@app.post("/tools/web_fetch")
+async def tools_web_fetch(req: WebFetchRequest, request: Request):
+    """
+    Tool Gateway: fetch a public web page for agent use (research/citations).
+
+    Guardrails:
+    - disabled unless WEB_FETCH_ENABLED=1 (or ADMIN_TOKEN unset + enable flag still required)
+    - SSRF protection (no localhost/private IPs)
+    - optional domain allowlist (WEB_FETCH_ALLOWLIST)
+    - size/time caps
+    - logs tool use to trace
+    """
+    global _tick
+    _tick += 1
+    if not WEB_FETCH_ENABLED:
+        return {"error": "web_fetch_disabled"}
+
+    url = str(req.url or "").strip()
+    ok, why = _is_allowed_web_url(url)
+    if not ok:
+        _emit_trace(req.agent_id, req.agent_name, "status", "tool:web_fetch blocked", {"url": url[:500], "reason": why})
+        return {"error": "blocked", "reason": why}
+
+    timeout = float(req.timeout_seconds or WEB_FETCH_TIMEOUT_SECONDS)
+    timeout = max(2.0, min(30.0, timeout))
+    max_bytes = int(req.max_bytes or WEB_FETCH_MAX_BYTES)
+    max_bytes = max(10_000, min(1_000_000, max_bytes))
+
+    headers = {
+        "User-Agent": "ai_ai2ai/1.0 (ToolGateway web_fetch)",
+        "Accept": "text/html,application/json,text/plain;q=0.9,*/*;q=0.1",
+    }
+
+    _emit_trace(req.agent_id, req.agent_name, "action", "tool:web_fetch start", {"url": url[:500], "timeout": timeout, "max_bytes": max_bytes})
+    try:
+        r = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(r, timeout=timeout) as resp:
+            final_url = str(getattr(resp, "geturl", lambda: url)() or url)[:1000]
+            ct = str(resp.headers.get("content-type") or "")[:200]
+            raw = resp.read(max_bytes + 1)
+            truncated = len(raw) > max_bytes
+            if truncated:
+                raw = raw[:max_bytes]
+            # best-effort decode
+            text = raw.decode("utf-8", errors="replace")
+            sha = hashlib.sha1(raw).hexdigest()[:16]
+            out = {
+                "ok": True,
+                "url": url,
+                "final_url": final_url,
+                "content_type": ct,
+                "bytes": len(raw),
+                "truncated": bool(truncated),
+                "sha1_16": sha,
+                "text": text,
+            }
+            _emit_trace(req.agent_id, req.agent_name, "action", "tool:web_fetch ok", {"url": url[:500], "final_url": final_url[:500], "bytes": len(raw), "truncated": bool(truncated), "sha1_16": sha, "content_type": ct})
+            return out
+    except Exception as e:
+        _emit_trace(req.agent_id, req.agent_name, "error", "tool:web_fetch error", {"url": url[:500], "error": str(e)[:300]})
+        return {"error": "fetch_failed", "detail": str(e)[:300]}
 
 
 @app.get("/chat/topic")
