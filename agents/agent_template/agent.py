@@ -2826,7 +2826,9 @@ def main():
                     # Task proposer mode: agent_1 periodically creates a single open task for agent_2 to execute.
                     maybe_propose_task()
             maybe_process_event_invites(world)
-            maybe_reflect(world)
+            # Executor must not block on non-essential LLM calls (reflection/chat); keep it focused on task throughput.
+            if not (USE_LANGGRAPH and ROLE == "executor"):
+                maybe_reflect(world)
             # plan schedule at the computer once per simulated day
             maybe_plan_new_day(world)
             # Events take priority over the normal schedule while in the attendance window
@@ -2840,9 +2842,11 @@ def main():
             maybe_update_balance()
             if not USE_LANGGRAPH:
                 maybe_work_jobs()
-            maybe_chat(world)
+            if not (USE_LANGGRAPH and ROLE == "executor"):
+                maybe_chat(world)
             maybe_write_memory(world)
-            maybe_trade(world)
+            if not (USE_LANGGRAPH and ROLE == "executor"):
+                maybe_trade(world)
         except Exception as e:
             print(f"[{AGENT_ID}] error: {e}")
             trace_event("error", f"loop error: {e}", {})
