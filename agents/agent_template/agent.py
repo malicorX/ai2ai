@@ -1222,11 +1222,13 @@ def _do_job(job: dict) -> str:
     evidence_req = _extract_bullets_under("evidence required in submission")
 
     # Use memory as "long-term context"
+    # (Executor worker mode should not block on extra network calls here.)
     mem = []
-    try:
-        mem = memory_recent(limit=8)
-    except Exception:
-        mem = []
+    if not (USE_LANGGRAPH and ROLE == "executor"):
+        try:
+            mem = memory_recent(limit=8)
+        except Exception:
+            mem = []
 
     mem_lines = []
     for m in mem[-5:]:
