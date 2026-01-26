@@ -42,6 +42,8 @@ class AgentState(TypedDict, total=False):
     last_job: dict
     handled_rejection_job_id: str
     outcome_ack_job_id: str
+    # Guardrail: once we announce a redo cap for a root task, don't spam it again in this run.
+    redo_capped_root_ids: List[str]
     # Internal-only: runtime tool callables injected by the host process.
     __tools: dict
     action: Action
@@ -410,6 +412,19 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
                 max_attempts = int(state.get("max_redo_attempts_per_root") or 3)
                 total_rej = _count_rejections_for_root(state.get("rejected_jobs") or [], root_id)
                 if max_attempts > 0 and total_rej >= max_attempts:
+                    # If we already announced the cap for this root in this run, do not repeat it.
+                    try:
+                        capped = set(
+                            str(x or "").strip()
+                            for x in (state.get("redo_capped_root_ids") or [])
+                            if str(x or "").strip()
+                        )
+                    except Exception:
+                        capped = set()
+                    if root_id and root_id in capped:
+                        state["handled_rejection_job_id"] = bad_id
+                        state["action"] = {"kind": "noop", "note": f"redo_cap_already_announced root={root_id}"}
+                        return state
                     tools["trace_event"](
                         "status",
                         "langgraph: redo cap reached; requesting human intervention",
@@ -433,6 +448,13 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
                     except Exception:
                         pass
                     state["handled_rejection_job_id"] = bad_id
+                    try:
+                        lst = list(state.get("redo_capped_root_ids") or [])
+                        if root_id and root_id not in lst:
+                            lst.append(root_id)
+                        state["redo_capped_root_ids"] = lst
+                    except Exception:
+                        pass
                     state["action"] = {"kind": "noop", "note": f"redo_cap_reached root={root_id} n={total_rej} max={max_attempts}"}
                     return state
 

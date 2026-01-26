@@ -49,6 +49,7 @@ _last_langgraph_jobs_at = 0.0
 _last_langgraph_job_id = ""
 _last_langgraph_handled_rejection_job_id = ""
 _last_langgraph_outcome_ack_job_id = ""
+_last_langgraph_redo_capped_root_ids: list[str] = []
 
 # Conversation protocol (sticky sessions)
 _active_conv_id = None
@@ -626,11 +627,10 @@ def chat_send(text: str):
                 key = f"job:{outcome}:{jid}"
 
         if key:
-            now = time.time()
-            last = float(_job_status_last_sent.get(key, 0.0) or 0.0)
-            if (now - last) < JOB_STATUS_DEDUPE_SECONDS:
+            # Once-per-run: if we've ever sent this job-status key in this run, suppress repeats.
+            if key in _job_status_last_sent:
                 return
-            _job_status_last_sent[key] = now
+            _job_status_last_sent[key] = time.time()
     except Exception:
         # Never break chat sending if dedupe parsing fails.
         pass
@@ -1540,6 +1540,7 @@ def maybe_langgraph_jobs(world) -> None:
         "last_job_id": _last_langgraph_job_id,
         "handled_rejection_job_id": _last_langgraph_handled_rejection_job_id,
         "outcome_ack_job_id": _last_langgraph_outcome_ack_job_id,
+        "redo_capped_root_ids": list(_last_langgraph_redo_capped_root_ids or []),
         "max_redo_attempts_per_root": int(os.getenv("MAX_REDO_ATTEMPTS_PER_ROOT", "3")),
     }
 
@@ -1561,6 +1562,13 @@ def maybe_langgraph_jobs(world) -> None:
             ack = str(out.get("outcome_ack_job_id") or "").strip()
             if ack:
                 globals()["_last_langgraph_outcome_ack_job_id"] = ack
+        except Exception:
+            pass
+        try:
+            roots = out.get("redo_capped_root_ids") or []
+            if isinstance(roots, list):
+                cleaned = [str(x or "").strip() for x in roots if str(x or "").strip()]
+                globals()["_last_langgraph_redo_capped_root_ids"] = cleaned
         except Exception:
             pass
         trace_event("status", "langgraph: step complete", {"acted": bool(out.get("acted")), "action": out.get("action")})
