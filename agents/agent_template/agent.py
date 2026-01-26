@@ -1405,6 +1405,11 @@ def _do_job(job: dict) -> str:
                     "Rules:\n"
                     f"- Columns MUST be exactly: {' | '.join(cols)}\n"
                     f"- Provide at least {max(1, md_min_rows or 8)} data rows.\n"
+                    "- You MUST use pipe characters '|' and include BOTH a header row and a separator row.\n"
+                    "- Format MUST look like:\n"
+                    f"| {' | '.join(cols)} |\n"
+                    f"| {' | '.join(['---']*len(cols))} |\n"
+                    "- Then one row per improvement.\n"
                     "- Keep each cell short and concrete.\n"
                     "- Do not output any prose before/after the table.\n"
                 )
