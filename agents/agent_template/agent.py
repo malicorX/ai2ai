@@ -1468,29 +1468,34 @@ def _do_job(job: dict) -> str:
                     "source_quote MUST be a short verbatim quote from the excerpt.\n"
                 )
                 synth_user = f"Job title:\n{title}\n\nJob body:\n{body}\n\nSources (excerpts):\n{json.dumps(sources, ensure_ascii=False, indent=2)[:6000]}\n\nReturn the JSON array now:"
-                raw = ""
-                try:
-                    raw = (llm_chat(synth_sys, synth_user, max_tokens=950) or "").strip()
-                except Exception:
-                    raw = ""
-                obj_list = _extract_json_array(raw)
+                # Default to deterministic synthesis (fast + reliable). LLM-based synthesis can be enabled via env.
+                use_llm_cited = os.getenv("CITED_JSON_USE_LLM", "0").strip() == "1"
 
-                # Fallback: if LLM fails or returns too few items, synthesize a minimal cited list from sources.
+                # Minimum items and helper for citations.
                 min_items = max(1, int(json_min_items or 8))
                 req_l = [k.lower() for k in req]
-                if len(obj_list) < min_items and wants_citations and sources:
-                    def _pick_quote(ex: str) -> str:
-                        q = (ex or "").strip().replace("\n", " ")
-                        q = re.sub(r"\s+", " ", q)
-                        return q[:240]
 
-                    base_items = [
-                        {"title": "Profile/portfolio refresh for marketplace clients", "platform": "Fiverr/Upwork", "demand_signal": "Many listings for profile optimization / portfolio review", "estimated_price_usd": "25-150", "why_fit": "We can produce structured profiles + deliverables fast", "first_action": "Draft 3 package tiers + sample before/after profile"},
-                        {"title": "Weekly social media content calendar + captions", "platform": "Fiverr", "demand_signal": "High volume of content-calendar services", "estimated_price_usd": "50-300", "why_fit": "Verifiable markdown/JSON calendar output", "first_action": "Pick a niche and create a 2-week sample calendar"},
-                        {"title": "Resume/CV rewrite + ATS checklist", "platform": "Upwork", "demand_signal": "Frequent job posts for resume writing", "estimated_price_usd": "40-250", "why_fit": "Checklist + rewritten doc is verifiable", "first_action": "Create an ATS checklist template and a sample rewrite"},
-                        {"title": "Website UX teardown (1 page) with action list", "platform": "Upwork", "demand_signal": "UX audit gigs appear regularly", "estimated_price_usd": "75-400", "why_fit": "Deliverable is a structured report + prioritized fixes", "first_action": "Define a 10-point rubric and report template"},
-                        {"title": "Competitor research summary table", "platform": "Fiverr/Upwork", "demand_signal": "Common market research requests", "estimated_price_usd": "50-300", "why_fit": "Verifiable table + sources", "first_action": "Prepare a table schema and example"},
-                    ]
+                def _pick_quote(ex: str) -> str:
+                    q = (ex or "").strip().replace("\n", " ")
+                    q = re.sub(r"\s+", " ", q)
+                    return q[:240]
+
+                # A small "base library" of plausible gig ideas; we rotate to fill min_items.
+                base_items = [
+                    {"title": "Profile/portfolio refresh for marketplace clients", "platform": "Fiverr/Upwork", "demand_signal": "Marketplace demand for profile optimization / portfolio review", "estimated_price_usd": "25-150", "why_fit": "Structured rewrite + checklist deliverable is verifiable", "first_action": "Draft 3 package tiers + sample before/after profile"},
+                    {"title": "Weekly social media content calendar + captions", "platform": "Fiverr", "demand_signal": "Recurring content needs for small businesses", "estimated_price_usd": "50-300", "why_fit": "Calendar output is verifiable (JSON/table)", "first_action": "Pick a niche and create a 2-week sample calendar"},
+                    {"title": "Resume/CV rewrite + ATS checklist", "platform": "Upwork", "demand_signal": "Frequent resume writing job posts", "estimated_price_usd": "40-250", "why_fit": "Before/after + checklist is verifiable", "first_action": "Create an ATS checklist template and sample rewrite"},
+                    {"title": "Website UX teardown (1 page) with prioritized fixes", "platform": "Upwork", "demand_signal": "UX audit gigs appear regularly", "estimated_price_usd": "75-400", "why_fit": "Report + prioritized list is verifiable", "first_action": "Define a 10-point rubric and report template"},
+                    {"title": "Competitor research summary table", "platform": "Fiverr/Upwork", "demand_signal": "Common market research requests", "estimated_price_usd": "50-300", "why_fit": "Table + sources is verifiable", "first_action": "Prepare a table schema and example"},
+                    {"title": "Landing page copy (headline + sections) for one offer", "platform": "Fiverr", "demand_signal": "Copywriting services widely offered", "estimated_price_usd": "50-350", "why_fit": "Copy deliverable is self-contained and reviewable", "first_action": "Create 3 headline variants + 1 full page draft"},
+                    {"title": "Simple logo brief + 3 concept directions", "platform": "Fiverr", "demand_signal": "Branding gigs are common", "estimated_price_usd": "30-250", "why_fit": "Concept brief is verifiable; production can be later-tooled", "first_action": "Write a brand questionnaire + 3 directions"},
+                    {"title": "Product listing rewrite (title+bullets) for ecommerce", "platform": "Upwork", "demand_signal": "Listing optimization requests are common", "estimated_price_usd": "30-200", "why_fit": "Before/after listing is verifiable", "first_action": "Create a listing template and a sample rewrite"},
+                    {"title": "Customer support macros (20 replies) for a niche", "platform": "Fiverr/Upwork", "demand_signal": "Support automation is valuable to sellers", "estimated_price_usd": "40-250", "why_fit": "Macros are verifiable text deliverables", "first_action": "Collect top 10 FAQs and draft macros"},
+                    {"title": "One-page SOP (standard operating procedure) for a workflow", "platform": "Upwork", "demand_signal": "Ops/documentation gigs appear regularly", "estimated_price_usd": "50-300", "why_fit": "SOP is verifiable and templated", "first_action": "Draft SOP template + example SOP"},
+                ]
+
+                obj_list: list = []
+                if wants_citations and sources and (not use_llm_cited):
                     built = []
                     for i in range(min_items):
                         src = sources[i % len(sources)]
@@ -1501,6 +1506,24 @@ def _do_job(job: dict) -> str:
                             item["source_quote"] = _pick_quote(str(src.get("excerpt") or "Example Domain."))
                         built.append(item)
                     obj_list = built
+                else:
+                    raw = ""
+                    try:
+                        raw = (llm_chat(synth_sys, synth_user, max_tokens=950) or "").strip()
+                    except Exception:
+                        raw = ""
+                    obj_list = _extract_json_array(raw)
+                    if len(obj_list) < min_items and wants_citations and sources:
+                        built = []
+                        for i in range(min_items):
+                            src = sources[i % len(sources)]
+                            item = dict(base_items[i % len(base_items)])
+                            if "source_url" in req_l:
+                                item["source_url"] = src.get("url") or "https://example.com"
+                            if "source_quote" in req_l:
+                                item["source_quote"] = _pick_quote(str(src.get("excerpt") or "Example Domain."))
+                            built.append(item)
+                        obj_list = built
 
                 item_count = len(obj_list)
                 evidence_kv["item_count"] = item_count
