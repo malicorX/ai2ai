@@ -698,6 +698,8 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
             "- Include an 'Acceptance criteria:' section.\n"
             "- Include an 'Evidence required in submission:' section.\n"
             "- Prefer deterministic verification, but NOT necessarily code.\n"
+            "- Include an explicit tag in the *title* like: [archetype:<one_short_phrase>]\n"
+            "- Maximize novelty: do NOT reuse the same archetype or task idea from the examples below.\n"
             "- Prefer ONE of these machine-checkable output contracts:\n"
             "  A) JSON list in a ```json``` fence (use tags so the verifier can check it):\n"
             "     [verifier:json_list] [json_min_items:N] [json_required_keys:k1,k2,...]\n"
@@ -708,10 +710,11 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
             "- Avoid Python-only tasks unless truly necessary (aim for variety).\n"
             "- Keep body under 2200 chars.\n"
             "\n"
-            "Good non-code examples (pick one style):\n"
-            "- Fiverr research plan WITHOUT web: propose 12 Fiverr gig ideas + verification plan in JSON.\n"
-            "- Product/UX: propose 8 UI improvements for the current web UI in a markdown table.\n"
-            "- Operations: write a runbook checklist in JSON with 10 steps.\n"
+            "Examples below are ONLY format references. You MUST NOT reuse these exact ideas.\n"
+            "Format examples (DO NOT repeat these ideas):\n"
+            "- \"Fiverr gigs we could do\" as JSON list.\n"
+            "- \"UI improvements\" as markdown table.\n"
+            "- \"Ops runbook\" as checklist.\n"
         )
         # Provide recent jobs to enforce novelty (avoid repeating the same task).
         recent_titles = []
