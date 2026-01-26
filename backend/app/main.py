@@ -340,6 +340,7 @@ def _build_run_job_state(job_events: list[dict]) -> dict[str, dict]:
                     "body": str(d.get("body") or ""),
                     "reward": float(d.get("reward") or 0.0),
                     "created_by": str(d.get("created_by") or ""),
+                    "source": str(d.get("source") or ""),
                     "created_at": ca or float(d.get("created_at") or 0.0),
                     "status": "open",
                     "claimed_by": "",
@@ -371,6 +372,7 @@ def _build_run_job_state(job_events: list[dict]) -> dict[str, dict]:
                     "body": "",
                     "reward": 0.0,
                     "created_by": "",
+                    "source": "",
                     "created_at": 0.0,
                     "status": "unknown",
                     "claimed_by": "",
@@ -421,6 +423,8 @@ def _build_run_job_state(job_events: list[dict]) -> dict[str, dict]:
                         pass
                 if isinstance(d.get("ratings"), dict):
                     j["ratings"] = dict(d.get("ratings") or {})
+                if isinstance(d.get("source"), str):
+                    j["source"] = str(d.get("source") or "")
             elif t == "review":
                 j["status"] = "approved" if bool(d.get("approved")) else "rejected"
                 j["reviewed_by"] = str(d.get("reviewed_by") or "")
@@ -935,6 +939,7 @@ def _build_viewer_html(messages: list[dict], thoughts: list[dict], jobs_state: d
             if j:
                 st = str(j.get("status") or "")
                 created_by = str(j.get("created_by") or "")
+                source = str(j.get("source") or "")
                 claimed_by = str(j.get("claimed_by") or "")
                 submitted_by = str(j.get("submitted_by") or "")
                 reviewed_by = str(j.get("reviewed_by") or "")
@@ -955,6 +960,7 @@ def _build_viewer_html(messages: list[dict], thoughts: list[dict], jobs_state: d
 
                 who_line = (
                     f"created_by={created_by or '?'} | "
+                    f"source={source or '?'} | "
                     f"claimed_by={claimed_by or '?'} | "
                     f"submitted_by={submitted_by or '?'} | "
                     f"verified_by={verifier or '?'}"
@@ -1945,6 +1951,7 @@ class Job:
     ratings: dict = field(default_factory=dict)
     reward_mode: str = "manual"
     reward_calc: dict = field(default_factory=dict)
+    source: str = "unknown"
 
 
 JobEventType = Literal["create", "claim", "submit", "verify", "review", "update", "cancel"]
@@ -2045,6 +2052,7 @@ def _apply_job_event(ev: JobEvent) -> None:
             ratings=(dict(d.get("ratings") or {}) if isinstance(d.get("ratings"), dict) else {}),
             reward_mode=str(d.get("reward_mode") or "manual")[:40],
             reward_calc=(dict(d.get("reward_calc") or {}) if isinstance(d.get("reward_calc"), dict) else {}),
+            source=str(d.get("source") or "unknown")[:40],
         )
         return
 
@@ -2265,6 +2273,7 @@ async def jobs_create(req: JobCreateRequest):
     fp = _fingerprint(title, body)
     toks = _tokenize(title + "\n" + body)
     created_by = str(req.created_by or "human")[:80]
+    source = "agent" if created_by.startswith("agent_") else ("system" if created_by.startswith("system:") else "human")
     recent = sorted(list(_jobs.values()), key=lambda j: float(j.created_at or 0.0), reverse=True)[:200]
     for jj in recent:
         try:
@@ -2310,6 +2319,7 @@ async def jobs_create(req: JobCreateRequest):
             "ratings": ratings,
             "reward_mode": reward_mode,
             "reward_calc": reward_calc,
+            "source": source,
         },
     )
     await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})

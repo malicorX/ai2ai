@@ -711,6 +711,9 @@
       return data;
     }
 
+    // Preserve which jobs are expanded so the periodic refresh doesn't "close" them.
+    const openJobDetails = new Set(); // job_id strings
+
     let lastLoadedPostId = "";
 
     async function refreshPosts({autoLoadLatest = false} = {}) {
@@ -889,6 +892,13 @@
 
       const details = document.createElement("details");
       details.style.cursor = "pointer";
+      details.open = !!openJobDetails.has(String(j.job_id || ""));
+      details.addEventListener("toggle", () => {
+        const id = String(j.job_id || "");
+        if (!id) return;
+        if (details.open) openJobDetails.add(id);
+        else openJobDetails.delete(id);
+      });
       const summary = document.createElement("summary");
       summary.style.listStyle = "none";
       summary.style.outline = "none";
@@ -914,7 +924,7 @@
         .filter(k => (ratings[k] !== undefined && ratings[k] !== null && String(ratings[k]) !== ""))
         .map(k => `${k}=${ratings[k]}`);
       meta3.textContent =
-        `reward_mode=${j.reward_mode||"manual"}`
+        `source=${j.source||"-"} | reward_mode=${j.reward_mode||"manual"}`
         + (ratingParts.length ? (" | ratings: " + ratingParts.join(", ")) : "");
       details.appendChild(meta3);
 
@@ -1085,6 +1095,8 @@
           const tag = `[run:${runFilterId}]`;
           jobs = jobs.filter(j => (String(j.title||"").includes(tag) || String(j.body||"").includes(tag)));
         }
+        // Preserve scroll position across refresh to avoid jumpiness.
+        const prevScroll = jobsList.scrollTop || 0;
         jobsList.innerHTML = "";
         if (!jobs.length) {
           const hint = document.createElement("div");
@@ -1094,6 +1106,7 @@
           return;
         }
         for (const j of jobs) jobsList.appendChild(renderJob(j));
+        jobsList.scrollTop = prevScroll;
       } catch (e) {
         jobsList.textContent = "jobs error: " + e.message;
       }
