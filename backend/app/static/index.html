@@ -29,7 +29,8 @@
       flex: 1;
       min-height: 0;
       display: grid;
-      grid-template-columns: minmax(560px, 1fr) minmax(360px, 520px);
+      /* Make the map a smaller fixed column; give the rest to panels. */
+      grid-template-columns: minmax(320px, 420px) 1fr;
       gap: 12px;
       padding: 12px;
     }
@@ -39,8 +40,8 @@
       border-radius: 10px;
       padding: 10px;
       display: flex;
-      align-items: center;
-      justify-content: center;
+      align-items: flex-start;
+      justify-content: flex-start;
       min-height: 0;
     }
     canvas { background: white; border: 1px solid #ddd; border-radius: 8px; display: block; }
@@ -48,8 +49,10 @@
     #sidebar {
       min-height: 0;
       overflow: auto;
-      display: flex;
-      flex-direction: column;
+      /* Panels as a responsive grid so you see more without scrolling immediately. */
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+      align-content: start;
       gap: 12px;
     }
     #sidebar > * { width: 100% !important; box-sizing: border-box; }
@@ -81,6 +84,11 @@
       pointer-events: none;
       box-shadow: 0 6px 18px rgba(0,0,0,0.25);
       white-space: pre-wrap;
+    }
+
+    @media (max-width: 1100px) {
+      .layout { grid-template-columns: 1fr; }
+      #sidebar { grid-template-columns: 1fr; }
     }
   </style>
 </head>
