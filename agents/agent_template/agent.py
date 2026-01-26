@@ -2817,25 +2817,23 @@ def main():
             upsert()
             maybe_reset_on_new_run()
             world = get_world()
-            # NOTE: For the executor, jobs must take priority over sticky conversations;
-            # otherwise the system can "chat-lock" and stall task throughput.
+            # Executor worker mode (LangGraph): keep the loop tight and job-focused.
+            # Avoid world-life/event/chat subsystems which can block task throughput.
             if USE_LANGGRAPH and ROLE == "executor":
                 maybe_langgraph_jobs(world)
-                # Sticky conversations: if we're in an active conversation, focus on it until it ends.
-                if maybe_conversation_step(world):
-                    time.sleep(SLEEP_SECONDS)
-                    continue
+                maybe_update_balance()
+                time.sleep(SLEEP_SECONDS)
+                continue
+            # Non-executor behavior (proposer or legacy): conversations still apply.
+            if maybe_conversation_step(world):
+                time.sleep(SLEEP_SECONDS)
+                continue
+            # Jobs control-plane: if LangGraph is enabled, it drives proposer/executor job behavior.
+            if USE_LANGGRAPH:
+                maybe_langgraph_jobs(world)
             else:
-                # Sticky conversations: if we're in an active conversation, focus on it until it ends.
-                if maybe_conversation_step(world):
-                    time.sleep(SLEEP_SECONDS)
-                    continue
-                # Jobs control-plane: if LangGraph is enabled, it drives proposer/executor job behavior.
-                if USE_LANGGRAPH:
-                    maybe_langgraph_jobs(world)
-                else:
-                    # Task proposer mode: agent_1 periodically creates a single open task for agent_2 to execute.
-                    maybe_propose_task()
+                # Task proposer mode: agent_1 periodically creates a single open task for agent_2 to execute.
+                maybe_propose_task()
             maybe_process_event_invites(world)
             # Executor must not block on non-essential LLM calls (reflection/chat); keep it focused on task throughput.
             if not (USE_LANGGRAPH and ROLE == "executor"):
