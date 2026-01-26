@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Callable, Dict, List, Literal, Optional, TypedDict
+import hashlib
 
 from langgraph.graph import END, START, StateGraph
 
@@ -36,6 +37,7 @@ class AgentState(TypedDict, total=False):
     balance: float
     open_jobs: List[dict]
     rejected_jobs: List[dict]
+    recent_jobs: List[dict]
     memories: List[dict]
     world_model: dict
     last_job_id: str
@@ -182,6 +184,11 @@ def node_perceive(state: AgentState, config: Any = None) -> AgentState:
         state["open_jobs"] = tools["jobs_list"](status="open", limit=50)
     except Exception:
         state["open_jobs"] = []
+    # Recent jobs (any status) for uniqueness checks (best-effort).
+    try:
+        state["recent_jobs"] = tools["jobs_list"](status=None, limit=60)
+    except Exception:
+        state["recent_jobs"] = []
 
     # Watch rejected jobs:
     # - proposer: to create "redo" tasks (verifier-aware recovery)
@@ -584,9 +591,38 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
             "- Prefer deterministic checks (e.g., runnable code + expected stdout).\n"
             "- Keep body under 2200 chars.\n"
         )
+        # Provide recent jobs to enforce novelty (avoid repeating the same task).
+        recent_titles = []
+        try:
+            for jj in (state.get("recent_jobs") or [])[:25]:
+                if not isinstance(jj, dict):
+                    continue
+                t = str(jj.get("title") or "").strip()
+                b = str(jj.get("body") or "").strip()
+                # strip run tag for comparison
+                t = re.sub(r"\[run:[^\]]+\]\s*", "", t).strip()
+                if not t:
+                    continue
+                recent_titles.append(f"- {t[:140]}")
+                # include tiny hint if body indicates primes (helps avoid repeating it)
+                if "prime" in (t.lower() + " " + b.lower()):
+                    recent_titles[-1] += " (contains 'prime')"
+        except Exception:
+            recent_titles = []
+        recent_txt = "\n".join(recent_titles[:12]).strip()
+        if not recent_txt:
+            recent_txt = "- (none)"
+
+        sys = (
+            sys
+            + "Uniqueness:\n"
+            + "- The new task MUST be meaningfully different from the recent tasks list (topic + deliverable).\n"
+            + "- Avoid repeating 'primes' / 'first five primes' style tasks.\n"
+        )
         user = (
             f"Run tag prefix to include in title: {run_tag}\n"
             f"Persona:\n{persona}\n\n"
+            f"Recent tasks to avoid duplicating:\n{recent_txt}\n\n"
             f"Relevant memories (failures/success patterns):\n{mem_txt}\n\n"
             "Propose the job now."
         )
@@ -598,17 +634,66 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
         body = str(obj.get("body") or "").strip()
         reward = _safe_float(obj.get("reward"), 0.01)
         if not title or not body:
-            # fallback: safe deterministic task
-            title = "Task: Python primes script (smallest five primes)"
-            body = (
-                "Write a Python script that prints the smallest five prime numbers.\n"
-                "Acceptance criteria:\n"
-                "- Provide a runnable `primes.py`.\n"
-                "- Running it prints exactly: 2, 3, 5, 7, 11 (one per line).\n"
-                "Evidence required in submission:\n"
-                "- Include the full code in a python fenced code block (language tag: python).\n"
-                "- Include a short 'Evidence:' section describing the observed output.\n"
-            )
+            # Fallback: rotate through multiple deterministic, verifiable tasks (avoid repeating primes).
+            seed_src = (state.get("run_id") or "") + "|" + str(len(state.get("recent_jobs") or []))
+            idx = int(hashlib.sha1(seed_src.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
+            pool = [
+                (
+                    "Task: Python Fibonacci (first 12)",
+                    "Write a Python script that prints the first 12 Fibonacci numbers, one per line.\n"
+                    "Acceptance criteria:\n"
+                    "- Running the script prints exactly these 12 lines:\n"
+                    "  0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89\n"
+                    "Evidence required in submission:\n"
+                    "- Include runnable Python code in a ```python``` fence.\n"
+                    "- Include an Evidence section that shows the observed stdout.\n",
+                ),
+                (
+                    "Task: Python Palindrome filter",
+                    "Write a Python script that reads a hardcoded list of strings and prints only the palindromes (case-insensitive), one per line.\n"
+                    "Use this list: ['Racecar','hello','Level','world','Deed','python']\n"
+                    "Acceptance criteria:\n"
+                    "- Output is exactly:\n"
+                    "  Racecar\n"
+                    "  Level\n"
+                    "  Deed\n"
+                    "Evidence required in submission:\n"
+                    "- Include runnable Python code in a ```python``` fence.\n"
+                    "- Include an Evidence section that shows the observed stdout.\n",
+                ),
+                (
+                    "Task: Python CSV summary (embedded data)",
+                    "Write a Python script that parses this CSV (embedded in the script) and prints total rows and sum of 'amount'.\n"
+                    "CSV:\n"
+                    "id,amount\n"
+                    "a,10\n"
+                    "b,5\n"
+                    "c,12\n"
+                    "Acceptance criteria:\n"
+                    "- Output is exactly two lines:\n"
+                    "  rows=3\n"
+                    "  sum=27\n"
+                    "Evidence required in submission:\n"
+                    "- Include runnable Python code in a ```python``` fence.\n"
+                    "- Include an Evidence section that shows the observed stdout.\n",
+                ),
+                (
+                    "Task: Python word count",
+                    "Write a Python script that counts words in the text: \"to be or not to be\" (split on whitespace) and prints each word and count sorted by descending count then alphabetical.\n"
+                    "Acceptance criteria:\n"
+                    "- Output lines are exactly:\n"
+                    "  be=2\n"
+                    "  to=2\n"
+                    "  not=1\n"
+                    "  or=1\n"
+                    "Evidence required in submission:\n"
+                    "- Include runnable Python code in a ```python``` fence.\n"
+                    "- Include an Evidence section that shows the observed stdout.\n",
+                ),
+            ]
+            t, b = pool[idx % len(pool)]
+            title = t
+            body = b
             reward = 0.01
 
         if run_tag and run_tag not in title:

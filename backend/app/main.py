@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import urllib.request
 import uuid
 import time
 import re
+import string
 import tempfile
 import subprocess
 import sys
@@ -353,6 +355,8 @@ def _build_run_job_state(job_events: list[dict]) -> dict[str, dict]:
                     "reviewed_by": "",
                     "reviewed_at": 0.0,
                     "review_note": "",
+                    "fingerprint": str(d.get("fingerprint") or ""),
+                    "ratings": (dict(d.get("ratings") or {}) if isinstance(d.get("ratings"), dict) else {}),
                     "events": [],
                 }
                 # Record event for timeline.
@@ -382,6 +386,8 @@ def _build_run_job_state(job_events: list[dict]) -> dict[str, dict]:
                     "reviewed_by": "",
                     "reviewed_at": 0.0,
                     "review_note": "",
+                    "fingerprint": "",
+                    "ratings": {},
                     "events": [],
                 }
                 jobs[job_id] = j
@@ -413,6 +419,8 @@ def _build_run_job_state(job_events: list[dict]) -> dict[str, dict]:
                         j["reward"] = float(d.get("reward") or j.get("reward") or 0.0)
                     except Exception:
                         pass
+                if isinstance(d.get("ratings"), dict):
+                    j["ratings"] = dict(d.get("ratings") or {})
             elif t == "review":
                 j["status"] = "approved" if bool(d.get("approved")) else "rejected"
                 j["reviewed_by"] = str(d.get("reviewed_by") or "")
@@ -609,6 +617,35 @@ def _auto_verify_task(job: Job, submission: str) -> AutoVerifyOutcome:
     return AutoVerifyOutcome(False, False, "auto_verify skipped: no verifier matched", "", {})
 
 
+def _normalize_for_fingerprint(s: str) -> str:
+    t = (s or "").lower()
+    t = re.sub(r"\[run:[^\]]+\]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def _tokenize(s: str) -> set[str]:
+    s = _normalize_for_fingerprint(s)
+    # Keep alnum only; split on whitespace.
+    s = s.translate(str.maketrans({c: " " for c in string.punctuation}))
+    toks = [t for t in s.split() if len(t) >= 3]
+    return set(toks[:600])
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    union = len(a | b)
+    return float(inter) / float(union or 1)
+
+
+def _fingerprint(title: str, body: str) -> str:
+    base = _normalize_for_fingerprint(title) + "\n" + _normalize_for_fingerprint(body)
+    # Stable but short fingerprint for logs/UI.
+    return hashlib.sha1(base.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+
 @app.get("/runs")
 def runs_list(limit: int = 50):
     return {"runs": _list_run_dirs(limit=limit), "current": {"run_id": _run_id, "started_at": _run_started_at}}
@@ -677,6 +714,7 @@ def runs_summary(run_id: str):
 def _extract_tag(text: str, tag: str) -> Optional[str]:
     try:
         import re
+import string
 
         m = re.search(r"\[" + re.escape(tag) + r":([^\]]+)\]", text or "")
         return str(m.group(1)).strip() if m else None
@@ -828,6 +866,7 @@ def _build_viewer_html(messages: list[dict], thoughts: list[dict], jobs_state: d
                 auto_note = str(j.get("auto_verify_note") or "")
                 auto_arts = j.get("auto_verify_artifacts") if isinstance(j.get("auto_verify_artifacts"), dict) else {}
                 review_note = str(j.get("review_note") or "")
+                ratings = j.get("ratings") if isinstance(j.get("ratings"), dict) else {}
                 body_txt = str(j.get("body") or "")
                 sub_txt = str(j.get("submission") or "")
                 events = j.get("events") if isinstance(j.get("events"), list) else []
@@ -842,6 +881,20 @@ def _build_viewer_html(messages: list[dict], thoughts: list[dict], jobs_state: d
                     f"submitted_by={submitted_by or '?'} | "
                     f"verified_by={verifier or '?'}"
                 )
+                ratings_line = ""
+                try:
+                    if ratings:
+                        # stable display order for common keys
+                        keys = ["complexity", "difficulty", "external_tools", "uniqueness", "usefulness", "money_potential"]
+                        rest = [k for k in ratings.keys() if k not in keys]
+                        ordered = keys + sorted(rest)
+                        parts = []
+                        for k in ordered:
+                            if k in ratings:
+                                parts.append(f"{k}={ratings.get(k)}")
+                        ratings_line = "ratings: " + ", ".join(parts[:12])
+                except Exception:
+                    ratings_line = ""
                 # Short status line with verifier result when available.
                 ver_line = ""
                 if auto_ok is True:
@@ -908,6 +961,7 @@ def _build_viewer_html(messages: list[dict], thoughts: list[dict], jobs_state: d
                     f"<strong>{_html.escape(str(j.get('title') or ''))}</strong><br>"
                     f"<span class='meta'>{_html.escape('job_id=' + jid)}</span><br>"
                     f"<span class='meta'>{_html.escape(who_line)}</span><br>"
+                    + (f"<span class='meta'>{_html.escape(ratings_line)}</span><br>" if ratings_line else "")
                     + (f"<span class='meta'>{_html.escape(ver_line)}</span><br>" if ver_line else "")
                     + ("<details style='margin-top:8px;'><summary class='meta'>Timeline</summary>"
                        + ("".join(timeline_rows) if timeline_rows else "<div class='meta'>(no events)</div>")
@@ -1805,6 +1859,8 @@ class Job:
     auto_verify_note: str = ""
     auto_verify_artifacts: dict = field(default_factory=dict)
     auto_verified_at: float = 0.0
+    fingerprint: str = ""
+    ratings: dict = field(default_factory=dict)
 
 
 JobEventType = Literal["create", "claim", "submit", "verify", "review", "update", "cancel"]
@@ -1824,6 +1880,7 @@ class JobCreateRequest(BaseModel):
     body: str
     reward: float = 10.0
     created_by: str = "human"
+    ratings: Optional[dict] = None
 
 
 class JobClaimRequest(BaseModel):
@@ -1844,6 +1901,7 @@ class JobUpdateRequest(BaseModel):
     title: Optional[str] = None
     body: Optional[str] = None
     reward: Optional[float] = None
+    ratings: Optional[dict] = None
     by: str = "human"
     force: bool = False
 
@@ -1892,6 +1950,8 @@ def _apply_job_event(ev: JobEvent) -> None:
             auto_verify_note="",
             auto_verify_artifacts={},
             auto_verified_at=0.0,
+            fingerprint=str(d.get("fingerprint") or "")[:120],
+            ratings=(dict(d.get("ratings") or {}) if isinstance(d.get("ratings"), dict) else {}),
         )
         return
 
@@ -1941,6 +2001,8 @@ def _apply_job_event(ev: JobEvent) -> None:
                 job.reward = float(d.get("reward") or job.reward)
             except Exception:
                 pass
+        if "ratings" in d and isinstance(d.get("ratings"), dict):
+            job.ratings = dict(d.get("ratings") or {})
         return
 
     if t == "cancel" and job.status in ("open", "claimed", "submitted"):
@@ -2029,8 +2091,9 @@ async def jobs_update(job_id: str, req: JobUpdateRequest, request: Request):
             reward = float(req.reward)
         except Exception:
             reward = None
+    ratings = req.ratings if isinstance(req.ratings, dict) else None
 
-    if (title is None) and (body is None) and (reward is None):
+    if (title is None) and (body is None) and (reward is None) and (ratings is None):
         return {"error": "no_changes"}
 
     data: dict = {"by": str(req.by or "human")[:80], "created_at": time.time()}
@@ -2040,6 +2103,8 @@ async def jobs_update(job_id: str, req: JobUpdateRequest, request: Request):
         data["body"] = body[:4000]
     if reward is not None:
         data["reward"] = float(max(0.0, reward))
+    if ratings is not None:
+        data["ratings"] = ratings
 
     ev = _append_job_event("update", job_id, data)
     await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})
@@ -2055,11 +2120,53 @@ async def jobs_create(req: JobCreateRequest):
     reward = float(req.reward or 0.0)
     if not title or not body or reward <= 0:
         return {"error": "invalid_job"}
+
+    # Ratings (optional): clamp into 1..10
+    ratings: dict = {}
+    if isinstance(req.ratings, dict):
+        for k, v in req.ratings.items():
+            try:
+                kk = str(k)[:40]
+                iv = int(float(v))
+                if iv < 1:
+                    iv = 1
+                if iv > 10:
+                    iv = 10
+                ratings[kk] = iv
+            except Exception:
+                continue
+
+    # Duplicate prevention: reject near-identical tasks compared to recent jobs.
+    fp = _fingerprint(title, body)
+    toks = _tokenize(title + "\n" + body)
+    created_by = str(req.created_by or "human")[:80]
+    recent = sorted(list(_jobs.values()), key=lambda j: float(j.created_at or 0.0), reverse=True)[:200]
+    for jj in recent:
+        try:
+            # Prefer dedup within same creator OR within run-tagged tasks.
+            if created_by and jj.created_by and (jj.created_by == created_by):
+                pass
+            else:
+                # If creator differs, only dedupe run-tagged jobs (prevents cross-user surprises).
+                if "[run:" not in (title.lower() + body.lower()):
+                    continue
+                if "[run:" not in ((jj.title or "").lower() + (jj.body or "").lower()):
+                    continue
+            fp2 = str(getattr(jj, "fingerprint", "") or "")
+            if fp2 and fp2 == fp:
+                return {"error": "duplicate_job", "duplicate_of": jj.job_id, "reason": "fingerprint_match"}
+            t2 = _tokenize((jj.title or "") + "\n" + (jj.body or ""))
+            sim = _jaccard(toks, t2)
+            if sim >= 0.92:
+                return {"error": "duplicate_job", "duplicate_of": jj.job_id, "reason": f"similarity:{sim:.2f}"}
+        except Exception:
+            continue
+
     job_id = str(uuid.uuid4())
     ev = _append_job_event(
         "create",
         job_id,
-        {"title": title, "body": body, "reward": reward, "created_by": req.created_by, "created_at": time.time()},
+        {"title": title, "body": body, "reward": reward, "created_by": created_by, "created_at": time.time(), "fingerprint": fp, "ratings": ratings},
     )
     await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})
     return {"ok": True, "job": asdict(_jobs[job_id])}

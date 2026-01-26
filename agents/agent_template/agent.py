@@ -851,8 +851,11 @@ def maybe_reflect(world) -> None:
     _last_reflect_minute = key
 
 
-def jobs_list(status: str = "open", limit: int = 20):
-    r = requests.get(f"{WORLD_API}/jobs?status={status}&limit={limit}", timeout=10)
+def jobs_list(status: str | None = "open", limit: int = 20):
+    params = {"limit": int(limit)}
+    if status is not None:
+        params["status"] = str(status)
+    r = requests.get(f"{WORLD_API}/jobs", params=params, timeout=10)
     r.raise_for_status()
     return r.json().get("jobs", [])
 

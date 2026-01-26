@@ -203,6 +203,17 @@
           <button id="jobCreateBtn">Create Job</button>
           <button id="jobsRefreshBtn">Refresh</button>
         </div>
+        <details style="margin-top:10px;">
+          <summary style="cursor:pointer; font-size:12px; color:#444;">Task ratings (1–10)</summary>
+          <div style="display:grid; grid-template-columns: repeat(2, minmax(140px, 1fr)); gap:8px; margin-top:8px;">
+            <label style="font-size:12px; color:#444;">complexity <input id="rateComplexity" type="number" min="1" max="10" value="5" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">difficulty <input id="rateDifficulty" type="number" min="1" max="10" value="5" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">external_tools <input id="rateExternal" type="number" min="1" max="10" value="2" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">uniqueness <input id="rateUnique" type="number" min="1" max="10" value="6" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">usefulness <input id="rateUseful" type="number" min="1" max="10" value="6" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">money_potential <input id="rateMoney" type="number" min="1" max="10" value="1" style="padding:6px; width:100%;" /></label>
+          </div>
+        </details>
         <hr style="margin:12px 0;" />
         <div style="font-size:12px; color:#444; margin-bottom:6px;">
           <b>Edit existing job</b> (only <code>open</code> jobs by default)
@@ -221,6 +232,17 @@
           <button id="jobClearBtn">Clear</button>
           <span id="jobEditStatus" class="pill">idle</span>
         </div>
+        <details style="margin-top:10px;">
+          <summary style="cursor:pointer; font-size:12px; color:#444;">Edit ratings (1–10)</summary>
+          <div style="display:grid; grid-template-columns: repeat(2, minmax(140px, 1fr)); gap:8px; margin-top:8px;">
+            <label style="font-size:12px; color:#444;">complexity <input id="editRateComplexity" type="number" min="1" max="10" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">difficulty <input id="editRateDifficulty" type="number" min="1" max="10" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">external_tools <input id="editRateExternal" type="number" min="1" max="10" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">uniqueness <input id="editRateUnique" type="number" min="1" max="10" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">usefulness <input id="editRateUseful" type="number" min="1" max="10" style="padding:6px; width:100%;" /></label>
+            <label style="font-size:12px; color:#444;">money_potential <input id="editRateMoney" type="number" min="1" max="10" style="padding:6px; width:100%;" /></label>
+          </div>
+        </details>
         <div id="jobsList" style="margin-top:10px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size:12px; max-height:260px; overflow-y:auto;"></div>
       </div>
 
@@ -573,6 +595,48 @@
     const jobSaveBtn = document.getElementById("jobSaveBtn");
     const jobClearBtn = document.getElementById("jobClearBtn");
     const jobEditStatus = document.getElementById("jobEditStatus");
+    const rateComplexity = document.getElementById("rateComplexity");
+    const rateDifficulty = document.getElementById("rateDifficulty");
+    const rateExternal = document.getElementById("rateExternal");
+    const rateUnique = document.getElementById("rateUnique");
+    const rateUseful = document.getElementById("rateUseful");
+    const rateMoney = document.getElementById("rateMoney");
+    const editRateComplexity = document.getElementById("editRateComplexity");
+    const editRateDifficulty = document.getElementById("editRateDifficulty");
+    const editRateExternal = document.getElementById("editRateExternal");
+    const editRateUnique = document.getElementById("editRateUnique");
+    const editRateUseful = document.getElementById("editRateUseful");
+    const editRateMoney = document.getElementById("editRateMoney");
+
+    function clampRate(x) {
+      const n = parseInt(String(x||"0"), 10);
+      if (!isFinite(n)) return null;
+      return Math.max(1, Math.min(10, n));
+    }
+    function collectRatings(prefix) {
+      const m = {};
+      const pick = (k, el) => {
+        if (!el) return;
+        const v = clampRate(el.value);
+        if (v !== null) m[k] = v;
+      };
+      if (prefix === "create") {
+        pick("complexity", rateComplexity);
+        pick("difficulty", rateDifficulty);
+        pick("external_tools", rateExternal);
+        pick("uniqueness", rateUnique);
+        pick("usefulness", rateUseful);
+        pick("money_potential", rateMoney);
+      } else {
+        pick("complexity", editRateComplexity);
+        pick("difficulty", editRateDifficulty);
+        pick("external_tools", editRateExternal);
+        pick("uniqueness", editRateUnique);
+        pick("usefulness", editRateUseful);
+        pick("money_potential", editRateMoney);
+      }
+      return m;
+    }
 
     // --- Events ---
     const eventsList = document.getElementById("eventsList");
@@ -783,6 +847,13 @@
           jobEditTitle.value = j.title || "";
           jobEditReward.value = String(j.reward || 0);
           jobEditBody.value = j.body || "";
+          const r = (j.ratings && typeof j.ratings === "object") ? j.ratings : {};
+          editRateComplexity.value = String(r.complexity || "");
+          editRateDifficulty.value = String(r.difficulty || "");
+          editRateExternal.value = String(r.external_tools || "");
+          editRateUnique.value = String(r.uniqueness || "");
+          editRateUseful.value = String(r.usefulness || "");
+          editRateMoney.value = String(r.money_potential || "");
           jobEditStatus.textContent = "loaded";
         };
         editRow.appendChild(editBtn);
@@ -901,7 +972,7 @@
       await fetchJson("/jobs/create", {
         method: "POST",
         headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({title, body, reward, created_by: jobReviewer.value || "human"})
+        body: JSON.stringify({title, body, reward, created_by: jobReviewer.value || "human", ratings: collectRatings("create")})
       });
       jobTitle.value = "";
       jobBody.value = "";
@@ -918,6 +989,13 @@
         jobEditTitle.value = j.title || "";
         jobEditReward.value = String(j.reward || 0);
         jobEditBody.value = j.body || "";
+        const r = (j.ratings && typeof j.ratings === "object") ? j.ratings : {};
+        editRateComplexity.value = String(r.complexity || "");
+        editRateDifficulty.value = String(r.difficulty || "");
+        editRateExternal.value = String(r.external_tools || "");
+        editRateUnique.value = String(r.uniqueness || "");
+        editRateUseful.value = String(r.usefulness || "");
+        editRateMoney.value = String(r.money_potential || "");
         jobEditStatus.textContent = `loaded (${j.status})`;
       } catch (e) {
         jobEditStatus.textContent = "load error";
@@ -936,6 +1014,7 @@
             title: (jobEditTitle.value || "").trim(),
             body: (jobEditBody.value || "").trim(),
             reward: parseFloat(jobEditReward.value || "0"),
+            ratings: collectRatings("edit"),
             by: jobReviewer.value || "human",
             force: false
           })
@@ -952,6 +1031,12 @@
       jobEditTitle.value = "";
       jobEditReward.value = "";
       jobEditBody.value = "";
+      editRateComplexity.value = "";
+      editRateDifficulty.value = "";
+      editRateExternal.value = "";
+      editRateUnique.value = "";
+      editRateUseful.value = "";
+      editRateMoney.value = "";
       jobEditStatus.textContent = "idle";
     }
     if (jobLoadBtn) jobLoadBtn.onclick = loadJobForEdit;
