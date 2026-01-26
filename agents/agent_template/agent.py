@@ -50,6 +50,7 @@ _last_langgraph_job_id = ""
 _last_langgraph_handled_rejection_job_id = ""
 _last_langgraph_outcome_ack_job_id = ""
 _last_langgraph_redo_capped_root_ids: list[str] = []
+_last_langgraph_propose_failed_count = 0
 
 # Conversation protocol (sticky sessions)
 _active_conv_id = None
@@ -1544,6 +1545,7 @@ def maybe_langgraph_jobs(world) -> None:
         "handled_rejection_job_id": _last_langgraph_handled_rejection_job_id,
         "outcome_ack_job_id": _last_langgraph_outcome_ack_job_id,
         "redo_capped_root_ids": list(_last_langgraph_redo_capped_root_ids or []),
+        "propose_failed_count": int(_last_langgraph_propose_failed_count or 0),
         "max_redo_attempts_per_root": int(os.getenv("MAX_REDO_ATTEMPTS_PER_ROOT", "3")),
     }
 
@@ -1572,6 +1574,12 @@ def maybe_langgraph_jobs(world) -> None:
             if isinstance(roots, list):
                 cleaned = [str(x or "").strip() for x in roots if str(x or "").strip()]
                 globals()["_last_langgraph_redo_capped_root_ids"] = cleaned
+        except Exception:
+            pass
+        try:
+            pfc = out.get("propose_failed_count")
+            if pfc is not None:
+                globals()["_last_langgraph_propose_failed_count"] = int(pfc or 0)
         except Exception:
             pass
         trace_event("status", "langgraph: step complete", {"acted": bool(out.get("acted")), "action": out.get("action")})
