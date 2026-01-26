@@ -611,6 +611,20 @@ def _style(text: str) -> str:
     if "formal" in p:
         return "Indeed. " + text
     # For curious personas, ask questions sometimes, not always (prevents repetitive tail-questions).
+    # Don't add tail-questions to status/job announcements (it creates noisy back-and-forth).
+    if any(
+        k in text
+        for k in (
+            "[task:",
+            "Job `",
+            "was approved",
+            "was rejected",
+            "I submitted",
+            "I executed the task",
+            "New task posted",
+        )
+    ):
+        return text
     if "curious" in p and ("?" not in text) and random.random() < 0.35:
         return text + " What do you think?"
     return text

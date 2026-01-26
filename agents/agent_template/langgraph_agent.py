@@ -692,12 +692,16 @@ def node_reflect(state: AgentState, config: Any = None) -> AgentState:
     # Also: respond to job outcomes (approved/rejected/submitted) so agents internalize "submitted != done".
     lj = state.get("last_job") or {}
     if lj:
+        ack = str(state.get("outcome_ack_job_id") or "").strip()
         st = str(lj.get("status") or "")
         note = str(lj.get("auto_verify_note") or "")
         ok = lj.get("auto_verify_ok")
         jid = str(lj.get("job_id") or state.get("last_job_id") or "")
         title = str(lj.get("title") or "")
         if st == "approved":
+            # Announce each verdict once per job id.
+            if jid and ack == jid:
+                return state
             try:
                 tools["chat_send"](f"Job `{jid}` was approved. ✅ ({title})")
             except Exception:
@@ -709,6 +713,8 @@ def node_reflect(state: AgentState, config: Any = None) -> AgentState:
             if jid:
                 state["outcome_ack_job_id"] = jid
         elif st == "rejected":
+            if jid and ack == jid:
+                return state
             try:
                 tools["chat_send"](f"Job `{jid}` was rejected. I likely lost ai$. Reason: {note[:220]}")
             except Exception:
