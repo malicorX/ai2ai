@@ -1252,6 +1252,28 @@ def _do_job(job: dict) -> str:
     content.append("")
     content.append("## Output")
     tlow = (title + " " + body).lower()
+    # Support structured non-python verifiers by generating the required artifact (table/json) explicitly.
+    def _extract_tag(tag: str) -> str:
+        try:
+            hay = f"{title}\n{body}"
+            m = re.search(r"\\[" + re.escape(tag) + r"\\s*:\\s*([^\\]]+)\\]", hay, flags=re.IGNORECASE)
+            return (m.group(1).strip() if m else "")
+        except Exception:
+            return ""
+
+    verifier_tag = _extract_tag("verifier").lower()
+    json_min_items = 0
+    md_min_rows = 0
+    try:
+        json_min_items = int(float(_extract_tag("json_min_items") or "0"))
+    except Exception:
+        json_min_items = 0
+    try:
+        md_min_rows = int(float(_extract_tag("md_min_rows") or "0"))
+    except Exception:
+        md_min_rows = 0
+    json_required_keys = [k.strip() for k in (_extract_tag("json_required_keys") or "").split(",") if k.strip()]
+    md_required_cols = [c.strip() for c in (_extract_tag("md_required_cols") or "").split(",") if c.strip()]
     if "prime" in tlow and "five" in tlow:
         code = (
             "def is_prime(n: int) -> bool:\n"
@@ -1372,25 +1394,85 @@ def _do_job(job: dict) -> str:
         content.append(code.rstrip())
         content.append("```")
     else:
-        # Provide a structured response template the human can judge.
-        content.append("- Summary:")
-        content.append(f"  - I will deliver a concrete response and a file artifact at `{out_path}`.")
-        content.append("- Proposed approach:")
-        content.append("  - Clarify deliverable format")
-        content.append("  - Produce the artifact")
-        content.append("  - Ask for review criteria")
-        content.append("")
-        content.append("## Evidence")
+        # Non-python jobs: actually generate the required deliverable content (table/json/markdown).
+        deliverable_md = ""
+        evidence_kv = {}
+        try:
+            if verifier_tag in ("md_table", "markdown_table"):
+                cols = md_required_cols or ["Problem", "Change", "Why it helps", "How to verify"]
+                sys_prompt = (
+                    "You are completing a task. Output ONLY a markdown table.\n"
+                    "Rules:\n"
+                    f"- Columns MUST be exactly: {' | '.join(cols)}\n"
+                    f"- Provide at least {max(1, md_min_rows or 8)} data rows.\n"
+                    "- Keep each cell short and concrete.\n"
+                    "- Do not output any prose before/after the table.\n"
+                )
+                user_prompt = f"Job title:\n{title}\n\nJob body:\n{body}\n\nReturn the markdown table now:"
+                deliverable_md = (llm_chat(sys_prompt, user_prompt, max_tokens=700) or "").strip()
+                # Count rows (exclude header + separator)
+                rows = [ln for ln in deliverable_md.splitlines() if "|" in ln]
+                row_count = max(0, len(rows) - 2)
+                evidence_kv["table_rows"] = row_count
+            elif verifier_tag in ("json_list",):
+                req = json_required_keys or ["title", "category", "why_we_can_do_it", "first_step", "verification_plan"]
+                sys_prompt = (
+                    "You are completing a task. Output ONLY a JSON array (no markdown, no backticks).\n"
+                    "Rules:\n"
+                    f"- The root MUST be a JSON list.\n"
+                    f"- Each item MUST be an object and MUST contain keys: {', '.join(req)}\n"
+                    f"- Provide at least {max(1, json_min_items or 8)} items.\n"
+                    "- Keep values concise strings.\n"
+                )
+                user_prompt = f"Job title:\n{title}\n\nJob body:\n{body}\n\nReturn the JSON array now:"
+                raw = (llm_chat(sys_prompt, user_prompt, max_tokens=900) or "").strip()
+                # Sanitize accidental fences
+                raw = re.sub(r\"^```[a-zA-Z0-9_-]*\\s*\", \"\", raw).strip()
+                raw = re.sub(r\"\\s*```$\", \"\", raw).strip()
+                # Validate / best-effort repair: ensure JSON parses
+                try:
+                    obj = json.loads(raw)
+                except Exception:
+                    # Try to extract first JSON object/array from the text
+                    m = re.search(r\"(\\[.*\\])\", raw, flags=re.DOTALL)
+                    obj = json.loads(m.group(1)) if m else []
+                if not isinstance(obj, list):
+                    obj = [obj]
+                item_count = len(obj)
+                evidence_kv[\"item_count\"] = item_count
+                deliverable_md = \"```json\\n\" + json.dumps(obj, ensure_ascii=False, indent=2) + \"\\n```\"\n+            else:
+                sys_prompt = (
+                    \"You are completing a task. Output ONLY the deliverable in markdown.\\n\"
+                    \"Rules:\\n\"
+                    \"- Be concrete and satisfy the acceptance criteria.\\n\"
+                    \"- If the job asks for a specific format (table/list/json fence), follow it exactly.\\n\"
+                    \"- No fluff.\\n\"
+                )
+                user_prompt = f\"Job title:\\n{title}\\n\\nJob body:\\n{body}\\n\\nReturn the deliverable now:\"
+                deliverable_md = (llm_chat(sys_prompt, user_prompt, max_tokens=900) or \"\").strip()
+        except Exception:
+            deliverable_md = \"\"
+
+        content.append(\"## Deliverable\")
+        if deliverable_md:
+            content.append(deliverable_md)
+        else:
+            content.append(\"(failed to generate deliverable content)\")
+        content.append(\"\")
+
+        content.append(\"## Evidence\")
         # Key: reference acceptance criteria bullets so backend heuristic can verify non-empty evidence.
         if acceptance:
-            content.append("### Acceptance criteria checklist")
+            content.append(\"### Acceptance criteria checklist\")
             for b in acceptance[:10]:
-                content.append(f"- [x] {b}")
+                content.append(f\"- [x] {b}\")
         if evidence_req:
-            content.append("### Evidence requirements checklist")
+            content.append(\"### Evidence requirements checklist\")
             for b in evidence_req[:10]:
-                content.append(f"- [x] {b}")
-        content.append("- I produced the deliverable content below and referenced any artifacts/paths I created.")
+                content.append(f\"- [x] {b}\")
+        for k, v in evidence_kv.items():
+            content.append(f\"- {k}={v}\")
+        content.append(\"- I produced the deliverable content above.\")
     content.append("")
     content.append("## Long-term memory context (recent)")
     content.extend(mem_lines or ["- (none yet)"])
