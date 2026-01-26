@@ -12,7 +12,7 @@ import re
 import tempfile
 import subprocess
 import sys
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Optional, Literal, Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
@@ -346,17 +346,44 @@ def _build_run_job_state(job_events: list[dict]) -> dict[str, dict]:
                     "submission": "",
                     "submitted_at": 0.0,
                     "auto_verify_ok": None,
+                    "auto_verify_name": "",
                     "auto_verify_note": "",
+                    "auto_verify_artifacts": {},
                     "auto_verified_at": 0.0,
                     "reviewed_by": "",
                     "reviewed_at": 0.0,
                     "review_note": "",
+                    "events": [],
                 }
+                # Record event for timeline.
+                jobs[job_id]["events"].append({"type": "create", "at": ca, "data": d})
                 continue
             j = jobs.get(job_id)
             if not j:
                 # Unknown job; initialize a stub so we still show it in summaries.
-                j = {"job_id": job_id, "title": "", "body": "", "reward": 0.0, "created_by": "", "created_at": 0.0, "status": "unknown"}
+                j = {
+                    "job_id": job_id,
+                    "title": "",
+                    "body": "",
+                    "reward": 0.0,
+                    "created_by": "",
+                    "created_at": 0.0,
+                    "status": "unknown",
+                    "claimed_by": "",
+                    "claimed_at": 0.0,
+                    "submitted_by": "",
+                    "submission": "",
+                    "submitted_at": 0.0,
+                    "auto_verify_ok": None,
+                    "auto_verify_name": "",
+                    "auto_verify_note": "",
+                    "auto_verify_artifacts": {},
+                    "auto_verified_at": 0.0,
+                    "reviewed_by": "",
+                    "reviewed_at": 0.0,
+                    "review_note": "",
+                    "events": [],
+                }
                 jobs[job_id] = j
             if t == "claim":
                 j["claimed_by"] = str(d.get("agent_id") or "")
@@ -370,7 +397,10 @@ def _build_run_job_state(job_events: list[dict]) -> dict[str, dict]:
             elif t == "verify":
                 ok = d.get("ok")
                 j["auto_verify_ok"] = ok if isinstance(ok, bool) else None
+                j["auto_verify_name"] = str(d.get("verifier") or "")
                 j["auto_verify_note"] = str(d.get("note") or "")
+                arts = d.get("artifacts")
+                j["auto_verify_artifacts"] = arts if isinstance(arts, dict) else {}
                 j["auto_verified_at"] = ca or float(d.get("created_at") or 0.0)
             elif t == "review":
                 j["status"] = "approved" if bool(d.get("approved")) else "rejected"
@@ -379,6 +409,11 @@ def _build_run_job_state(job_events: list[dict]) -> dict[str, dict]:
                 j["review_note"] = str(d.get("note") or "")
             elif t == "cancel":
                 j["status"] = "cancelled"
+            # Record event for timeline (lightweight; viewer may derive the actor from data).
+            try:
+                j.setdefault("events", []).append({"type": str(t or ""), "at": ca, "data": d})
+            except Exception:
+                pass
         except Exception:
             continue
     return jobs
@@ -422,7 +457,16 @@ def _extract_code_fence(text: str, lang: str) -> Optional[str]:
         return None
 
 
-def _auto_verify_task(job: Job, submission: str) -> tuple[bool, str]:
+@dataclass
+class AutoVerifyOutcome:
+    matched: bool
+    ok: bool
+    note: str
+    verifier: str
+    artifacts: dict
+
+
+def _auto_verify_task(job: Job, submission: str) -> AutoVerifyOutcome:
     """
     Minimal automatic verifier for a small set of task templates.
     Returns (ok, note).
@@ -431,116 +475,127 @@ def _auto_verify_task(job: Job, submission: str) -> tuple[bool, str]:
     body = (job.body or "").lower()
     text = (submission or "")
 
-    # Prime task: require python code that prints first 5 primes, one per line.
-    if ("prime" in title or "prime" in body) and ("five" in title or "five" in body or "5" in title or "5" in body):
-        code = _extract_code_fence(text, "python") or _extract_code_fence(text, "py")
-        if not code:
-            return (False, "auto_verify failed: missing ```python``` code fence in submission")
-        if len(code) > 12000:
-            return (False, "auto_verify failed: python code too large")
+    def _trunc(s: Any, n: int = 1500) -> str:
         try:
-            with tempfile.TemporaryDirectory() as td:
-                p = Path(td) / "task.py"
-                p.write_text(code, encoding="utf-8")
-                # Run with timeout; no perfect sandbox, but keeps runs short.
-                r = subprocess.run(
-                    [sys.executable, "-I", str(p)],
-                    cwd=td,
-                    capture_output=True,
-                    text=True,
-                    timeout=3,
-                )
-                if r.returncode != 0:
-                    return (False, f"auto_verify failed: script error (code={r.returncode}): {r.stderr.strip()[:300]}")
-                out = (r.stdout or "").strip().splitlines()
-                out = [ln.strip() for ln in out if ln.strip() != ""]
-                expected = ["2", "3", "5", "7", "11"]
-                if out[:5] != expected:
-                    return (False, f"auto_verify failed: expected first lines {expected}, got {out[:5]}")
-                return (True, "auto_verify ok: primes output matches expected 2,3,5,7,11")
-        except subprocess.TimeoutExpired:
-            return (False, "auto_verify failed: script timeout")
-        except Exception as e:
-            return (False, f"auto_verify failed: exception {e}")
+            x = str(s or "")
+        except Exception:
+            return ""
+        x = x.strip()
+        return x[:n] + ("…(truncated)" if len(x) > n else "")
 
-    # Generic acceptance-criteria heuristic:
-    # If the job body contains an "Acceptance criteria:" section with bullet points, require the submission
-    # to include an "Evidence" section with a checklist referencing each bullet.
-    # This is NOT a proof of correctness, but it prevents pure "I did it" with no artifacts.
-    ac_present = False
-    try:
-        body_lines = (job.body or "").splitlines()
-        ac_start = None
-        for i, ln in enumerate(body_lines):
-            if ln.strip().lower().startswith("acceptance criteria"):
-                ac_start = i
-                break
-        if ac_start is not None:
-            bullets = []
-            for ln in body_lines[ac_start + 1 : ac_start + 20]:
+    def _verify_acceptance_criteria() -> tuple[bool, bool, str, list[str]]:
+        """
+        Returns (ac_present, ok, note, bullets).
+        """
+        try:
+            body_lines = (job.body or "").splitlines()
+            ac_start = None
+            for i, ln in enumerate(body_lines):
+                if ln.strip().lower().startswith("acceptance criteria"):
+                    ac_start = i
+                    break
+            if ac_start is None:
+                return (False, True, "", [])
+            bullets: list[str] = []
+            for ln in body_lines[ac_start + 1 : ac_start + 40]:
                 s = ln.strip()
-                # Accept common bullet markers so agents aren't forced into a single formatting style.
                 if s.startswith("- ") or s.startswith("* ") or s.startswith("• "):
                     bullets.append(s[2:].strip())
                 elif s == "":
                     continue
                 elif bullets and not (s.startswith("- ") or s.startswith("* ") or s.startswith("• ")):
                     break
-            if bullets:
-                ac_present = True
-                sub_low = (submission or "").lower()
-                if "evidence" not in sub_low:
-                    return (False, "auto_verify failed: submission missing an Evidence section for acceptance criteria")
-                missing = []
-                for b in bullets[:10]:
-                    key = b.lower()
-                    # very forgiving match: any 10-char substring
-                    k = key[: min(24, len(key))]
-                    if k and k not in sub_low:
-                        missing.append(b[:80])
-                if missing:
-                    return (False, f"auto_verify failed: missing evidence for acceptance criteria: {missing[:5]}")
-    except Exception:
-        pass
+            if not bullets:
+                return (False, True, "", [])
+            sub_low = (submission or "").lower()
+            if "evidence" not in sub_low:
+                return (True, False, "auto_verify failed: submission missing an Evidence section for acceptance criteria", bullets)
+            missing: list[str] = []
+            for b in bullets[:10]:
+                key = b.lower()
+                k = key[: min(24, len(key))]
+                if k and k not in sub_low:
+                    missing.append(b[:80])
+            if missing:
+                return (True, False, f"auto_verify failed: missing evidence for acceptance criteria: {missing[:5]}", bullets)
+            return (True, True, "auto_verify ok: submission references all acceptance criteria (heuristic)", bullets)
+        except Exception:
+            return (False, True, "", [])
 
-    # Generic python runnable verifier:
-    # For python-flavored jobs, require runnable code in a python fence and ensure it runs successfully.
-    # If acceptance criteria bullets exist, the submission must also satisfy the acceptance-criteria heuristic above.
-    python_job = ("python" in title) or ("python" in body)
-    if python_job:
+    # ---- Verifier registry (ordered) ----
+    # Each verifier returns AutoVerifyOutcome(matched=..., ok=..., note=..., verifier=..., artifacts=...)
+
+    def _verifier_primes_smallest_five() -> Optional[AutoVerifyOutcome]:
+        if not (("prime" in title or "prime" in body) and ("five" in title or "five" in body or "5" in title or "5" in body)):
+            return None
         code = _extract_code_fence(text, "python") or _extract_code_fence(text, "py")
         if not code:
-            return (False, "auto_verify failed: missing python code fence in submission for python job")
+            return AutoVerifyOutcome(True, False, "auto_verify failed: missing ```python``` code fence in submission", "primes_smallest_five", {})
         if len(code) > 12000:
-            return (False, "auto_verify failed: python code too large")
+            return AutoVerifyOutcome(True, False, "auto_verify failed: python code too large", "primes_smallest_five", {})
         try:
             with tempfile.TemporaryDirectory() as td:
                 p = Path(td) / "task.py"
                 p.write_text(code, encoding="utf-8")
-                r = subprocess.run(
-                    [sys.executable, "-I", str(p)],
-                    cwd=td,
-                    capture_output=True,
-                    text=True,
-                    timeout=3,
-                )
+                r = subprocess.run([sys.executable, "-I", str(p)], cwd=td, capture_output=True, text=True, timeout=3)
+                arts = {"exit_code": r.returncode, "stdout": _trunc(r.stdout, 1200), "stderr": _trunc(r.stderr, 1200)}
                 if r.returncode != 0:
-                    return (False, f"auto_verify failed: python script error (code={r.returncode}): {r.stderr.strip()[:300]}")
+                    return AutoVerifyOutcome(True, False, f"auto_verify failed: script error (code={r.returncode}): {_trunc(r.stderr, 300)}", "primes_smallest_five", arts)
+                out = (r.stdout or "").strip().splitlines()
+                out = [ln.strip() for ln in out if ln.strip() != ""]
+                expected = ["2", "3", "5", "7", "11"]
+                if out[:5] != expected:
+                    return AutoVerifyOutcome(True, False, f"auto_verify failed: expected first lines {expected}, got {out[:5]}", "primes_smallest_five", {**arts, "expected": expected, "got_first_lines": out[:8]})
+                return AutoVerifyOutcome(True, True, "auto_verify ok: primes output matches expected 2,3,5,7,11", "primes_smallest_five", {**arts, "expected": expected})
         except subprocess.TimeoutExpired:
-            return (False, "auto_verify failed: python script timeout")
+            return AutoVerifyOutcome(True, False, "auto_verify failed: script timeout", "primes_smallest_five", {})
         except Exception as e:
-            return (False, f"auto_verify failed: python verifier exception {e}")
+            return AutoVerifyOutcome(True, False, f"auto_verify failed: exception {e}", "primes_smallest_five", {})
 
-        # If acceptance criteria were present, we only get here if they passed (no missing evidence).
+    def _verifier_python_run() -> Optional[AutoVerifyOutcome]:
+        python_job = ("python" in title) or ("python" in body)
+        if not python_job:
+            return None
+        code = _extract_code_fence(text, "python") or _extract_code_fence(text, "py")
+        if not code:
+            return AutoVerifyOutcome(True, False, "auto_verify failed: missing python code fence in submission for python job", "python_run", {})
+        if len(code) > 12000:
+            return AutoVerifyOutcome(True, False, "auto_verify failed: python code too large", "python_run", {})
+
+        # If acceptance criteria exist, enforce the evidence heuristic too.
+        ac_present, ac_ok, ac_note, bullets = _verify_acceptance_criteria()
+        if ac_present and not ac_ok:
+            return AutoVerifyOutcome(True, False, ac_note, "python_run", {"acceptance_criteria": bullets[:10]})
+
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                p = Path(td) / "task.py"
+                p.write_text(code, encoding="utf-8")
+                r = subprocess.run([sys.executable, "-I", str(p)], cwd=td, capture_output=True, text=True, timeout=3)
+                arts = {"exit_code": r.returncode, "stdout": _trunc(r.stdout, 1200), "stderr": _trunc(r.stderr, 1200)}
+                if r.returncode != 0:
+                    return AutoVerifyOutcome(True, False, f"auto_verify failed: python script error (code={r.returncode}): {_trunc(r.stderr, 300)}", "python_run", arts)
+        except subprocess.TimeoutExpired:
+            return AutoVerifyOutcome(True, False, "auto_verify failed: python script timeout", "python_run", {})
+        except Exception as e:
+            return AutoVerifyOutcome(True, False, f"auto_verify failed: python verifier exception {e}", "python_run", {})
+
         if ac_present:
-            return (True, "auto_verify ok: python code ran + submission references acceptance criteria")
-        return (True, "auto_verify ok: python code ran")
+            return AutoVerifyOutcome(True, True, "auto_verify ok: python code ran + submission references acceptance criteria", "python_run", {"acceptance_criteria": bullets[:10]})
+        return AutoVerifyOutcome(True, True, "auto_verify ok: python code ran", "python_run", {})
 
-    # If we had acceptance criteria and passed them (no early return), approve.
-    if ac_present:
-        return (True, "auto_verify ok: submission references all acceptance criteria (heuristic)")
+    def _verifier_acceptance_criteria_only() -> Optional[AutoVerifyOutcome]:
+        ac_present, ac_ok, ac_note, bullets = _verify_acceptance_criteria()
+        if not ac_present:
+            return None
+        return AutoVerifyOutcome(True, bool(ac_ok), ac_note if ac_note else "auto_verify ok: acceptance criteria satisfied", "acceptance_criteria", {"acceptance_criteria": bullets[:10]})
 
-    return (False, "auto_verify skipped: no verifier matched")
+    for v in (_verifier_primes_smallest_five, _verifier_python_run, _verifier_acceptance_criteria_only):
+        out = v()
+        if out is not None:
+            return out
+
+    return AutoVerifyOutcome(False, False, "auto_verify skipped: no verifier matched", "", {})
 
 
 @app.get("/runs")
@@ -758,10 +813,13 @@ def _build_viewer_html(messages: list[dict], thoughts: list[dict], jobs_state: d
                 submitted_by = str(j.get("submitted_by") or "")
                 reviewed_by = str(j.get("reviewed_by") or "")
                 auto_ok = j.get("auto_verify_ok")
+                auto_name = str(j.get("auto_verify_name") or "")
                 auto_note = str(j.get("auto_verify_note") or "")
+                auto_arts = j.get("auto_verify_artifacts") if isinstance(j.get("auto_verify_artifacts"), dict) else {}
                 review_note = str(j.get("review_note") or "")
                 body_txt = str(j.get("body") or "")
                 sub_txt = str(j.get("submission") or "")
+                events = j.get("events") if isinstance(j.get("events"), list) else []
 
                 verifier = reviewed_by or ("system:auto_verify" if (j.get("auto_verified_at") or 0.0) else "")
                 note = (review_note or auto_note).strip()
@@ -776,11 +834,61 @@ def _build_viewer_html(messages: list[dict], thoughts: list[dict], jobs_state: d
                 # Short status line with verifier result when available.
                 ver_line = ""
                 if auto_ok is True:
-                    ver_line = f"auto_verify: ok - {auto_note[:160]}"
+                    vn = f"{auto_name} " if auto_name else ""
+                    ver_line = f"auto_verify: ok - {vn}{auto_note[:160]}"
                 elif auto_ok is False:
-                    ver_line = f"auto_verify: FAILED - {auto_note[:160]}"
+                    vn = f"{auto_name} " if auto_name else ""
+                    ver_line = f"auto_verify: FAILED - {vn}{auto_note[:160]}"
                 elif note:
                     ver_line = note[:160]
+
+                # Timeline (create → claim → submit → verify → review)
+                timeline_rows = []
+                try:
+                    evs = []
+                    for e in events:
+                        if not isinstance(e, dict):
+                            continue
+                        et = str(e.get("type") or "")
+                        at = float(e.get("at") or 0.0)
+                        dd = e.get("data") if isinstance(e.get("data"), dict) else {}
+                        evs.append((at, et, dd))
+                    evs.sort(key=lambda x: x[0])
+                    for at, et, dd in evs[-20:]:
+                        actor = ""
+                        if et == "create":
+                            actor = str(dd.get("created_by") or "")
+                        elif et in ("claim", "submit"):
+                            actor = str(dd.get("agent_id") or "")
+                        elif et == "verify":
+                            actor = str(dd.get("verifier") or dd.get("by") or "system:auto_verify")
+                        elif et == "review":
+                            actor = str(dd.get("reviewed_by") or "")
+                        meta = ""
+                        if et == "verify":
+                            okv = dd.get("ok")
+                            ok_s = "OK" if okv is True else ("FAIL" if okv is False else "")
+                            vname = str(dd.get("verifier") or "")
+                            meta = f"{ok_s} {vname}".strip()
+                        if et == "review":
+                            meta = "approved" if bool(dd.get("approved")) else "rejected"
+                        timeline_rows.append(
+                            f"<div class='meta'>{_html.escape(_fmt_ts(at))} — {_html.escape(et)}"
+                            + (f" by {_html.escape(actor)}" if actor else "")
+                            + (f" ({_html.escape(meta)})" if meta else "")
+                            + "</div>"
+                        )
+                except Exception:
+                    timeline_rows = []
+
+                arts_rows = []
+                try:
+                    if auto_arts:
+                        for k in ("exit_code", "stdout", "stderr", "expected", "got_first_lines"):
+                            if k in auto_arts and auto_arts.get(k) not in (None, "", [], {}):
+                                arts_rows.append(f"<div class='meta'><strong>{_html.escape(k)}</strong>: {_html.escape(str(auto_arts.get(k))[:900])}</div>")
+                except Exception:
+                    arts_rows = []
                 rows.append(
                     "<div class='msg' style='border-color: rgba(122,162,255,0.35);'>"
                     "<div class='msgHeader'><span class='sender'>Task</span>"
@@ -790,6 +898,12 @@ def _build_viewer_html(messages: list[dict], thoughts: list[dict], jobs_state: d
                     f"<span class='meta'>{_html.escape('job_id=' + jid)}</span><br>"
                     f"<span class='meta'>{_html.escape(who_line)}</span><br>"
                     + (f"<span class='meta'>{_html.escape(ver_line)}</span><br>" if ver_line else "")
+                    + ("<details style='margin-top:8px;'><summary class='meta'>Timeline</summary>"
+                       + ("".join(timeline_rows) if timeline_rows else "<div class='meta'>(no events)</div>")
+                       + "</details>" if True else "")
+                    + ("<details style='margin-top:8px;'><summary class='meta'>Verifier artifacts</summary>"
+                       + ("".join(arts_rows) if arts_rows else "<div class='meta'>(none)</div>")
+                       + "</details>" if True else "")
                     + "<details style='margin-top:8px;'><summary class='meta'>Task text</summary>"
                     + f"<div style='margin-top:6px;'>{_escape_and_format(body_txt)}</div></details>"
                     + "<details style='margin-top:8px;'><summary class='meta'>Submission (excerpt)</summary>"
@@ -1676,7 +1790,9 @@ class Job:
     reviewed_at: float
     review_note: str
     auto_verify_ok: Optional[bool] = None
+    auto_verify_name: str = ""
     auto_verify_note: str = ""
+    auto_verify_artifacts: dict = field(default_factory=dict)
     auto_verified_at: float = 0.0
 
 
@@ -1748,7 +1864,9 @@ def _apply_job_event(ev: JobEvent) -> None:
             reviewed_at=0.0,
             review_note="",
             auto_verify_ok=None,
+            auto_verify_name="",
             auto_verify_note="",
+            auto_verify_artifacts={},
             auto_verified_at=0.0,
         )
         return
@@ -1773,7 +1891,10 @@ def _apply_job_event(ev: JobEvent) -> None:
     if t == "verify" and job.status == "submitted":
         ok = d.get("ok")
         job.auto_verify_ok = ok if isinstance(ok, bool) else None
+        job.auto_verify_name = str(d.get("verifier") or "")[:80]
         job.auto_verify_note = str(d.get("note") or "")[:2000]
+        arts = d.get("artifacts")
+        job.auto_verify_artifacts = arts if isinstance(arts, dict) else {}
         job.auto_verified_at = float(d.get("created_at") or ev.created_at)
         return
 
@@ -1896,21 +2017,24 @@ async def jobs_submit(job_id: str, req: JobSubmitRequest):
     try:
         j2 = _jobs.get(job_id)
         if j2 and j2.status == "submitted":
-            ok, note = _auto_verify_task(j2, sub)
-            # Record the verifier result for UI / auditing.
-            # Skip recording if no verifier matched.
-            if not note.startswith("auto_verify skipped"):
-                _append_job_event("verify", job_id, {"ok": bool(ok), "note": note, "created_at": time.time()})
-            if ok:
-                review_req = JobReviewRequest(approved=True, reviewed_by="system:auto_verify", note=note, payout=0.0, penalty=None)
+            out = _auto_verify_task(j2, sub)
+            # Record the verifier result for UI / auditing (include artifacts).
+            if out.matched:
+                _append_job_event(
+                    "verify",
+                    job_id,
+                    {"ok": bool(out.ok), "note": out.note, "verifier": out.verifier, "artifacts": out.artifacts, "created_at": time.time()},
+                )
+            if out.matched and out.ok:
+                review_req = JobReviewRequest(approved=True, reviewed_by="system:auto_verify", note=out.note, payout=0.0, penalty=None)
                 await jobs_review(job_id, review_req)
-            else:
+            elif out.matched and (not out.ok):
                 # If we had a verifier and it failed, auto-reject and penalize the submitter.
-                if note.startswith("auto_verify failed"):
+                if out.note.startswith("auto_verify failed"):
                     review_req = JobReviewRequest(
                         approved=False,
                         reviewed_by="system:auto_verify",
-                        note=note,
+                        note=out.note,
                         payout=0.0,
                         penalty=max(0.0, TASK_FAIL_PENALTY),
                     )
@@ -2001,19 +2125,23 @@ async def jobs_verify(job_id: str, req: JobVerifyRequest, request: Request):
     if (j.auto_verify_ok is not None) and (not req.force):
         return {"ok": True, "job": asdict(j), "note": "already_verified"}
 
-    ok, note = _auto_verify_task(j, j.submission or "")
-    if not note.startswith("auto_verify skipped"):
-        _append_job_event("verify", job_id, {"ok": bool(ok), "note": note, "created_at": time.time()})
+    out = _auto_verify_task(j, j.submission or "")
+    if out.matched:
+        _append_job_event(
+            "verify",
+            job_id,
+            {"ok": bool(out.ok), "note": out.note, "verifier": out.verifier, "artifacts": out.artifacts, "created_at": time.time()},
+        )
 
-    if ok:
-        review_req = JobReviewRequest(approved=True, reviewed_by=req.by or "human", note=note, payout=0.0, penalty=None)
+    if out.matched and out.ok:
+        review_req = JobReviewRequest(approved=True, reviewed_by=req.by or "human", note=out.note, payout=0.0, penalty=None)
         await jobs_review(job_id, review_req)
-    else:
-        if note.startswith("auto_verify failed"):
+    elif out.matched and (not out.ok):
+        if out.note.startswith("auto_verify failed"):
             review_req = JobReviewRequest(
                 approved=False,
                 reviewed_by=req.by or "human",
-                note=note,
+                note=out.note,
                 payout=0.0,
                 penalty=max(0.0, TASK_FAIL_PENALTY),
             )
