@@ -1977,6 +1977,11 @@ class JobSubmitRequest(BaseModel):
     submission: str
 
 
+class JobCancelRequest(BaseModel):
+    by: str = "human"
+    note: str = ""
+
+
 class JobUpdateRequest(BaseModel):
     """
     Admin edit of an existing job/task (intended for human-curated task board).
@@ -2210,6 +2215,23 @@ async def jobs_update(job_id: str, req: JobUpdateRequest, request: Request):
         data["reward_calc"] = {}
 
     ev = _append_job_event("update", job_id, data)
+    await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})
+    return {"ok": True, "job": asdict(_jobs[job_id])}
+
+
+@app.post("/jobs/{job_id}/cancel")
+async def jobs_cancel(job_id: str, req: JobCancelRequest, request: Request):
+    """Admin cancel an open/claimed/submitted job (useful to remove stale/duplicate tasks)."""
+    global _tick
+    _tick += 1
+    if not _require_admin(request):
+        return {"error": "unauthorized"}
+    j = _jobs.get(job_id)
+    if not j:
+        return {"error": "not_found"}
+    if j.status not in ("open", "claimed", "submitted"):
+        return {"error": "not_cancellable", "status": j.status}
+    ev = _append_job_event("cancel", job_id, {"by": str(req.by or "human")[:80], "note": str(req.note or "")[:2000], "created_at": time.time()})
     await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})
     return {"ok": True, "job": asdict(_jobs[job_id])}
 

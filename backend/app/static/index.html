@@ -977,6 +977,23 @@
           details.open = true;
         };
         editRow.appendChild(editBtn);
+        // Cancel button (admin-only if ADMIN_TOKEN is set)
+        const cancelBtn = document.createElement("button");
+        cancelBtn.textContent = "Cancel";
+        cancelBtn.onclick = async () => {
+          if (!confirm("Cancel this job?")) return;
+          try {
+            await fetchJson(`/jobs/${encodeURIComponent(j.job_id)}/cancel`, {
+              method: "POST",
+              headers: {"Content-Type":"application/json", ...authHeaders()},
+              body: JSON.stringify({by: jobReviewer.value || "human", note: "cancelled from UI"})
+            });
+            await refreshJobs();
+          } catch (e) {
+            alert("Cancel failed (need ADMIN_TOKEN if configured): " + e.message);
+          }
+        };
+        editRow.appendChild(cancelBtn);
         details.appendChild(editRow);
       }
 
@@ -1058,7 +1075,8 @@
     async function refreshJobs() {
       try {
         const st = (jobStatusFilter && jobStatusFilter.value) ? jobStatusFilter.value : "";
-        const q = st ? `/jobs?limit=80&status=${encodeURIComponent(st)}` : "/jobs?limit=80";
+        // Fetch a larger window so "all statuses" doesn't hide older open jobs.
+        const q = st ? `/jobs?limit=200&status=${encodeURIComponent(st)}` : "/jobs?limit=200";
         const data = await fetchJson(q);
         let jobs = data.jobs || [];
         // Run filter: prefer the selected run in the Run Controls dropdown; fallback to current run id.
@@ -1068,6 +1086,13 @@
           jobs = jobs.filter(j => (String(j.title||"").includes(tag) || String(j.body||"").includes(tag)));
         }
         jobsList.innerHTML = "";
+        if (!jobs.length) {
+          const hint = document.createElement("div");
+          hint.style.color = "#666";
+          hint.textContent = "No jobs match the current filters (try unchecking 'selected run only' or choosing a different run).";
+          jobsList.appendChild(hint);
+          return;
+        }
         for (const j of jobs) jobsList.appendChild(renderJob(j));
       } catch (e) {
         jobsList.textContent = "jobs error: " + e.message;
