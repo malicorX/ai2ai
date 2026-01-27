@@ -54,6 +54,15 @@ TREASURY_ID = os.getenv("TREASURY_ID", "treasury")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 TASK_FAIL_PENALTY = float(os.getenv("TASK_FAIL_PENALTY", "1.0"))
 
+# PayPal Sandbox Integration
+PAYPAL_ENABLED = os.getenv("PAYPAL_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "").strip()
+PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET", "").strip()
+PAYPAL_MODE = os.getenv("PAYPAL_MODE", "sandbox").strip().lower()  # "sandbox" or "live"
+PAYPAL_WEBHOOK_ID = os.getenv("PAYPAL_WEBHOOK_ID", "").strip()  # For webhook verification
+# Conversion rate: 1 USD = X ai$ (default: 1 USD = 10 ai$)
+PAYPAL_USD_TO_AIDOLLAR = float(os.getenv("PAYPAL_USD_TO_AIDOLLAR", "10.0"))
+
 # --- Tool Gateway: web fetch (guardrails) ---
 WEB_FETCH_ENABLED = os.getenv("WEB_FETCH_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
 # Comma-separated list of allowed domains/suffixes. Example: "wikipedia.org,open-meteo.com"
@@ -2225,7 +2234,7 @@ async def events_rsvp(event_id: str, req: RsvpRequest):
 
 # ---- aiDollar economy (minimal, persistent JSONL ledger) ----
 
-EconomyEntryType = Literal["genesis", "transfer", "award", "spend"]
+EconomyEntryType = Literal["genesis", "transfer", "award", "spend", "paypal_payment"]
 
 
 @dataclass
@@ -4607,6 +4616,141 @@ async def economy_award(req: AwardRequest):
     _recompute_balances()
     await ws_manager.broadcast({"type": "balances", "data": {"balances": _balances}})
     return {"ok": True, "entry": asdict(entry), "balances": _balances}
+
+
+# ---- PayPal Sandbox Integration ----
+
+class PayPalWebhookRequest(BaseModel):
+    """PayPal webhook payload (simplified for sandbox)"""
+    event_type: str
+    resource: dict
+    id: str = ""
+    create_time: str = ""
+
+
+@app.post("/paypal/webhook")
+async def paypal_webhook(request: Request):
+    """
+    PayPal webhook endpoint for payment notifications.
+    In sandbox mode, accepts simplified webhook payloads.
+    Converts USD payments to ai$ and credits the agent.
+    """
+    global _tick
+    _tick += 1
+    
+    if not PAYPAL_ENABLED:
+        return {"error": "paypal_disabled"}
+    
+    try:
+        body = await request.json()
+    except Exception:
+        return {"error": "invalid_json"}
+    
+    # Extract webhook data
+    event_type = str(body.get("event_type") or "").lower()
+    resource = body.get("resource") or {}
+    
+    # Handle payment completion events
+    if event_type in ("payment.capture.completed", "payment.sale.completed"):
+        try:
+            # Extract payment details
+            amount_dict = resource.get("amount") or {}
+            currency = str(amount_dict.get("currency_code") or "USD").upper()
+            total_str = str(amount_dict.get("total") or "0.0")
+            
+            if currency != "USD":
+                return {"error": "unsupported_currency", "currency": currency}
+            
+            usd_amount = float(total_str)
+            if usd_amount <= 0:
+                return {"error": "invalid_amount"}
+            
+            # Convert USD to ai$
+            ai_dollar_amount = usd_amount * PAYPAL_USD_TO_AIDOLLAR
+            
+            # Extract agent ID from payment metadata or custom field
+            # In sandbox, we'll use a custom field or invoice_id to identify the agent
+            agent_id = ""
+            custom = str(resource.get("custom") or resource.get("invoice_id") or "")
+            if custom.startswith("agent_"):
+                agent_id = custom
+            else:
+                # Try to extract from description or note
+                description = str(resource.get("description") or resource.get("note") or "")
+                match = re.search(r"agent[_\s]*(\d+)", description, re.IGNORECASE)
+                if match:
+                    agent_id = f"agent_{match.group(1)}"
+            
+            if not agent_id:
+                # Default: credit to a special "paypal_revenue" account that can be distributed later
+                agent_id = "paypal_revenue"
+            
+            # Credit ai$ to agent
+            ensure_account(agent_id)
+            ensure_account(TREASURY_ID)
+            
+            now = time.time()
+            payment_id = str(resource.get("id") or body.get("id") or uuid.uuid4())
+            
+            entry = EconomyEntry(
+                entry_id=str(uuid.uuid4()),
+                entry_type="paypal_payment",
+                amount=ai_dollar_amount,
+                from_id=TREASURY_ID,
+                to_id=agent_id,
+                memo=f"PayPal payment: ${usd_amount:.2f} USD → {ai_dollar_amount:.2f} ai$ (payment_id={payment_id})",
+                created_at=now,
+            )
+            _economy_ledger.append(entry)
+            _append_jsonl(ECONOMY_PATH, asdict(entry))
+            _recompute_balances()
+            
+            # Update opportunity revenue if linked
+            try:
+                # Try to find matching opportunity by payment description or invoice
+                description = str(resource.get("description") or resource.get("note") or "")
+                opp_title_match = re.search(r"opportunity[:\s]+(.+?)(?:\s|$)", description, re.IGNORECASE)
+                if opp_title_match:
+                    opp_title = opp_title_match.group(1).strip()
+                    for opp in _opportunities.values():
+                        if opp_title.lower() in opp.title.lower() or opp.title.lower() in opp_title.lower():
+                            opp.actual_revenue_usd = usd_amount
+                            opp.outcome = "success"
+                            opp.status = "done"
+                            _recalculate_opportunity_success_score(opp)
+                            _save_opportunities()
+                            break
+            except Exception:
+                pass
+            
+            await ws_manager.broadcast({"type": "balances", "data": {"balances": _balances}})
+            await ws_manager.broadcast({"type": "paypal_payment", "data": {
+                "agent_id": agent_id,
+                "usd_amount": usd_amount,
+                "ai_dollar_amount": ai_dollar_amount,
+                "payment_id": payment_id,
+            }})
+            
+            return {"ok": True, "credited": ai_dollar_amount, "agent_id": agent_id, "usd_amount": usd_amount}
+        except Exception as e:
+            return {"error": "processing_failed", "message": str(e)[:200]}
+    
+    # Acknowledge other event types
+    return {"ok": True, "event_type": event_type, "processed": False}
+
+
+@app.get("/paypal/status")
+def paypal_status():
+    """Check PayPal integration status"""
+    return {
+        "enabled": PAYPAL_ENABLED,
+        "mode": PAYPAL_MODE,
+        "client_id_set": bool(PAYPAL_CLIENT_ID),
+        "client_secret_set": bool(PAYPAL_CLIENT_SECRET),
+        "webhook_id_set": bool(PAYPAL_WEBHOOK_ID),
+        "conversion_rate": PAYPAL_USD_TO_AIDOLLAR,
+        "webhook_url": "/paypal/webhook",
+    }
 
 
 @app.post("/economy/penalty")
