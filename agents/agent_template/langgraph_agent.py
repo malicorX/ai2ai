@@ -722,9 +722,25 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
                     # Combined score: 50% success_score, 40% price, 10% recency (always prefer newer)
                     return (success_score * 0.5) + (price_norm * 0.4) + 0.1
                 
-                candidates.sort(key=_score_opp, reverse=True)
+                # Sort by score, but boost opportunities that match successful patterns
+                def _score_with_success_boost(opp):
+                    base_score = _score_opp(opp)
+                    # Check if this opportunity type matches successful patterns
+                    opp_type = str(opp.get("type") or "").lower()
+                    opp_platform = str(opp.get("platform") or "").lower()
+                    
+                    # Boost if platform/type matches successful archetypes
+                    boost = 0.0
+                    if any(arch in opp_type or arch in opp_platform for arch in successful_archetypes):
+                        boost += 0.15
+                    if "deliver_opportunity" in successful_archetypes:
+                        boost += 0.1  # General boost for deliver_opportunity if it's been successful
+                    
+                    return base_score + boost
+                
+                candidates.sort(key=_score_with_success_boost, reverse=True)
                 it = candidates[0]
-                opp_score = _score_opp(it)
+                opp_score = _score_with_success_boost(it)
                 
                 # Autonomous pursuit: if this is a high-value opportunity (score > 0.7), pursue it even if we have an open job
                 # Otherwise, only pursue if we don't have an open job
