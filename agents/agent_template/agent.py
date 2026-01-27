@@ -1275,7 +1275,7 @@ def _do_job(job: dict, tools: Optional[dict] = None) -> str:
 
     verifier_tag = _extract_tag("verifier").lower()
     try:
-        trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "tags_parsed", "verifier": verifier_tag})
+        trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "tags_parsed", "verifier": verifier_tag, "body_sample": (body or "")[:200]})
     except Exception:
         pass
     json_min_items = 0
@@ -1414,6 +1414,11 @@ def _do_job(job: dict, tools: Optional[dict] = None) -> str:
         deliverable_md = ""
         evidence_kv = {}
         try:
+            # Debug: log which path we're taking
+            try:
+                trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "verifier_check", "verifier_tag": verifier_tag, "is_md_table": verifier_tag in ("md_table", "markdown_table"), "is_json_list": verifier_tag in ("json_list",)})
+            except Exception:
+                pass
             if verifier_tag in ("md_table", "markdown_table"):
                 try:
                     trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "enter_md_table"})
