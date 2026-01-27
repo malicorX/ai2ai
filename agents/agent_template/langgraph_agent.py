@@ -555,7 +555,36 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
                     "- Evidence section with row_count.\n",
                 ),
             ]
-            t, b = pool[(max(0, pfc - 1)) % len(pool)]
+            # Filter pool to avoid failed archetypes/verifiers, prefer successful ones
+            filtered_pool = []
+            for t, b in pool:
+                # Extract archetype and verifier from title
+                arch_match = re.search(r"\[archetype:([^\]]+)\]", t.lower())
+                ver_match = re.search(r"\[verifier:([^\]]+)\]", t.lower())
+                arch = arch_match.group(1) if arch_match else ""
+                ver = ver_match.group(1) if ver_match else ""
+                
+                # Skip if this archetype/verifier has failed recently
+                if arch in failed_archetypes or ver in failed_verifiers:
+                    continue
+                
+                # Prefer successful patterns (but don't exclude others)
+                priority = 0
+                if arch in successful_archetypes:
+                    priority += 1
+                if ver in successful_verifiers:
+                    priority += 1
+                
+                filtered_pool.append((priority, t, b))
+            
+            # If all templates were filtered out, use original pool (don't get stuck)
+            if not filtered_pool:
+                filtered_pool = [(0, t, b) for t, b in pool]
+            
+            # Sort by priority (successful patterns first), then rotate by failure count
+            filtered_pool.sort(key=lambda x: x[0], reverse=True)
+            idx = (max(0, pfc - 1)) % len(filtered_pool)
+            t, b = filtered_pool[idx][1], filtered_pool[idx][2]
             title = t
             body = b
             reward = 0.01
