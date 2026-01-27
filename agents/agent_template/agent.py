@@ -1889,17 +1889,34 @@ def _do_job(job: dict, tools: Optional[dict] = None) -> str:
                 # If verifier is json_list but we went through generic path, try to extract/fix JSON
                 if verifier_tag == "json_list" and deliverable_md:
                     # Try to extract JSON from LLM output and ensure it's in proper code fence
-                    import re as re2
-                    json_match = re2.search(r'`json\s*\n(.*?)\n`', deliverable_md, re2.DOTALL)
+                    # Match both single and triple backticks
+                    json_match = re.search(r'`{1,3}json\s*\n(.*?)\n`{1,3}', deliverable_md, re.DOTALL)
                     if json_match:
                         json_str = json_match.group(1).strip()
                         try:
                             # Validate it's valid JSON
                             json.loads(json_str)
-                            # Replace with proper triple-backtick format
+                            # Replace entire deliverable with proper triple-backtick format
                             deliverable_md = f"```json\n{json_str}\n```"
-                        except Exception:
-                            pass  # Keep original if JSON is invalid
+                            try:
+                                trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "fixed_json_fence", "from_single_to_triple": True})
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            try:
+                                trace_event("error", "json_extraction_failed", {"job_id": str(job_id or ""), "err": str(e)[:200]})
+                            except Exception:
+                                pass
+                    else:
+                        # If no code fence found, try to find JSON array directly
+                        json_match2 = re.search(r'(\[[\s\S]*?\])', deliverable_md)
+                        if json_match2:
+                            json_str = json_match2.group(1).strip()
+                            try:
+                                json.loads(json_str)
+                                deliverable_md = f"```json\n{json_str}\n```"
+                            except Exception:
+                                pass
         except Exception as e:
             # Preserve failure details so we can debug stuck/rejected jobs from the UI.
             try:
