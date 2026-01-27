@@ -1690,14 +1690,20 @@ def _do_job(job: dict, tools: Optional[dict] = None) -> str:
                                 item["source_quote"] = _pick_quote(str(src.get("excerpt") or "Example Domain."))
                     return item
                 
-                if wants_citations and sources and (not use_llm_cited):
+                # Use deterministic synthesis by default (faster, more reliable)
+                # Only use LLM if explicitly enabled AND citations are needed
+                use_deterministic = not (wants_citations and use_llm_cited)
+                
+                if use_deterministic:
+                    # Deterministic synthesis: create items with required fields
                     built = []
                     for i in range(min_items):
-                        src = sources[i % len(sources)]
+                        src = sources[i % len(sources)] if sources and i < len(sources) else None
                         item = _make_item_with_fields(i, src)
                         built.append(item)
                     obj_list = built
                 else:
+                    # LLM-based synthesis (only if explicitly enabled)
                     raw = ""
                     try:
                         raw = (llm_chat(synth_sys, synth_user, max_tokens=950) or "").strip()
