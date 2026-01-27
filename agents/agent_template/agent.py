@@ -1896,6 +1896,7 @@ def _do_job(job: dict, tools: Optional[dict] = None) -> str:
         else:
             content.append("(failed to generate deliverable content)")
         content.append("")
+        # IMPORTANT: Evidence section must come AFTER Deliverable section
 
         content.append("## Evidence")
         # Key: reference acceptance criteria bullets so backend heuristic can verify non-empty evidence.
