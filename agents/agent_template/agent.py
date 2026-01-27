@@ -1722,6 +1722,8 @@ def _do_job(job: dict, tools: Optional[dict] = None) -> str:
 
                 item_count = len(obj_list)
                 evidence_kv["item_count"] = item_count
+                if req:
+                    evidence_kv["json_required_keys"] = ", ".join(req)
                 try:
                     domains = sorted({urllib.parse.urlparse(s.get("url","")).hostname or "" for s in sources})
                     domains = [d for d in domains if d]
@@ -1729,6 +1731,7 @@ def _do_job(job: dict, tools: Optional[dict] = None) -> str:
                         evidence_kv["domains_used"] = ", ".join(domains[:8])
                 except Exception:
                     pass
+                # IMPORTANT: Use triple backticks for JSON code fence (verifier expects ```json```)
                 deliverable_md = "```json\n" + json.dumps(obj_list, ensure_ascii=False, indent=2) + "\n```"
             elif "[archetype:deliver_opportunity]" in title.lower() or "deliver:" in title.lower():
                 # Special handling for deliver_opportunity tasks: use email_template_generate tool
