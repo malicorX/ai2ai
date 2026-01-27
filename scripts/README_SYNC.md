@@ -67,6 +67,32 @@ This will:
 - Add remote pointing to GitHub
 - Set up branch tracking
 
+### SSH Key Setup (Optional but Recommended)
+
+To enable direct git pull/push on sparky1 and sparky2:
+
+**Step 1: Add SSH keys to GitHub**
+
+1. Create a GitHub Personal Access Token:
+   - Go to https://github.com/settings/tokens
+   - Click "Generate new token (classic)"
+   - Select scope: `admin:public_key`
+   - Copy the token
+
+2. Run the setup script:
+   ```powershell
+   $env:GITHUB_TOKEN = "your_token_here"
+   .\scripts\add_ssh_keys_to_github.ps1
+   ```
+
+**Step 2: Update git remotes to use SSH**
+
+```powershell
+.\scripts\update_git_remotes_to_ssh.ps1
+```
+
+After this, sparky1 and sparky2 can use `git pull` and `git push` directly!
+
 ### Daily Workflow
 
 **On local machine:**
