@@ -573,8 +573,10 @@ def _extract_code_fence(text: str, lang: str) -> Optional[str]:
         # Fallback: PowerShell/backtick sanitization can collapse ```python into `python.
         # Accept a single-backtick "fence" and take until the next lone backtick or end.
         # IMPORTANT: Use a more robust pattern that captures until the closing backtick on its own line
+        # Also handle nested code fences (e.g., json inside markdown)
+        # Try multiline mode to match across the entire text, not just from start
         m2 = re.search(
-            rf"(?im)^[ \t]*`{re.escape(lang)}[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*`[ \t]*(?:\r?\n|$)",
+            rf"(?im)`{re.escape(lang)}[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*`[ \t]*(?:\r?\n|$)",
             text or "",
         )
         if m2:
