@@ -2618,10 +2618,15 @@ def _apply_job_event(ev: JobEvent) -> None:
     if not job:
         return
 
-    if t == "claim" and job.status == "open":
-        job.status = "claimed"
-        job.claimed_by = str(d.get("agent_id") or "")[:80]
-        job.claimed_at = float(d.get("created_at") or ev.created_at)
+    if t == "claim":
+        # Race condition handling: only claim if still open
+        if job.status == "open":
+            job.status = "claimed"
+            job.claimed_by = str(d.get("agent_id") or "")[:80]
+            job.claimed_at = float(d.get("created_at") or ev.created_at)
+            return
+        # If already claimed by someone else, this is a failed race (silently ignore)
+        # The caller will get an error when they check the job status
         return
 
     if t == "submit" and job.status in ("claimed", "open"):
@@ -3590,8 +3595,20 @@ async def jobs_claim(job_id: str, req: JobClaimRequest):
     global _tick
     _tick += 1
     j = _jobs.get(job_id)
-    if not j or j.status != "open":
-        return {"error": "not_claimable"}
+    if not j:
+        return {"error": "job_not_found"}
+    
+    # Check current status - handle race conditions
+    if j.status != "open":
+        if j.status == "claimed":
+            # Already claimed - return info about who claimed it (for competition visibility)
+            return {
+                "error": "already_claimed",
+                "claimed_by": j.claimed_by,
+                "claimed_at": j.claimed_at,
+                "job": asdict(j)
+            }
+        return {"error": "not_claimable", "status": j.status}
     
     # Check if this is a sub-task and parent is approved
     parent_id = getattr(j, "parent_job_id", "") or ""
@@ -3603,9 +3620,25 @@ async def jobs_claim(job_id: str, req: JobClaimRequest):
             return {"error": "parent_not_approved", "parent_job_id": parent_id, "parent_status": parent.status}
     
     ensure_account(req.agent_id)
+    
+    # Create claim event - _apply_job_event will handle race conditions atomically
     ev = _append_job_event("claim", job_id, {"agent_id": req.agent_id, "created_at": time.time()})
-    await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})
-    return {"ok": True, "job": asdict(_jobs[job_id])}
+    
+    # Check if claim succeeded (race condition check)
+    j2 = _jobs.get(job_id)
+    if not j2 or j2.status != "claimed" or j2.claimed_by != req.agent_id:
+        # Race condition: someone else claimed it first
+        if j2 and j2.status == "claimed":
+            return {
+                "error": "race_condition_claim_failed",
+                "claimed_by": j2.claimed_by,
+                "claimed_at": j2.claimed_at,
+                "job": asdict(j2)
+            }
+        return {"error": "claim_failed"}
+    
+    await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(j2)}})
+    return {"ok": True, "job": asdict(j2)}
 
 
 @app.post("/jobs/{job_id}/submit")
