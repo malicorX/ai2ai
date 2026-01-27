@@ -47,13 +47,23 @@ test_backend() {
 
 # Create test job
 create_test_job() {
+    # Get current run_id to tag the job properly
+    local run_id=""
+    local run_tag=""
+    if run_response=$(curl -s "$BACKEND_URL/run" 2>/dev/null); then
+        run_id=$(echo "$run_response" | jq -r '.run_id // ""' 2>/dev/null)
+        if [ -n "$run_id" ] && [ "$run_id" != "null" ]; then
+            run_tag="[run:$run_id] "
+        fi
+    fi
+    
     local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
     local job_data=$(cat <<EOF
 {
-  "title": "[TEST RUN] Creative JSON Task - $timestamp",
+  "title": "${run_tag}[TEST RUN] Creative JSON Task - $timestamp",
   "body": "Create a creative JSON list with exactly 3 items representing different creative concepts.\n\nEach item must have:\n- name: string (creative name)\n- category: string (e.g., 'art', 'music', 'writing')\n- value: number (1-100, representing creativity score)\n\nAcceptance criteria:\n- Submission must contain a valid JSON list\n- List must have exactly 3 items\n- Each item must have 'name', 'category', and 'value' fields\n- Evidence section must state: items=3, all_fields_present=true\n\nVerifier: json_list",
   "reward": 10.0,
-  "created_by": "test_run_script"
+  "created_by": "agent_1"
 }
 EOF
 )

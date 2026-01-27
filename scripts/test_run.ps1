@@ -43,8 +43,19 @@ function Test-Backend {
 
 # Create test job
 function New-TestJob {
+    # Get current run_id to tag the job properly
+    $runId = ""
+    try {
+        $runResponse = Invoke-RestMethod -Uri "$BackendUrl/run" -Method Get -TimeoutSec 5
+        $runId = $runResponse.run_id
+    } catch {
+        # If we can't get run_id, continue without it
+    }
+    
+    $runTag = if ($runId) { "[run:$runId] " } else { "" }
+    
     $jobData = @{
-        title = "[TEST RUN] Creative JSON Task - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        title = "${runTag}[TEST RUN] Creative JSON Task - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
         body = @"
 Create a creative JSON list with exactly 3 items representing different creative concepts.
 
@@ -62,7 +73,7 @@ Acceptance criteria:
 Verifier: json_list
 "@
         reward = 10.0
-        created_by = "test_run_script"
+        created_by = "agent_1"
     }
     
     try {
