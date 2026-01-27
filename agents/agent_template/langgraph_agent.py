@@ -1344,9 +1344,28 @@ def node_reflect(state: AgentState, config: Any = None) -> AgentState:
                     if "package tiers" in submission.lower():
                         learning_note += "Package tiers worked. "
                     learning_note += f"Pattern: verifiable evidence passes. Note={note}"
-                    tools["memory_append"]("reflection", learning_note, ["job", "approved", "deliver_opportunity", "success_pattern"], 0.9)
+                    tools["memory_append"]("reflection", learning_note, ["job", "approved", "deliver_opportunity", "success_pattern", "archetype:deliver_opportunity"], 0.9)
                 else:
-                    tools["memory_append"]("reflection", f"Approved job {jid}. Pattern: verifiable evidence passes. Note={note}", ["job", "approved"], 0.85)
+                    # Extract archetype and verifier for success tracking
+                    arch = ""
+                    ver = ""
+                    if "[archetype:" in title:
+                        m = re.search(r"\[archetype:([^\]]+)\]", title)
+                        if m:
+                            arch = m.group(1).strip()
+                    body_check = str(lj.get("body") or "")
+                    if "[verifier:" in title or "[verifier:" in body_check:
+                        m = re.search(r"\[verifier:([^\]]+)\]", (title + " " + body_check))
+                        if m:
+                            ver = m.group(1).strip()
+                    
+                    tags = ["job", "approved", "success_pattern"]
+                    if arch:
+                        tags.append(f"archetype:{arch}")
+                    if ver:
+                        tags.append(f"verifier:{ver}")
+                    
+                    tools["memory_append"]("reflection", f"Approved job {jid} (archetype={arch}, verifier={ver}). Pattern: verifiable evidence passes. Note={note}", tags, 0.85)
             except Exception:
                 pass
             if jid:
