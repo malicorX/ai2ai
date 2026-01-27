@@ -1886,6 +1886,20 @@ def _do_job(job: dict, tools: Optional[dict] = None) -> str:
                 )
                 user_prompt = f"Job title:\n{title}\n\nJob body:\n{body}\n\nReturn the deliverable now:"
                 deliverable_md = (llm_chat(sys_prompt, user_prompt, max_tokens=900) or "").strip()
+                # If verifier is json_list but we went through generic path, try to extract/fix JSON
+                if verifier_tag == "json_list" and deliverable_md:
+                    # Try to extract JSON from LLM output and ensure it's in proper code fence
+                    import re as re2
+                    json_match = re2.search(r'`json\s*\n(.*?)\n`', deliverable_md, re2.DOTALL)
+                    if json_match:
+                        json_str = json_match.group(1).strip()
+                        try:
+                            # Validate it's valid JSON
+                            json.loads(json_str)
+                            # Replace with proper triple-backtick format
+                            deliverable_md = f"```json\n{json_str}\n```"
+                        except Exception:
+                            pass  # Keep original if JSON is invalid
         except Exception as e:
             # Preserve failure details so we can debug stuck/rejected jobs from the UI.
             try:
