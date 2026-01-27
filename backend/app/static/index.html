@@ -200,6 +200,7 @@
           <button id="oppMetricsBtn" style="font-size:11px;">Metrics</button>
           <button id="oppPipelineBtn" style="font-size:11px;">Pipeline</button>
           <button id="oppRevenueBtn" style="font-size:11px;">Revenue</button>
+          <button id="paypalStatusBtn" style="font-size:11px;">PayPal</button>
           <select id="oppStatusFilter" style="font-size:12px; padding:2px 6px;">
             <option value="">All statuses</option>
             <option value="new">New</option>
@@ -712,6 +713,9 @@
     const oppRevenueBtn = document.getElementById("oppRevenueBtn");
     const oppRevenue = document.getElementById("oppRevenue");
     const oppRevenueContent = document.getElementById("oppRevenueContent");
+    const paypalStatusBtn = document.getElementById("paypalStatusBtn");
+    const paypalStatus = document.getElementById("paypalStatus");
+    const paypalStatusContent = document.getElementById("paypalStatusContent");
 
     // --- Jobs ---
     const jobsList = document.getElementById("jobsList");
@@ -1128,6 +1132,38 @@
     setInterval(refreshOpportunityMetrics, 120000); // Refresh metrics every 2 minutes
     setInterval(refreshOpportunityPipeline, 90000); // Refresh pipeline every 1.5 minutes
     setInterval(refreshOpportunityRevenue, 120000); // Refresh revenue every 2 minutes
+    
+    async function refreshPayPalStatus() {
+      if (!paypalStatusContent) return;
+      try {
+        const data = await fetchJson("/paypal/status");
+        let html = "";
+        if (data.enabled) {
+          html += `Enabled (${data.mode}) | `;
+          html += `Rate: 1 USD = ${data.conversion_rate} ai$ | `;
+          html += data.client_id_set ? "✓ Client ID" : "✗ Client ID";
+          html += " | ";
+          html += data.client_secret_set ? "✓ Secret" : "✗ Secret";
+          html += " | ";
+          html += data.webhook_id_set ? "✓ Webhook" : "✗ Webhook";
+        } else {
+          html = "Disabled (set PAYPAL_ENABLED=1 to enable)";
+        }
+        paypalStatusContent.innerHTML = html;
+      } catch (e) {
+        paypalStatusContent.textContent = `Error: ${e.message}`;
+      }
+    }
+    
+    if (paypalStatusBtn && paypalStatus) {
+      paypalStatusBtn.onclick = () => {
+        const visible = paypalStatus.style.display !== "none";
+        paypalStatus.style.display = visible ? "none" : "block";
+        if (!visible) {
+          refreshPayPalStatus();
+        }
+      };
+    }
 
     let lastLoadedPostId = "";
 
@@ -1323,8 +1359,67 @@
       const meta = document.createElement("div");
       meta.style.color = "#666";
       meta.style.marginTop = "6px";
-      meta.textContent = `id=${j.job_id} created_by=${j.created_by} claimed_by=${j.claimed_by||"-"} submitted_by=${j.submitted_by||"-"}`;
+      const parentId = String(j.parent_job_id || "");
+      const parentInfo = parentId ? ` parent=${parentId}` : "";
+      meta.textContent = `id=${j.job_id} created_by=${j.created_by} claimed_by=${j.claimed_by||"-"} submitted_by=${j.submitted_by||"-"}${parentInfo}`;
       details.appendChild(meta);
+      
+      // Show parent job link if this is a sub-task
+      if (parentId) {
+        const parentLink = document.createElement("div");
+        parentLink.style.marginTop = "4px";
+        parentLink.style.padding = "4px";
+        parentLink.style.background = "#e3f2fd";
+        parentLink.style.borderRadius = "4px";
+        parentLink.style.fontSize = "11px";
+        const linkBtn = document.createElement("button");
+        linkBtn.textContent = `View Parent Job: ${parentId}`;
+        linkBtn.style.fontSize = "10px";
+        linkBtn.style.padding = "2px 6px";
+        linkBtn.onclick = () => {
+          if (jobEditId && jobLoadBtn) {
+            jobEditId.value = parentId;
+            jobLoadBtn.click();
+          }
+        };
+        parentLink.appendChild(linkBtn);
+        details.appendChild(parentLink);
+      }
+      
+      // Show child jobs if this is a parent
+      const childJobs = allJobs.filter(job => String(job.parent_job_id || "") === String(j.job_id || ""));
+      if (childJobs.length > 0) {
+        const childDiv = document.createElement("div");
+        childDiv.style.marginTop = "6px";
+        childDiv.style.padding = "4px";
+        childDiv.style.background = "#f1f8e9";
+        childDiv.style.borderRadius = "4px";
+        childDiv.style.fontSize = "11px";
+        childDiv.innerHTML = `<b>Sub-tasks (${childJobs.length}):</b>`;
+        const childList = document.createElement("div");
+        childList.style.marginTop = "4px";
+        for (const child of childJobs) {
+          const childItem = document.createElement("div");
+          childItem.style.display = "flex";
+          childItem.style.gap = "6px";
+          childItem.style.marginTop = "2px";
+          const childBtn = document.createElement("button");
+          childBtn.textContent = `${child.job_id} [${child.status}]`;
+          childBtn.style.fontSize = "9px";
+          childBtn.style.padding = "1px 4px";
+          childBtn.onclick = () => {
+            if (jobEditId && jobLoadBtn) {
+              jobEditId.value = child.job_id;
+              jobLoadBtn.click();
+            }
+          };
+          childItem.appendChild(childBtn);
+          childItem.appendChild(document.createTextNode(child.title.substring(0, 60)));
+          childList.appendChild(childItem);
+        }
+        childDiv.appendChild(childList);
+        details.appendChild(childDiv);
+      }
 
       const meta2 = document.createElement("div");
       meta2.style.color = "#666";
@@ -1581,6 +1676,8 @@
       return wrap;
     }
 
+    let allJobs = []; // Store all jobs for parent-child relationship lookup
+    
     async function refreshJobs() {
       try {
         const st = (jobStatusFilter && jobStatusFilter.value) ? jobStatusFilter.value : "";
@@ -1588,6 +1685,7 @@
         const q = st ? `/jobs?limit=500&status=${encodeURIComponent(st)}` : "/jobs?limit=500";
         const data = await fetchJson(q);
         let jobs = data.jobs || [];
+        allJobs = jobs; // Store for parent-child lookup
         const totalBefore = jobs.length;
         // Run filter: prefer the selected run in the Run Controls dropdown; fallback to current run id.
         const runFilterId = (runsSelect && runsSelect.value) ? String(runsSelect.value) : currentRunId;
