@@ -57,11 +57,12 @@ create_test_job() {
         fi
     fi
     
+    local unique_id=$(uuidgen | cut -d'-' -f1)
     local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
     local job_data=$(cat <<EOF
 {
-  "title": "${run_tag}[TEST RUN] Creative JSON Task - $timestamp",
-  "body": "Create a creative JSON list with exactly 3 items representing different creative concepts.\n\nEach item must have:\n- name: string (creative name)\n- category: string (e.g., 'art', 'music', 'writing')\n- value: number (1-100, representing creativity score)\n\nAcceptance criteria:\n- Submission must contain a valid JSON list\n- List must have exactly 3 items\n- Each item must have 'name', 'category', and 'value' fields\n- Evidence section must state: items=3, all_fields_present=true\n\nVerifier: json_list",
+  "title": "${run_tag}[TEST RUN] Creative JSON Task $unique_id - $timestamp",
+  "body": "[TEST_RUN_ID:$unique_id]\nCreate a creative JSON list with exactly 3 items representing different creative concepts.\n\nEach item must have:\n- name: string (creative name)\n- category: string (e.g., 'art', 'music', 'writing')\n- value: number (1-100, representing creativity score)\n\nAcceptance criteria:\n- Submission must contain a valid JSON list\n- List must have exactly 3 items\n- Each item must have 'name', 'category', and 'value' fields\n- Evidence section must state: items=3, all_fields_present=true\n\nVerifier: json_list\n\nTest run timestamp: $timestamp",
   "reward": 10.0,
   "created_by": "agent_1"
 }

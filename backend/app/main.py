@@ -575,13 +575,23 @@ def _extract_code_fence(text: str, lang: str) -> Optional[str]:
         # IMPORTANT: Use a more robust pattern that captures until the closing backtick on its own line
         # Also handle nested code fences (e.g., json inside markdown)
         # Try multiline mode to match across the entire text, not just from start
+        # More flexible: allow closing backtick to be anywhere after the content
         m2 = re.search(
-            rf"(?im)`{re.escape(lang)}[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*`[ \t]*(?:\r?\n|$)",
+            rf"(?im)`{re.escape(lang)}[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*`",
             text or "",
         )
         if m2:
             extracted = (m2.group(1) or "").strip()
             # If extraction looks valid (not just a single character), return it
+            if len(extracted) > 2:
+                return extracted
+        # Even more flexible: match single backtick followed by lang, then capture until next backtick (anywhere)
+        m2b = re.search(
+            rf"(?im)`{re.escape(lang)}[ \t]*\r?\n([\s\S]*?)`",
+            text or "",
+        )
+        if m2b:
+            extracted = (m2b.group(1) or "").strip()
             if len(extracted) > 2:
                 return extracted
 
@@ -591,6 +601,21 @@ def _extract_code_fence(text: str, lang: str) -> Optional[str]:
         m3 = re.search(rf"(?im)^\s*{re.escape(lang)}\s*$\s*([\s\S]+)$", text or "")
         if m3:
             return (m3.group(1) or "").strip()
+        
+        # Final fallback for JSON: try to find a JSON array directly in the text
+        # This handles cases where the code fence was completely stripped
+        if lang.lower() in ("json", "javascript"):
+            # Look for a JSON array pattern: [ ... ]
+            json_match = re.search(r'(\[[\s\S]*?\])', text or "", re.MULTILINE | re.DOTALL)
+            if json_match:
+                candidate = json_match.group(1).strip()
+                # Validate it's actually valid JSON
+                try:
+                    json.loads(candidate)
+                    return candidate
+                except Exception:
+                    pass
+        
         return None
     except Exception:
         return None
@@ -680,9 +705,14 @@ def _auto_verify_task(job: Job, submission: str) -> AutoVerifyOutcome:
             return None
         code = _extract_code_fence(text, "json") or _extract_code_fence(text, "javascript")
         if not code:
-            return AutoVerifyOutcome(True, False, "auto_verify failed: missing ```json``` code fence in submission", "json_list", {})
+            # Try the final fallback: extract JSON array directly
+            json_match = re.search(r'(\[[\s\S]*?\])', text or "", re.MULTILINE | re.DOTALL)
+            if json_match:
+                code = json_match.group(1).strip()
+            else:
+                return AutoVerifyOutcome(True, False, "auto_verify failed: missing ```json``` code fence in submission", "json_list", {"submission_preview": (text or "")[:500]})
         if len(code) > 20000:
-            return AutoVerifyOutcome(True, False, "auto_verify failed: json too large", "json_list", {})
+            return AutoVerifyOutcome(True, False, "auto_verify failed: json too large", "json_list", {"extracted_length": len(code)})
         # Debug: log what we extracted
         try:
             import logging
@@ -692,7 +722,15 @@ def _auto_verify_task(job: Job, submission: str) -> AutoVerifyOutcome:
         try:
             obj = json.loads(code)
         except Exception as e:
-            return AutoVerifyOutcome(True, False, f"auto_verify failed: invalid json ({e})", "json_list", {"extracted_length": len(code), "extracted_preview": code[:200], "extracted_full": code})
+            # Always include artifacts for debugging
+            artifacts = {
+                "extracted_length": len(code),
+                "extracted_preview": code[:200] if code else "(empty)",
+                "extracted_full": code[:5000] if code else "(empty)",  # Limit to 5KB to avoid huge artifacts
+                "error_type": str(type(e).__name__),
+                "error_msg": str(e)[:200]
+            }
+            return AutoVerifyOutcome(True, False, f"auto_verify failed: invalid json ({e})", "json_list", artifacts)
         if not isinstance(obj, list):
             return AutoVerifyOutcome(True, False, "auto_verify failed: expected a JSON list (array)", "json_list", {"type": str(type(obj))})
         min_items = 0
