@@ -88,15 +88,15 @@ if ($Mode -eq "push" -or $Mode -eq "both") {
         $localPath = Join-Path $ProjectRoot $file
         if (Test-Path $localPath) {
             try {
-                $result = scp -o BatchMode=yes -o ConnectTimeout=15 $localPath "sparky1:~/ai_ai2ai/$file" 2>&1
+                $null = scp -o BatchMode=yes -o ConnectTimeout=15 -q $localPath "sparky1:~/ai_ai2ai/$file" 2>&1
                 if ($LASTEXITCODE -eq 0) {
                     Write-Host "  ✓ $file" -ForegroundColor Green
                     $syncedCount++
                 } else {
-                    Write-Host "  ✗ $file - Error" -ForegroundColor Red
+                    Write-Host "  ✗ $file" -ForegroundColor Red
                 }
             } catch {
-                Write-Host "  ✗ $file - Error: $_" -ForegroundColor Red
+                Write-Host "  ✗ $file" -ForegroundColor Red
             }
         }
     }
@@ -117,15 +117,15 @@ if ($Mode -eq "push" -or $Mode -eq "both") {
         $localPath = Join-Path $ProjectRoot $file
         if (Test-Path $localPath) {
             try {
-                $result = scp -o BatchMode=yes -o ConnectTimeout=15 $localPath "sparky2:~/ai_ai2ai/$file" 2>&1
+                $null = scp -o BatchMode=yes -o ConnectTimeout=15 -q $localPath "sparky2:~/ai_ai2ai/$file" 2>&1
                 if ($LASTEXITCODE -eq 0) {
                     Write-Host "  ✓ $file" -ForegroundColor Green
                     $syncedCount2++
                 } else {
-                    Write-Host "  ✗ $file - Error" -ForegroundColor Red
+                    Write-Host "  ✗ $file" -ForegroundColor Red
                 }
             } catch {
-                Write-Host "  ✗ $file - Error: $_" -ForegroundColor Red
+                Write-Host "  ✗ $file" -ForegroundColor Red
             }
         }
     }
