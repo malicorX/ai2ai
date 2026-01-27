@@ -77,7 +77,7 @@ Acceptance criteria:
 - Each item must have 'name', 'category', and 'value' fields
 - Evidence section must state: items=3, all_fields_present=true
 
-Verifier: json_list
+[verifier:json_list]
 [json_required_keys:name,category,value]
 [json_min_items:3]
 
