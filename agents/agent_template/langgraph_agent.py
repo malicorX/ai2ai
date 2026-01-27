@@ -1273,8 +1273,18 @@ def node_act(state: AgentState, config: Any = None) -> AgentState:
                 pass
             # Pass tools dict to do_job so it can use email_template_generate, etc. for deliver_opportunity tasks
             submission = tools["do_job"](job, tools)
-        except Exception:
-            submission = "Evidence:\n- Execution failed inside agent runtime.\n"
+        except Exception as e:
+            error_msg = str(e)[:500]
+            error_type = type(e).__name__
+            try:
+                tools["trace_event"](
+                    "error",
+                    "do_job_exception",
+                    {"job_id": job_id, "error_type": error_type, "error_msg": error_msg},
+                )
+            except Exception:
+                pass
+            submission = f"Evidence:\n- Execution failed inside agent runtime.\n- Error type: {error_type}\n- Error message: {error_msg}\n"
         try:
             tools["trace_event"](
                 "status",
