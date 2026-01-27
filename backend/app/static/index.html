@@ -225,6 +225,21 @@
       </div>
 
       <div style="background:white; border:1px solid #ccc; padding:10px; border-radius:6px; width:420px;">
+        <h3 style="margin:0 0 8px 0;">Learning Patterns</h3>
+        <div style="display:flex; gap:8px; margin-bottom:8px; align-items:center;">
+          <select id="learningAgentSelect" style="font-size:12px; padding:2px 6px;">
+            <option value="agent_1">Agent 1 (Max)</option>
+            <option value="agent_2">Agent 2 (Tina)</option>
+          </select>
+          <button id="learningRefreshBtn" style="font-size:11px;">Refresh</button>
+          <span id="learningStatus" class="pill">?</span>
+        </div>
+        <div id="learningPanel" style="font-size:11px; max-height:200px; overflow-y:auto; padding:8px; background:#f9f9f9; border-radius:4px;">
+          <div style="color:#666;">Select agent and click Refresh to view learning patterns.</div>
+        </div>
+      </div>
+
+      <div style="background:white; border:1px solid #ccc; padding:10px; border-radius:6px; width:420px;">
         <h3 style="margin:0 0 8px 0;">Task Board (Jobs)</h3>
         <div style="display:flex; gap:8px; margin-bottom:8px; align-items:center;">
           <select id="jobStatusFilter" style="padding:6px; width:170px;">
@@ -716,6 +731,10 @@
     const paypalStatusBtn = document.getElementById("paypalStatusBtn");
     const paypalStatus = document.getElementById("paypalStatus");
     const paypalStatusContent = document.getElementById("paypalStatusContent");
+    const learningAgentSelect = document.getElementById("learningAgentSelect");
+    const learningRefreshBtn = document.getElementById("learningRefreshBtn");
+    const learningPanel = document.getElementById("learningPanel");
+    const learningStatus = document.getElementById("learningStatus");
 
     // --- Jobs ---
     const jobsList = document.getElementById("jobsList");
@@ -1164,6 +1183,105 @@
         }
       };
     }
+    
+    async function refreshLearningPatterns() {
+      if (!learningPanel || !learningAgentSelect) return;
+      const agentId = learningAgentSelect.value || "agent_1";
+      learningStatus.textContent = "loading…";
+      try {
+        // Fetch recent reflections and failure patterns
+        const recentData = await fetchJson(`/memory/${agentId}/recent?limit=30`);
+        const reflections = (recentData.memories || []).filter(m => 
+          String(m.kind || "").toLowerCase() === "reflection"
+        );
+        
+        // Search for failure patterns
+        const failureData = await fetchJson(`/memory/${agentId}/search?q=failure&limit=20`);
+        const failures = failureData.memories || [];
+        
+        // Search for success patterns
+        const successData = await fetchJson(`/memory/${agentId}/search?q=approved success&limit=20`);
+        const successes = successData.memories || [];
+        
+        let html = "";
+        
+        // Recent reflections
+        if (reflections.length > 0) {
+          html += `<div style="margin-bottom:12px;"><b>Recent Reflections (${reflections.length}):</b></div>`;
+          for (const r of reflections.slice(0, 5)) {
+            const text = String(r.text || "").substring(0, 150);
+            const tags = (r.tags || []).slice(0, 5).join(", ");
+            const importance = parseFloat(r.importance || 0.3);
+            const importanceColor = importance > 0.7 ? "#4CAF50" : importance > 0.4 ? "#FF9800" : "#999";
+            html += `<div style="margin-bottom:6px; padding:6px; background:#fff; border-left:3px solid ${importanceColor}; border-radius:2px;">`;
+            html += `<div style="color:#666; font-size:10px;">${tags || "(no tags)"} | importance=${importance.toFixed(2)}</div>`;
+            html += `<div style="margin-top:2px;">${text}${text.length >= 150 ? "…" : ""}</div>`;
+            html += `</div>`;
+          }
+        }
+        
+        // Failure patterns summary
+        if (failures.length > 0) {
+          const failureTags = new Map();
+          for (const f of failures) {
+            const tags = f.tags || [];
+            for (const tag of tags) {
+              if (String(tag).startsWith("failure:")) {
+                failureTags.set(tag, (failureTags.get(tag) || 0) + 1);
+              }
+            }
+          }
+          if (failureTags.size > 0) {
+            html += `<div style="margin-top:12px; margin-bottom:6px;"><b>Avoiding Patterns (${failureTags.size}):</b></div>`;
+            html += `<div style="font-size:10px; color:#c00;">`;
+            const sortedFailures = Array.from(failureTags.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5);
+            html += sortedFailures.map(([tag, count]) => `${tag} (${count}x)`).join(", ");
+            html += `</div>`;
+          }
+        }
+        
+        // Success patterns summary
+        if (successes.length > 0) {
+          const successTags = new Map();
+          for (const s of successes) {
+            const tags = s.tags || [];
+            for (const tag of tags) {
+              if (String(tag).startsWith("archetype:") || String(tag).startsWith("verifier:")) {
+                successTags.set(tag, (successTags.get(tag) || 0) + 1);
+              }
+            }
+          }
+          if (successTags.size > 0) {
+            html += `<div style="margin-top:12px; margin-bottom:6px;"><b>Preferred Patterns (${successTags.size}):</b></div>`;
+            html += `<div style="font-size:10px; color:#4CAF50;">`;
+            const sortedSuccesses = Array.from(successTags.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5);
+            html += sortedSuccesses.map(([tag, count]) => `${tag} (${count}x)`).join(", ");
+            html += `</div>`;
+          }
+        }
+        
+        if (!html) {
+          html = `<div style="color:#666;">No learning patterns found yet. Agents learn from job outcomes.</div>`;
+        }
+        
+        learningPanel.innerHTML = html;
+        learningStatus.textContent = `ok (${reflections.length} reflections)`;
+        learningStatus.className = "pill ok";
+      } catch (e) {
+        learningPanel.innerHTML = `<div style="color:#c00;">Error: ${e.message}</div>`;
+        learningStatus.textContent = "error";
+        learningStatus.className = "pill bad";
+      }
+    }
+    
+    if (learningRefreshBtn) {
+      learningRefreshBtn.onclick = refreshLearningPatterns;
+    }
+    if (learningAgentSelect) {
+      learningAgentSelect.onchange = refreshLearningPatterns;
+    }
+    // Initial load
+    refreshLearningPatterns();
 
     let lastLoadedPostId = "";
 
