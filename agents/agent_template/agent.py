@@ -1445,7 +1445,7 @@ def _do_job(job: dict, tools: Optional[dict] = None) -> str:
                 evidence_kv["table_rows"] = row_count
             elif verifier_tag in ("json_list",):
                 try:
-                    trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "enter_json_list"})
+                    trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "enter_json_list", "verifier_tag": verifier_tag, "body_has_verifier": "[verifier:" in body.lower() or "verifier:" in body.lower()})
                 except Exception:
                     pass
                 req = json_required_keys or ["title", "category", "why_we_can_do_it", "first_step", "verification_plan"]
