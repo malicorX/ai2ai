@@ -690,7 +690,7 @@ def _auto_verify_task(job: Job, submission: str) -> AutoVerifyOutcome:
         try:
             obj = json.loads(code)
         except Exception as e:
-            return AutoVerifyOutcome(True, False, f"auto_verify failed: invalid json ({e}), extracted length: {len(code)}, first 50 chars: {code[:50]!r}", "json_list", {"extracted_length": len(code), "extracted_preview": code[:200]})
+            return AutoVerifyOutcome(True, False, f"auto_verify failed: invalid json ({e})", "json_list", {"extracted_length": len(code), "extracted_preview": code[:200], "extracted_full": code})
         if not isinstance(obj, list):
             return AutoVerifyOutcome(True, False, "auto_verify failed: expected a JSON list (array)", "json_list", {"type": str(type(obj))})
         min_items = 0
