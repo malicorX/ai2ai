@@ -32,3 +32,7 @@ ai_ai2ai_deploy.tgz
 result_viewer.html
 tmp_job_*.json
 
+
+# Runtime data (backend_data contains logs, events, memory, artifacts)
+backend_data/
+!backend_data/.gitkeep
