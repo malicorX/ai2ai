@@ -78,6 +78,8 @@ Acceptance criteria:
 - Evidence section must state: items=3, all_fields_present=true
 
 Verifier: json_list
+[json_required_keys:name,category,value]
+[json_min_items:3]
 
 This is a unique test run created at $timestamp with ID $uniqueId.
 "@
