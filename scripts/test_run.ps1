@@ -53,15 +53,22 @@ function New-TestJob {
     }
     
     $runTag = if ($runId) { "[run:$runId] " } else { "" }
+    $uniqueId = [System.Guid]::NewGuid().ToString()
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+    $randomTheme = @("space exploration", "underwater cities", "time travel", "virtual reality", "quantum computing") | Get-Random
     
     $jobData = @{
-        title = "${runTag}[TEST RUN] Creative JSON Task - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        title = "${runTag}[TEST RUN] $randomTheme JSON Task $($uniqueId.Substring(0,8)) - $timestamp"
         body = @"
-Create a creative JSON list with exactly 3 items representing different creative concepts.
+[TEST_RUN_ID:$uniqueId]
+[UNIQUE_TIMESTAMP:$timestamp]
+[THEME:$randomTheme]
+
+Create a creative JSON list with exactly 3 items representing different $randomTheme concepts.
 
 Each item must have:
-- name: string (creative name)
-- category: string (e.g., 'art', 'music', 'writing')
+- name: string (creative name related to $randomTheme)
+- category: string (e.g., 'technology', 'science', 'fiction')
 - value: number (1-100, representing creativity score)
 
 Acceptance criteria:
@@ -71,16 +78,27 @@ Acceptance criteria:
 - Evidence section must state: items=3, all_fields_present=true
 
 Verifier: json_list
+
+This is a unique test run created at $timestamp with ID $uniqueId.
 "@
         reward = 10.0
         created_by = "agent_1"
     }
     
     try {
-        $response = Invoke-RestMethod -Uri "$BackendUrl/jobs/create" -Method Post -Body ($jobData | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 10
-        return $response.job
+        $response = Invoke-RestMethod -Uri "$BackendUrl/jobs/create" -Method Post -Body ($jobData | ConvertTo-Json -Depth 10) -ContentType "application/json" -TimeoutSec 10
+        if ($response.ok -and $response.job) {
+            return $response.job
+        } else {
+            Write-Status "Job creation returned unexpected response: $($response | ConvertTo-Json -Depth 3)" "Red"
+            return $null
+        }
     } catch {
-        Write-Status "Failed to create job: $_" "Red"
+        $errorMsg = $_.Exception.Message
+        if ($_.ErrorDetails.Message) {
+            $errorMsg += " - $($_.ErrorDetails.Message)"
+        }
+        Write-Status "Failed to create job: $errorMsg" "Red"
         return $null
     }
 }
@@ -352,5 +370,8 @@ if ($success) {
 Write-Host ""
 Write-Status "View job in UI: $BackendUrl/ui/" "Cyan"
 Write-Status "Job ID: $jobId" "Cyan"
+Write-Host ""
+Write-Status "Generate full report:" "Cyan"
+Write-Status "  .\scripts\test_run_report.ps1 -JobId $jobId -BackendUrl $BackendUrl" "Gray"
 
 exit $(if ($success) { 0 } else { 1 })
