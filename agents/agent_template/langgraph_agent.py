@@ -1374,18 +1374,86 @@ def node_reflect(state: AgentState, config: Any = None) -> AgentState:
                 acceptance = _extract_section_bullets(body, "acceptance criteria", 20)
                 evidence_req = _extract_section_bullets(body, "evidence required", 20)
                 
+                # Extract submission to analyze what was missing
+                submission = str(lj.get("submission") or "")
+                
+                # Analyze verifier note for specific failure patterns
+                note_lower = note.lower()
+                missing_patterns = []
+                if "evidence" in note_lower and ("missing" in note_lower or "not found" in note_lower):
+                    missing_patterns.append("evidence_section_missing")
+                if "code fence" in note_lower or "```" in note_lower:
+                    if "missing" in note_lower or "not found" in note_lower:
+                        missing_patterns.append("code_fence_missing")
+                if "json" in note_lower and ("invalid" in note_lower or "parse" in note_lower):
+                    missing_patterns.append("json_format_error")
+                if "table" in note_lower and ("missing" in note_lower or "not found" in note_lower):
+                    missing_patterns.append("table_missing")
+                if "count" in note_lower or "items" in note_lower:
+                    if "insufficient" in note_lower or "too few" in note_lower or "<" in note:
+                        missing_patterns.append("item_count_insufficient")
+                
+                # Check which acceptance criteria might have been violated
+                violated_criteria = []
+                if acceptance and note:
+                    for crit in acceptance[:10]:  # Check first 10 criteria
+                        crit_lower = crit.lower()
+                        # If note mentions something related to this criterion, it might have failed
+                        if any(word in note_lower for word in crit_lower.split()[:3] if len(word) > 4):
+                            violated_criteria.append(crit[:100])
+                
+                # Check which evidence requirements were missing
+                missing_evidence = []
+                if evidence_req and submission:
+                    sub_lower = submission.lower()
+                    for req in evidence_req[:10]:
+                        req_lower = req.lower()
+                        # Check if requirement mentions something not found in submission
+                        key_terms = [w for w in req_lower.split() if len(w) > 5][:3]
+                        if key_terms and not all(term in sub_lower for term in key_terms):
+                            missing_evidence.append(req[:100])
+                
+                # Build comprehensive learning message
                 learning = f"Rejected job {jid} (archetype={archetype}, verifier={verifier}). "
-                learning += f"Failure reason: {note[:200]}. "
+                learning += f"Failure: {note[:150]}. "
+                
+                if missing_patterns:
+                    learning += f"Missing patterns: {', '.join(missing_patterns)}. "
+                
                 if acceptance:
-                    learning += f"Acceptance criteria had {len(acceptance)} items. "
+                    learning += f"Had {len(acceptance)} acceptance criteria. "
+                    if violated_criteria:
+                        learning += f"Likely violated: {violated_criteria[0][:80]}. "
+                
                 if evidence_req:
-                    learning += f"Evidence requirements: {len(evidence_req)} items. "
-                learning += "Fix: ensure Evidence section explicitly checks every acceptance criterion; include required code fences; match verifier expectations exactly."
+                    learning += f"Had {len(evidence_req)} evidence requirements. "
+                    if missing_evidence:
+                        learning += f"Missing evidence: {missing_evidence[0][:80]}. "
+                
+                # Actionable fix guidance
+                fix_guidance = "Fix: "
+                if "evidence_section_missing" in missing_patterns:
+                    fix_guidance += "Always include an 'Evidence' section. "
+                if "code_fence_missing" in missing_patterns:
+                    fix_guidance += "Include required code fences (```json, ```python, etc). "
+                if "json_format_error" in missing_patterns:
+                    fix_guidance += "Validate JSON syntax before submission. "
+                if "item_count_insufficient" in missing_patterns:
+                    fix_guidance += "Check minimum item/row counts match requirements. "
+                if not missing_patterns:
+                    fix_guidance += "Ensure Evidence section explicitly checks every acceptance criterion; match verifier expectations exactly. "
+                
+                learning += fix_guidance
+                
+                # Store with specific tags for better recall
+                tags = ["job", "rejected", "policy", f"archetype:{archetype}", f"verifier:{verifier}"]
+                for pattern in missing_patterns:
+                    tags.append(f"missing:{pattern}")
                 
                 tools["memory_append"](
                     "reflection",
                     learning,
-                    ["job", "rejected", "policy", f"archetype:{archetype}", f"verifier:{verifier}"],
+                    tags,
                     0.95,
                 )
             except Exception:
