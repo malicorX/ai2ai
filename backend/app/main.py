@@ -827,6 +827,13 @@ def _auto_verify_task(job: Job, submission: str) -> AutoVerifyOutcome:
             return AutoVerifyOutcome(True, False, f"auto_verify failed: exception {e}", "primes_smallest_five", {})
 
     def _verifier_python_run() -> Optional[AutoVerifyOutcome]:
+        """
+        Verifier for Python code execution:
+        - Extracts Python code from submission
+        - Runs it in a sandboxed environment
+        - Checks for test results if tests are included
+        - Validates output matches expectations
+        """
         python_job = ("python" in title) or ("python" in body)
         if not python_job:
             return None
@@ -858,13 +865,152 @@ def _auto_verify_task(job: Job, submission: str) -> AutoVerifyOutcome:
             return AutoVerifyOutcome(True, True, "auto_verify ok: python code ran + submission references acceptance criteria", "python_run", {"acceptance_criteria": bullets[:10]})
         return AutoVerifyOutcome(True, True, "auto_verify ok: python code ran", "python_run", {})
 
+    def _verifier_python_test() -> Optional[AutoVerifyOutcome]:
+        """
+        Verifier for Python code with test execution:
+        - Extracts Python code and tests from submission
+        - Runs tests using pytest or unittest
+        - Validates all tests pass
+        """
+        vtag = _extract_bracket_tag("verifier").lower()
+        if vtag not in ("python_test", "pytest", "unittest"):
+            return None
+        
+        # Extract code and test code
+        code = _extract_code_fence(text, "python") or _extract_code_fence(text, "py")
+        test_code = None
+        # Look for separate test code fence
+        test_fences = re.findall(r"```(?:python|py|test)\s*\n(.*?)```", text, re.DOTALL)
+        if len(test_fences) > 1:
+            # First fence is code, second is tests
+            code = test_fences[0].strip()
+            test_code = test_fences[1].strip()
+        elif "def test_" in code or "import unittest" in code or "import pytest" in code:
+            # Tests are in the same code block
+            test_code = code
+        
+        if not code:
+            return AutoVerifyOutcome(True, False, "auto_verify failed: missing python code fence in submission", "python_test", {})
+        if len(code) > 20000:
+            return AutoVerifyOutcome(True, False, "auto_verify failed: python code too large", "python_test", {})
+        
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                # Write main code
+                main_file = Path(td) / "task.py"
+                main_file.write_text(code, encoding="utf-8")
+                
+                # Write test file if separate
+                test_file = None
+                if test_code and test_code != code:
+                    test_file = Path(td) / "test_task.py"
+                    test_file.write_text(test_code, encoding="utf-8")
+                
+                # Try pytest first, then unittest
+                test_passed = False
+                test_output = ""
+                test_error = ""
+                
+                # Try pytest
+                try:
+                    r = subprocess.run(
+                        [sys.executable, "-m", "pytest", str(td), "-v"],
+                        cwd=td,
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+                    test_output = _trunc(r.stdout, 2000)
+                    test_error = _trunc(r.stderr, 1000)
+                    if r.returncode == 0:
+                        test_passed = True
+                except subprocess.TimeoutExpired:
+                    return AutoVerifyOutcome(True, False, "auto_verify failed: test execution timeout (10s)", "python_test", {})
+                except Exception:
+                    # pytest not available or failed, try unittest
+                    pass
+                
+                # Try unittest if pytest didn't work
+                if not test_passed:
+                    try:
+                        # Create a test runner script
+                        runner = Path(td) / "run_tests.py"
+                        if test_file:
+                            runner.write_text(f"""
+import sys
+import unittest
+sys.path.insert(0, '{td}')
+from test_task import *
+if __name__ == '__main__':
+    loader = unittest.TestLoader()
+    suite = loader.loadTestsFromModule(sys.modules[__name__])
+    runner = unittest.TextTestRunner(verbosity=2)
+    result = runner.run(suite)
+    sys.exit(0 if result.wasSuccessful() else 1)
+""", encoding="utf-8")
+                        else:
+                            # Tests in main file
+                            runner.write_text(f"""
+import sys
+import unittest
+sys.path.insert(0, '{td}')
+import task
+if __name__ == '__main__':
+    loader = unittest.TestLoader()
+    suite = loader.loadTestsFromModule(task)
+    runner = unittest.TextTestRunner(verbosity=2)
+    result = runner.run(suite)
+    sys.exit(0 if result.wasSuccessful() else 1)
+""", encoding="utf-8")
+                        
+                        r = subprocess.run(
+                            [sys.executable, str(runner)],
+                            cwd=td,
+                            capture_output=True,
+                            text=True,
+                            timeout=10
+                        )
+                        test_output = _trunc(r.stdout, 2000)
+                        test_error = _trunc(r.stderr, 1000)
+                        if r.returncode == 0:
+                            test_passed = True
+                    except subprocess.TimeoutExpired:
+                        return AutoVerifyOutcome(True, False, "auto_verify failed: test execution timeout (10s)", "python_test", {})
+                    except Exception as e:
+                        return AutoVerifyOutcome(True, False, f"auto_verify failed: test execution error: {str(e)[:200]}", "python_test", {})
+                
+                arts = {
+                    "test_passed": test_passed,
+                    "test_output": test_output,
+                    "test_error": test_error,
+                }
+                
+                if not test_passed:
+                    return AutoVerifyOutcome(
+                        True,
+                        False,
+                        f"auto_verify failed: tests did not pass. Output: {test_output[:300]}, Error: {test_error[:300]}",
+                        "python_test",
+                        arts
+                    )
+                
+                return AutoVerifyOutcome(
+                    True,
+                    True,
+                    f"auto_verify ok: all tests passed. {test_output[:200]}",
+                    "python_test",
+                    arts
+                )
+        except Exception as e:
+            return AutoVerifyOutcome(True, False, f"auto_verify failed: python test verifier exception: {str(e)[:200]}", "python_test", {})
+
     def _verifier_acceptance_criteria_only() -> Optional[AutoVerifyOutcome]:
         ac_present, ac_ok, ac_note, bullets = _verify_acceptance_criteria()
         if not ac_present:
             return None
         return AutoVerifyOutcome(True, bool(ac_ok), ac_note if ac_note else "auto_verify ok: acceptance criteria satisfied", "acceptance_criteria", {"acceptance_criteria": bullets[:10]})
 
-    for v in (_verifier_primes_smallest_five, _verifier_python_run, _verifier_json_list, _verifier_md_table, _verifier_acceptance_criteria_only):
+    for v in (_verifier_primes_smallest_five, _verifier_python_test, _verifier_python_run, _verifier_json_list, _verifier_md_table, _verifier_acceptance_criteria_only):
         out = v()
         if out is not None:
             return out
