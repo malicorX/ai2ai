@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Virtualenv
+venv/
+.venv/
+
+# Logs
+*.log
+nohup.out
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Node (if/when we add frontend tooling)
+node_modules/
+dist/
+build/
+
+# Secrets
+.env
+
+# Deployment / Generated files
+ai_ai2ai_deploy.tgz
+result_viewer.html
+tmp_job_*.json
+
