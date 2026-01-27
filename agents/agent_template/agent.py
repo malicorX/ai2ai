@@ -1888,33 +1888,41 @@ def _do_job(job: dict, tools: Optional[dict] = None) -> str:
                 deliverable_md = (llm_chat(sys_prompt, user_prompt, max_tokens=900) or "").strip()
                 # If verifier is json_list but we went through generic path, try to extract/fix JSON
                 if verifier_tag == "json_list" and deliverable_md:
+                    try:
+                        trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "fixing_json_fence", "verifier_tag": verifier_tag, "deliverable_len": len(deliverable_md)})
+                    except Exception:
+                        pass
                     # Try to extract JSON from LLM output and ensure it's in proper code fence
-                    # Match both single and triple backticks
-                    json_match = re.search(r'`{1,3}json\s*\n(.*?)\n`{1,3}', deliverable_md, re.DOTALL)
+                    # Match both single and triple backticks (non-greedy to stop at first closing backtick)
+                    json_match = re.search(r'`{1,3}json\s*\r?\n(.*?)\r?\n`{1,3}', deliverable_md, re.DOTALL)
                     if json_match:
                         json_str = json_match.group(1).strip()
                         try:
                             # Validate it's valid JSON
-                            json.loads(json_str)
-                            # Replace entire deliverable with proper triple-backtick format
+                            parsed = json.loads(json_str)
+                            # Replace entire deliverable with proper triple-backtick format (no prose)
                             deliverable_md = f"```json\n{json_str}\n```"
                             try:
-                                trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "fixed_json_fence", "from_single_to_triple": True})
+                                trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "fixed_json_fence", "from_single_to_triple": True, "item_count": len(parsed) if isinstance(parsed, list) else 0})
                             except Exception:
                                 pass
                         except Exception as e:
                             try:
-                                trace_event("error", "json_extraction_failed", {"job_id": str(job_id or ""), "err": str(e)[:200]})
+                                trace_event("error", "json_extraction_failed", {"job_id": str(job_id or ""), "err": str(e)[:200], "json_str_preview": json_str[:100]})
                             except Exception:
                                 pass
                     else:
-                        # If no code fence found, try to find JSON array directly
-                        json_match2 = re.search(r'(\[[\s\S]*?\])', deliverable_md)
+                        # If no code fence found, try to find JSON array directly (more greedy match)
+                        json_match2 = re.search(r'(\[[\s\S]{10,}?\])', deliverable_md)
                         if json_match2:
                             json_str = json_match2.group(1).strip()
                             try:
-                                json.loads(json_str)
+                                parsed = json.loads(json_str)
                                 deliverable_md = f"```json\n{json_str}\n```"
+                                try:
+                                    trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "extracted_bare_json", "item_count": len(parsed) if isinstance(parsed, list) else 0})
+                                except Exception:
+                                    pass
                             except Exception:
                                 pass
         except Exception as e:
