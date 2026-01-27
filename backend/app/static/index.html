@@ -195,10 +195,30 @@
 
       <div style="background:white; border:1px solid #ccc; padding:10px; border-radius:6px; width:420px;">
         <h3 style="margin:0 0 8px 0;">Opportunity Board</h3>
-        <div style="display:flex; gap:8px; margin-bottom:8px; align-items:center;">
+        <div style="display:flex; gap:8px; margin-bottom:8px; align-items:center; flex-wrap:wrap;">
           <button id="oppRefreshBtn">Refresh</button>
+          <button id="oppMetricsBtn" style="font-size:11px;">Metrics</button>
+          <button id="oppPipelineBtn" style="font-size:11px;">Pipeline</button>
+          <button id="oppRevenueBtn" style="font-size:11px;">Revenue</button>
+          <select id="oppStatusFilter" style="font-size:12px; padding:2px 6px;">
+            <option value="">All statuses</option>
+            <option value="new">New</option>
+            <option value="selected">Selected</option>
+            <option value="delivering">Delivering</option>
+            <option value="done">Done</option>
+            <option value="ignored">Ignored</option>
+          </select>
           <span id="oppStatus" class="pill">?</span>
           <span style="margin-left:auto; font-size:12px; color:#666;">from approved market_scan jobs</span>
+        </div>
+        <div id="oppMetrics" style="display:none; font-size:11px; margin-bottom:8px; padding:8px; background:#f5f5f5; border-radius:4px;">
+          <div><b>Metrics:</b> <span id="oppMetricsContent">Loading...</span></div>
+        </div>
+        <div id="oppPipeline" style="display:none; margin-bottom:8px; padding:8px; background:#e8f5e9; border-radius:4px; font-size:11px;">
+          <div><b>Pipeline:</b> <span id="oppPipelineContent">Loading...</span></div>
+        </div>
+        <div id="oppRevenue" style="display:none; margin-bottom:8px; padding:8px; background:#fff3e0; border-radius:4px; font-size:11px;">
+          <div><b>Revenue:</b> <span id="oppRevenueContent">Loading...</span></div>
         </div>
         <div id="oppList" style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size:12px; max-height:260px; overflow-y:auto;"></div>
       </div>
@@ -682,6 +702,16 @@
     const oppRefreshBtn = document.getElementById("oppRefreshBtn");
     const oppStatus = document.getElementById("oppStatus");
     const oppList = document.getElementById("oppList");
+    const oppStatusFilter = document.getElementById("oppStatusFilter");
+    const oppMetricsBtn = document.getElementById("oppMetricsBtn");
+    const oppMetrics = document.getElementById("oppMetrics");
+    const oppMetricsContent = document.getElementById("oppMetricsContent");
+    const oppPipelineBtn = document.getElementById("oppPipelineBtn");
+    const oppPipeline = document.getElementById("oppPipeline");
+    const oppPipelineContent = document.getElementById("oppPipelineContent");
+    const oppRevenueBtn = document.getElementById("oppRevenueBtn");
+    const oppRevenue = document.getElementById("oppRevenue");
+    const oppRevenueContent = document.getElementById("oppRevenueContent");
 
     // --- Jobs ---
     const jobsList = document.getElementById("jobsList");
@@ -805,11 +835,55 @@
       const ds = String(it.demand_signal || it.signal || "");
       const url = String(it.source_url || it.url || "");
       const dom = String(it._source_domain || "");
+      const status = String(it.status || "new");
+      const jobIds = Array.isArray(it.job_ids) ? it.job_ids : [];
+      const fingerprint = String(it.fingerprint || it.opp_id || "");
+      const clientResponse = String(it.client_response || "");
+      const outcome = String(it.outcome || "");
+      const successScore = parseFloat(it.success_score || 0.0);
+
+      // Status badge with color coding
+      const statusBadge = document.createElement("span");
+      statusBadge.className = "pill";
+      statusBadge.textContent = status;
+      statusBadge.style.fontSize = "10px";
+      statusBadge.style.marginRight = "6px";
+      if (status === "new") statusBadge.style.background = "#e3f2fd";
+      else if (status === "selected") statusBadge.style.background = "#fff3e0";
+      else if (status === "delivering") statusBadge.style.background = "#f3e5f5";
+      else if (status === "done") statusBadge.style.background = "#e8f5e9";
+      else if (status === "ignored") statusBadge.style.background = "#fafafa";
+      
+      // Outcome badge (if available)
+      if (outcome) {
+        const outcomeBadge = document.createElement("span");
+        outcomeBadge.className = "pill";
+        outcomeBadge.textContent = outcome;
+        outcomeBadge.style.fontSize = "10px";
+        outcomeBadge.style.marginRight = "6px";
+        if (outcome === "success") outcomeBadge.style.background = "#c8e6c9";
+        else if (outcome === "failed") outcomeBadge.style.background = "#ffcdd2";
+        else outcomeBadge.style.background = "#fff9c4";
+        head.appendChild(outcomeBadge);
+      }
+      
+      // Success score indicator (if available)
+      if (successScore > 0) {
+        const scoreSpan = document.createElement("span");
+        scoreSpan.textContent = `★${successScore.toFixed(1)}`;
+        scoreSpan.style.fontSize = "10px";
+        scoreSpan.style.color = successScore > 0.7 ? "#4caf50" : (successScore > 0.4 ? "#ff9800" : "#f44336");
+        scoreSpan.style.marginRight = "6px";
+        head.appendChild(scoreSpan);
+      }
 
       const head = document.createElement("div");
       head.style.display = "flex";
       head.style.gap = "8px";
       head.style.alignItems = "baseline";
+      head.style.flexWrap = "wrap";
+
+      head.appendChild(statusBadge);
 
       const a = document.createElement("a");
       a.textContent = title;
@@ -824,9 +898,38 @@
       meta.textContent = `${plat}${price ? " | $" + price : ""}${dom ? " | " + dom : ""}`;
       head.appendChild(meta);
 
+      // Show linked jobs
+      if (jobIds.length > 0) {
+        const jobsSpan = document.createElement("span");
+        jobsSpan.style.color = "#0066cc";
+        jobsSpan.style.fontSize = "11px";
+        jobsSpan.textContent = `Jobs: `;
+        jobIds.slice(0, 3).forEach((jid, idx) => {
+          const jobLink = document.createElement("a");
+          jobLink.href = "#";
+          jobLink.textContent = jid.substring(0, 8);
+          jobLink.style.marginLeft = "4px";
+          jobLink.onclick = (e) => {
+            e.preventDefault();
+            if (jobEditId) {
+              jobEditId.value = jid;
+              if (jobLoadBtn) jobLoadBtn.click();
+            }
+          };
+          jobsSpan.appendChild(jobLink);
+          if (idx < jobIds.length - 1 && idx < 2) {
+            jobsSpan.appendChild(document.createTextNode(", "));
+          }
+        });
+        if (jobIds.length > 3) {
+          jobsSpan.appendChild(document.createTextNode(` +${jobIds.length - 3}`));
+        }
+        head.appendChild(jobsSpan);
+      }
+
       // Quick action: turn an opportunity into a concrete task on the Task Board.
       const makeBtn = document.createElement("button");
-      makeBtn.textContent = "Make task";
+      makeBtn.textContent = status === "new" ? "Make task" : "View";
       makeBtn.style.marginLeft = "auto";
       makeBtn.style.fontSize = "11px";
       makeBtn.onclick = () => {
@@ -840,8 +943,14 @@
               `Acceptance criteria:\n` +
               `- Provide a 1-page delivery plan (steps + timeline).\n` +
               `- Provide 3 package tiers with clear scope + pricing.\n` +
-              `- Provide a short client outreach message.\n\n` +
-              `Evidence required in submission:\n- Include an Evidence section with: tiers=3, steps>=6.\n`;
+              `- Generate a professional client outreach email using email_template_generate tool.\n` +
+              `- Include the complete email (subject + body) in your submission.\n\n` +
+              `Evidence required in submission:\n- Include an Evidence section with: tiers=3, steps>=6, email_included=true.\n`;
+          }
+          // If there are linked jobs, try to load the first one
+          if (jobIds.length > 0 && jobEditId && jobLoadBtn) {
+            jobEditId.value = jobIds[0];
+            jobLoadBtn.click();
           }
           // Nudge user to the Task Board inputs (top of that panel)
           try { jobTitle.scrollIntoView({behavior:"smooth", block:"center"}); } catch (e) {}
@@ -856,6 +965,20 @@
         p.textContent = ds.length > 160 ? (ds.slice(0, 160) + "…") : ds;
         wrap.appendChild(p);
       }
+      
+      // Show client response if available
+      if (clientResponse) {
+        const respDiv = document.createElement("div");
+        respDiv.style.marginTop = "4px";
+        respDiv.style.padding = "4px 6px";
+        respDiv.style.background = clientResponse === "interested" ? "#e8f5e9" : 
+                                   (clientResponse === "not_interested" ? "#ffebee" : "#fff3e0");
+        respDiv.style.borderRadius = "4px";
+        respDiv.style.fontSize = "11px";
+        respDiv.textContent = `Client: ${clientResponse}`;
+        wrap.appendChild(respDiv);
+      }
+      
       return wrap;
     }
 
@@ -863,20 +986,148 @@
       if (!oppList) return;
       try {
         if (oppStatus) oppStatus.textContent = "loading…";
-        const data = await fetchJson("/opportunities?limit=40");
+        // Use library endpoint to get full opportunity data including status and job_ids
+        const statusFilter = oppStatusFilter ? oppStatusFilter.value : "";
+        const url = statusFilter ? `/opportunities/library?status=${encodeURIComponent(statusFilter)}&limit=80` : "/opportunities/library?limit=80";
+        const data = await fetchJson(url);
         const items = data.items || [];
         oppList.innerHTML = "";
         for (const it of items) oppList.appendChild(renderOppItem(it));
-        if (oppStatus) oppStatus.textContent = `items=${items.length}`;
+        if (oppStatus) {
+          const total = items.length;
+          const byStatus = {};
+          items.forEach(item => {
+            const s = String(item.status || "new");
+            byStatus[s] = (byStatus[s] || 0) + 1;
+          });
+          oppStatus.textContent = `total=${total}${statusFilter ? ` (${statusFilter})` : ""}`;
+          oppStatus.title = Object.entries(byStatus).map(([s, n]) => `${s}:${n}`).join(", ");
+        }
       } catch (e) {
         if (oppStatus) oppStatus.textContent = "error";
         oppList.textContent = "opportunities error: " + e.message;
       }
     }
+    async function refreshOpportunityMetrics() {
+      if (!oppMetricsContent) return;
+      try {
+        const data = await fetchJson("/opportunities/metrics");
+        const total = data.total || 0;
+        const successRate = ((data.success_rate || 0) * 100).toFixed(1);
+        const responseRate = ((data.response_rate || 0) * 100).toFixed(1);
+        const byStatus = data.by_status || {};
+        const byOutcome = data.by_outcome || {};
+        const byPlatform = data.by_platform || {};
+        
+        let html = `Total: ${total} | Success: ${successRate}% | Response: ${responseRate}%`;
+        if (Object.keys(byStatus).length > 0) {
+          html += ` | Status: ${Object.entries(byStatus).map(([k,v]) => `${k}:${v}`).join(", ")}`;
+        }
+        if (Object.keys(byOutcome).length > 0) {
+          html += ` | Outcomes: ${Object.entries(byOutcome).map(([k,v]) => `${k}:${v}`).join(", ")}`;
+        }
+        if (Object.keys(byPlatform).length > 0) {
+          const topPlatforms = Object.entries(byPlatform)
+            .sort((a, b) => (b[1].success_rate || 0) - (a[1].success_rate || 0))
+            .slice(0, 3)
+            .map(([k, v]) => `${k}: ${((v.success_rate || 0) * 100).toFixed(0)}%`);
+          if (topPlatforms.length > 0) {
+            html += ` | Top platforms: ${topPlatforms.join(", ")}`;
+          }
+        }
+        oppMetricsContent.innerHTML = html;
+      } catch (e) {
+        oppMetricsContent.textContent = `Error: ${e.message}`;
+      }
+    }
+    
     if (oppRefreshBtn) oppRefreshBtn.onclick = refreshOpportunities;
+    if (oppStatusFilter) oppStatusFilter.onchange = refreshOpportunities;
+    if (oppMetricsBtn && oppMetrics) {
+      oppMetricsBtn.onclick = () => {
+        const visible = oppMetrics.style.display !== "none";
+        oppMetrics.style.display = visible ? "none" : "block";
+        if (!visible) {
+          refreshOpportunityMetrics();
+        }
+      };
+    }
+    
+    async function refreshOpportunityPipeline() {
+      if (!oppPipelineContent) return;
+      try {
+        const data = await fetchJson("/opportunities/library?limit=200");
+        const items = data.items || [];
+        const byStatus = {};
+        for (const it of items) {
+          const st = String(it.status || "new");
+          byStatus[st] = (byStatus[st] || 0) + 1;
+        }
+        const newCount = byStatus.new || 0;
+        const selectedCount = byStatus.selected || 0;
+        const deliveringCount = byStatus.delivering || 0;
+        const doneCount = byStatus.done || 0;
+        const total = items.length;
+        
+        let html = `New: ${newCount} → Selected: ${selectedCount} → Delivering: ${deliveringCount} → Done: ${doneCount}`;
+        if (total > 0) {
+          const completionRate = ((doneCount / total) * 100).toFixed(1);
+          html += ` | Completion: ${completionRate}%`;
+        }
+        oppPipelineContent.innerHTML = html;
+      } catch (e) {
+        oppPipelineContent.textContent = `Error: ${e.message}`;
+      }
+    }
+    
+    async function refreshOpportunityRevenue() {
+      if (!oppRevenueContent) return;
+      try {
+        const data = await fetchJson("/opportunities/metrics");
+        const totalRevenue = data.total_revenue_usd || 0;
+        const avgRevenue = data.avg_revenue_per_success || 0;
+        const successCount = (data.by_outcome || {}).success || 0;
+        
+        let html = `Total: $${totalRevenue.toFixed(2)}`;
+        if (successCount > 0) {
+          html += ` | Avg/Success: $${avgRevenue.toFixed(2)}`;
+        }
+        if (data.deliverable_type_counts && Object.keys(data.deliverable_type_counts).length > 0) {
+          const topType = Object.entries(data.deliverable_type_counts)
+            .sort((a, b) => b[1] - a[1])[0];
+          html += ` | Top deliverable: ${topType[0]} (${topType[1]}x)`;
+        }
+        oppRevenueContent.innerHTML = html;
+      } catch (e) {
+        oppRevenueContent.textContent = `Error: ${e.message}`;
+      }
+    }
+    
+    if (oppPipelineBtn && oppPipeline) {
+      oppPipelineBtn.onclick = () => {
+        const visible = oppPipeline.style.display !== "none";
+        oppPipeline.style.display = visible ? "none" : "block";
+        if (!visible) {
+          refreshOpportunityPipeline();
+        }
+      };
+    }
+    
+    if (oppRevenueBtn && oppRevenue) {
+      oppRevenueBtn.onclick = () => {
+        const visible = oppRevenue.style.display !== "none";
+        oppRevenue.style.display = visible ? "none" : "block";
+        if (!visible) {
+          refreshOpportunityRevenue();
+        }
+      };
+    }
     refreshOpportunities();
     // Refresh less aggressively to avoid UI jitter and to keep item buttons stable while the user interacts.
     setInterval(refreshOpportunities, 60000);
+    setInterval(refreshOpportunityMetrics, 120000); // Refresh metrics every 2 minutes
+    setInterval(refreshOpportunityPipeline, 90000); // Refresh pipeline every 1.5 minutes
+    setInterval(refreshOpportunityRevenue, 120000); // Refresh revenue every 2 minutes
 
     let lastLoadedPostId = "";
 

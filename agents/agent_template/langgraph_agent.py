@@ -67,6 +67,10 @@ class Tools(TypedDict):
     memory_append: Callable[[str, str, List[str], float], None]
     web_fetch: Callable[[str], dict]
     opportunities_list: Callable[[int], List[dict]]
+    opportunities_update: Callable[[str, Optional[str], Optional[str], Optional[List[str]]], dict]
+    email_template_generate: Callable[[str, str, Optional[str], Optional[str]], str]
+    client_response_simulate: Callable[[str, str], dict]
+    artifact_put: Callable[[str, str, str, str], dict]
 
 
 _TOOLS: Optional[Tools] = None
@@ -285,12 +289,54 @@ def node_perceive(state: AgentState, config: Any = None) -> AgentState:
 
 def node_recall(state: AgentState, config: Any = None) -> AgentState:
     tools = _get_tools(state, config)
-    # Retrieve only what helps decisions: recent failures/success patterns around verification and jobs.
-    q = f"run {state.get('run_id','')} jobs verification failed penalty acceptance criteria evidence"
+    # Retrieve failure patterns and success patterns to guide decisions.
+    # Priority: recent verification failures, rejection patterns, what worked.
+    memories: List[dict] = []
+    role = state.get("role", "executor")
+    run_tag = _run_tag(state.get("run_id", ""))
+    
+    # Query 1: Recent verification failures and rejections (highest priority for learning)
     try:
-        state["memories"] = tools["memory_retrieve"](q, 8) or []
+        q1 = f"verification failed rejected auto_verify_ok=false penalty {run_tag}"
+        m1 = tools["memory_retrieve"](q1, 6) or []
+        memories.extend(m1)
     except Exception:
-        state["memories"] = []
+        pass
+    
+    # Query 2: What patterns led to approval (to reinforce good behavior)
+    try:
+        q2 = f"approved auto_verify_ok=true evidence acceptance criteria {run_tag}"
+        m2 = tools["memory_retrieve"](q2, 4) or []
+        memories.extend(m2)
+    except Exception:
+        pass
+    
+    # Query 3: Role-specific patterns (proposer vs executor learnings)
+    try:
+        if role == "proposer":
+            q3 = f"proposed job created task archetype verifier {run_tag}"
+        else:
+            q3 = f"submitted executed deliverable evidence code fence {run_tag}"
+        m3 = tools["memory_retrieve"](q3, 4) or []
+        memories.extend(m3)
+    except Exception:
+        pass
+    
+    # Deduplicate by text content (same memory might match multiple queries)
+    seen = set()
+    unique: List[dict] = []
+    for m in memories:
+        text = str(m.get("text") or "")
+        if text and text not in seen:
+            seen.add(text)
+            unique.append(m)
+    
+    # Sort by importance (if available) and recency, limit to top 10
+    try:
+        unique.sort(key=lambda x: (float(x.get("importance") or 0.0), float(x.get("created_at") or 0.0)), reverse=True)
+    except Exception:
+        pass
+    state["memories"] = unique[:10]
     return state
 
 
@@ -524,36 +570,175 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
             state["action"] = {"kind": "noop", "note": "proposer already has an open job"}
             return state
 
+        # Check memories for patterns to avoid (outcome-driven learning)
+        memories = state.get("memories") or []
+        failure_patterns: List[str] = []
+        for m in memories:
+            text = str(m.get("text") or "").lower()
+            tags = [str(t).lower() for t in (m.get("tags") or [])]
+            # Look for rejection/redo_failed memories with high importance
+            if any(t in tags for t in ["rejected", "redo_failed", "policy"]) and float(m.get("importance") or 0.0) > 0.9:
+                failure_patterns.append(text)
+        
         # Bridge scan -> execution: if there are approved market_scan items, propose a concrete "deliver this" task.
         # This keeps the system doing useful work instead of drifting into toy problems.
+        # Smart selection: prioritize by success_score, then price, then recency.
         try:
-            opps = tools["opportunities_list"](25)
+            opps = tools["opportunities_list"](50)  # Get more to choose from
         except Exception:
             opps = []
         if isinstance(opps, list) and opps:
-            it = opps[0] if isinstance(opps[0], dict) else {}
-            title0 = str(it.get("title") or it.get("name") or "").strip()
-            plat0 = str(it.get("platform") or "").strip()
-            price0 = str(it.get("estimated_price_usd") or it.get("price") or "").strip()
-            url0 = str(it.get("source_url") or it.get("url") or "").strip()
-            dom0 = str(it.get("_source_domain") or "").strip()
-            if title0:
-                jt = f"[archetype:deliver_opportunity] Deliver: {title0}"
-                jb = (
-                    "Goal: turn this opportunity into something we can actually sell/deliver.\n\n"
-                    f"Opportunity:\n- title: {title0}\n- platform: {plat0}\n- price_estimate_usd: {price0}\n- source_domain: {dom0}\n- source_url: {url0}\n\n"
-                    "Acceptance criteria:\n"
-                    "- Provide a 1-page delivery plan (steps + timeline).\n"
-                    "- Provide 3 package tiers with clear scope + pricing.\n"
-                    "- Provide a short client outreach message.\n\n"
-                    "Evidence required in submission:\n"
-                    "- Include an Evidence section with: tiers=3, steps>=6.\n"
-                )
-                if run_tag and run_tag not in jt:
-                    jt = f"{run_tag} {jt}".strip()
-                jb = _normalize_bullets_outside_code_fences(jb)
-                state["action"] = {"kind": "propose_job", "note": "deliver_top_opportunity", "job": {"title": jt, "body": jb, "reward": 0.05}}
-                return state
+            # Filter to only "new" or "selected" opportunities (not already delivering/done)
+            candidates = []
+            for it in opps:
+                if not isinstance(it, dict):
+                    continue
+                status = str(it.get("status") or "new").strip()
+                if status not in ("new", "selected"):
+                    continue
+                # Skip if we already have a job for this opportunity
+                job_ids = it.get("job_ids") or []
+                if isinstance(job_ids, list) and len(job_ids) > 0:
+                    # Check if any of those jobs are still open
+                    try:
+                        for jid in job_ids[:3]:  # Check first few
+                            j = tools["jobs_get"](str(jid))
+                            if j and str(j.get("status") or "") in ("open", "claimed", "submitted"):
+                                # Already has an active job, skip
+                                break
+                        else:
+                            # No active jobs, can propose
+                            candidates.append(it)
+                    except Exception:
+                        candidates.append(it)
+                else:
+                    candidates.append(it)
+            
+            if not candidates:
+                # No good opportunities available - trigger automatic market scan
+                # Check when we last did a market scan
+                recent_scans = []
+                for j in (state.get("recent_jobs") or []):
+                    if isinstance(j, dict):
+                        title = str(j.get("title") or "").lower()
+                        if "archetype:market_scan" in title or "market scan" in title:
+                            recent_scans.append(j)
+                
+                # If no recent market scan (within last 10 jobs), create one
+                if len(recent_scans) == 0:
+                    jt = "[archetype:market_scan] [verifier:json_list] Task: Market scan — paid gigs we can deliver (with citations)"
+                    jb = (
+                        "[verifier:json_list]\n"
+                        "[repeat_ok:1]\n"
+                        "[json_min_items:10]\n"
+                        "[json_required_keys:title,platform,demand_signal,estimated_price_usd,why_fit,first_action,source_url,source_quote]\n"
+                        "Use web_fetch to research and propose 10 concrete paid gig/service ideas we could deliver.\n"
+                        "\n"
+                        "Acceptance criteria:\n"
+                        "- JSON list with at least 10 items.\n"
+                        "- Each item must have: title, platform, demand_signal, estimated_price_usd, why_fit, first_action, source_url, source_quote.\n"
+                        "- source_url and source_quote must be from real domains (not example.com).\n"
+                        "\n"
+                        "Evidence required in submission:\n"
+                        "- Evidence section with item_count>=10.\n"
+                        "- Evidence section with domains_used listing real source domains.\n"
+                    )
+                    if run_tag and run_tag not in jt:
+                        jt = f"{run_tag} {jt}".strip()
+                    jb = _normalize_bullets_outside_code_fences(jb)
+                    state["action"] = {"kind": "propose_job", "note": "auto_market_scan (no opportunities)", "job": {"title": jt, "body": jb, "reward": 0.01}}
+                    return state
+                # Fall through to other proposal paths
+                pass
+            else:
+                # Sort by: estimated_value_score (if available), otherwise calculate from success_score + price
+                def _score_opp(opp):
+                    # Prefer estimated_value_score if available (combines price, success, fit)
+                    value_score = float(opp.get("estimated_value_score") or 0.0)
+                    if value_score > 0:
+                        return value_score
+                    
+                    # Fallback: calculate from components
+                    success_score = float(opp.get("_success_score") or opp.get("success_score") or 0.5)
+                    price_str = str(opp.get("estimated_price_usd") or opp.get("price") or "")
+                    price = 0.0
+                    try:
+                        nums = [float(x) for x in re.findall(r"(\d+(?:\.\d+)?)", price_str)]
+                        if nums:
+                            price = max(nums)
+                    except Exception:
+                        pass
+                    # Normalize price to 0-1 (assume $1000+ is max)
+                    price_norm = min(1.0, price / 1000.0) if price > 0 else 0.3
+                    # Combined score: 50% success_score, 40% price, 10% recency (always prefer newer)
+                    return (success_score * 0.5) + (price_norm * 0.4) + 0.1
+                
+                candidates.sort(key=_score_opp, reverse=True)
+                it = candidates[0]
+                opp_score = _score_opp(it)
+                
+                # Autonomous pursuit: if this is a high-value opportunity (score > 0.7), pursue it even if we have an open job
+                # Otherwise, only pursue if we don't have an open job
+                if has_open_job and opp_score < 0.7:
+                    # Not high-value enough to interrupt current work
+                    pass
+                else:
+                    title0 = str(it.get("title") or it.get("name") or "").strip()
+                    plat0 = str(it.get("platform") or "").strip()
+                    price0 = str(it.get("estimated_price_usd") or it.get("price") or "").strip()
+                    url0 = str(it.get("source_url") or it.get("url") or "").strip()
+                    dom0 = str(it.get("_source_domain") or "").strip()
+                    fingerprint0 = str(it.get("fingerprint") or "")
+                    if title0:
+                        jt = f"[archetype:deliver_opportunity] Deliver: {title0}"
+                        jb = (
+                            "Goal: turn this opportunity into something we can actually sell/deliver.\n\n"
+                            f"Opportunity:\n- title: {title0}\n- platform: {plat0}\n- price_estimate_usd: {price0}\n- source_domain: {dom0}\n- source_url: {url0}\n\n"
+                            "Acceptance criteria:\n"
+                            "- Provide a 1-page delivery plan (steps + timeline).\n"
+                            "- Provide 3 package tiers with clear scope + pricing.\n"
+                            "- Generate a professional client outreach email using email_template_generate tool.\n"
+                            "- Include the complete email (subject + body) in your submission.\n\n"
+                            "Tools available:\n"
+                            "- email_template_generate(opportunity_title, platform, client_name=None, package_tier=None): generates professional outreach email\n"
+                            "- opportunities_update(fingerprint, status='delivering'): mark opportunity as 'delivering' when you start work\n"
+                            "- artifact_put(job_id, path, content): save deliverables to shared workspace\n\n"
+                            "Evidence required in submission:\n"
+                            "- Include an Evidence section with: tiers=3, steps>=6, email_included=true.\n"
+                            "- Include the generated email template in your submission.\n"
+                        )
+                        if run_tag and run_tag not in jt:
+                            jt = f"{run_tag} {jt}".strip()
+                        jb = _normalize_bullets_outside_code_fences(jb)
+                        
+                        # Check if we have failure memories about similar deliver_opportunity tasks
+                        should_skip = False
+                        for pattern in failure_patterns:
+                            if "deliver_opportunity" in pattern.lower() or "deliver:" in pattern.lower():
+                                # If we recently failed on deliver_opportunity, maybe skip this one and try a different archetype
+                                # But only if we have multiple failures (be lenient on first failure)
+                                if "redo_failed" in pattern.lower() or "failed again" in pattern.lower():
+                                    should_skip = True
+                                    break
+                        
+                        if should_skip:
+                            # Skip this opportunity, will fall through to other proposal paths
+                            pass
+                        else:
+                            # Update opportunity status to "selected" when we create a job for it
+                            if fingerprint0 and tools.get("opportunities_update"):
+                                try:
+                                    tools["opportunities_update"](fingerprint0, status="selected", notes=f"Autonomous pursuit: value_score={opp_score:.2f}")
+                                except Exception:
+                                    pass
+                            
+                            state["action"] = {"kind": "propose_job", "note": f"deliver_top_opportunity (score={opp_score:.2f})", "job": {"title": jt, "body": jb, "reward": 0.05}}
+                            return state
+        
+        # If we have an open job and didn't pursue a high-value opportunity, don't create more jobs
+        if has_open_job:
+            state["action"] = {"kind": "noop", "note": "proposer already has an open job"}
+            return state
 
         # If the executor got rejected on a recent job, create ONE redo job with clearer evidence rules.
         handled = str(state.get("handled_rejection_job_id") or "").strip()
@@ -1021,7 +1206,8 @@ def node_act(state: AgentState, config: Any = None) -> AgentState:
                 )
             except Exception:
                 pass
-            submission = tools["do_job"](job)
+            # Pass tools dict to do_job so it can use email_template_generate, etc. for deliver_opportunity tasks
+            submission = tools["do_job"](job, tools)
         except Exception:
             submission = "Evidence:\n- Execution failed inside agent runtime.\n"
         try:
@@ -1078,8 +1264,24 @@ def node_reflect(state: AgentState, config: Any = None) -> AgentState:
                 tools["chat_send"](f"Job `{jid}` was approved. ✅ ({title})")
             except Exception:
                 pass
+            
+            # Enhanced learning: extract what worked
             try:
-                tools["memory_append"]("reflection", f"Approved job {jid}. Pattern: verifiable evidence passes. Note={note}", ["job", "approved"], 0.85)
+                # Check if this was a deliver_opportunity job
+                if "[archetype:deliver_opportunity]" in title.lower() or "deliver:" in title.lower():
+                    learning_note = f"Approved deliver_opportunity job {jid}. "
+                    # Extract deliverable types from submission if available
+                    submission = str(lj.get("submission") or "")
+                    if "code_deliverable" in submission.lower() or "Sample Code" in submission:
+                        learning_note += "Code deliverable worked. "
+                    if "email_included" in submission.lower() or "Client Outreach Email" in submission:
+                        learning_note += "Email template worked. "
+                    if "package tiers" in submission.lower():
+                        learning_note += "Package tiers worked. "
+                    learning_note += f"Pattern: verifiable evidence passes. Note={note}"
+                    tools["memory_append"]("reflection", learning_note, ["job", "approved", "deliver_opportunity", "success_pattern"], 0.9)
+                else:
+                    tools["memory_append"]("reflection", f"Approved job {jid}. Pattern: verifiable evidence passes. Note={note}", ["job", "approved"], 0.85)
             except Exception:
                 pass
             if jid:
@@ -1091,30 +1293,55 @@ def node_reflect(state: AgentState, config: Any = None) -> AgentState:
                 tools["chat_send"](f"Job `{jid}` was rejected. I likely lost ai$. Reason: {note[:220]}")
             except Exception:
                 pass
+            
+            # Extract detailed failure information for learning
+            body = str(lj.get("body") or "")
+            verifier = str(lj.get("auto_verify_name") or "")
+            archetype = ""
+            if "[archetype:" in title:
+                m = re.search(r"\[archetype:([^\]]+)\]", title)
+                if m:
+                    archetype = m.group(1).strip()
+            
             # Safety valve: if a redo failed again, write a strong "do not repeat" policy memory.
             try:
-                body = str(lj.get("body") or "")
                 root = _extract_redo_for(body)
                 if root:
                     tools["memory_append"](
                         "reflection",
-                        f"Redo failed again (job {jid}, redo_for={root}). DO NOT repeat the same submission pattern. "
+                        f"Redo failed again (job {jid}, redo_for={root}, archetype={archetype}, verifier={verifier}). "
+                        f"DO NOT repeat the same submission pattern. "
                         f"Next time: simplify; include exact required code fences; explicitly echo every acceptance criterion bullet inside Evidence checklist. "
                         f"Verifier note={note}",
-                        ["job", "redo_failed", "policy"],
+                        ["job", "redo_failed", "policy", f"archetype:{archetype}", f"verifier:{verifier}"],
                         0.99,
                     )
             except Exception:
                 pass
+            
+            # Store detailed rejection pattern for future recall
             try:
+                # Extract acceptance criteria and evidence requirements from body
+                acceptance = _extract_section_bullets(body, "acceptance criteria", 20)
+                evidence_req = _extract_section_bullets(body, "evidence required", 20)
+                
+                learning = f"Rejected job {jid} (archetype={archetype}, verifier={verifier}). "
+                learning += f"Failure reason: {note[:200]}. "
+                if acceptance:
+                    learning += f"Acceptance criteria had {len(acceptance)} items. "
+                if evidence_req:
+                    learning += f"Evidence requirements: {len(evidence_req)} items. "
+                learning += "Fix: ensure Evidence section explicitly checks every acceptance criterion; include required code fences; match verifier expectations exactly."
+                
                 tools["memory_append"](
                     "reflection",
-                    f"Rejected job {jid}. auto_verify_ok={ok}. Fix: ensure Evidence section + required code fences + match acceptance criteria. Note={note}",
-                    ["job", "rejected", "policy"],
+                    learning,
+                    ["job", "rejected", "policy", f"archetype:{archetype}", f"verifier:{verifier}"],
                     0.95,
                 )
             except Exception:
                 pass
+            
             if jid:
                 state["outcome_ack_job_id"] = jid
         elif st == "submitted":

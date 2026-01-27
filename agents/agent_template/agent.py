@@ -10,6 +10,7 @@ import urllib.parse
 from pathlib import Path
 from difflib import SequenceMatcher
 import json
+from typing import Optional
 from pydantic import BaseModel, Field, ValidationError
 
 USE_LANGGRAPH = os.getenv("USE_LANGGRAPH", "0").strip() == "1"
@@ -1177,9 +1178,10 @@ def maybe_attend_events(world) -> bool:
         return False
 
 
-def _do_job(job: dict) -> str:
+def _do_job(job: dict, tools: Optional[dict] = None) -> str:
     """
     Minimal safe executor: produce a deliverable file in workspace and return a submission string.
+    tools: optional dict of tool functions (for LangGraph mode, allows using email_template_generate, etc.)
     """
     title = (job.get("title") or "").strip()
     body = (job.get("body") or "").strip()
@@ -1689,6 +1691,140 @@ def _do_job(job: dict) -> str:
                 except Exception:
                     pass
                 deliverable_md = "```json\n" + json.dumps(obj_list, ensure_ascii=False, indent=2) + "\n```"
+            elif "[archetype:deliver_opportunity]" in title.lower() or "deliver:" in title.lower():
+                # Special handling for deliver_opportunity tasks: use email_template_generate tool
+                try:
+                    trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "enter_deliver_opportunity"})
+                except Exception:
+                    pass
+                # Extract opportunity details from job body
+                opp_title = title.replace("[archetype:deliver_opportunity]", "").replace("Deliver:", "").strip()
+                opp_platform = ""
+                opp_price = ""
+                opp_url = ""
+                for line in body.splitlines():
+                    if "platform:" in line.lower():
+                        opp_platform = line.split(":", 1)[-1].strip()
+                    elif "price" in line.lower() and "usd" in line.lower():
+                        opp_price = line.split(":", 1)[-1].strip()
+                    elif "source_url:" in line.lower():
+                        opp_url = line.split(":", 1)[-1].strip()
+                
+                # Generate delivery plan and package tiers first
+                sys_prompt = (
+                    "You are creating a delivery plan for a freelance opportunity.\n"
+                    "Output a structured markdown document with:\n"
+                    "1. A delivery plan (steps + timeline)\n"
+                    "2. Three package tiers with clear scope + pricing\n"
+                    "3. A sample deliverable (code snippet, document outline, or design mockup) for the basic tier\n"
+                    "Be concrete and actionable.\n"
+                )
+                user_prompt = (
+                    f"Opportunity: {opp_title}\n"
+                    f"Platform: {opp_platform}\n"
+                    f"Estimated price: {opp_price}\n"
+                    f"Source URL: {opp_url}\n\n"
+                    f"Job requirements:\n{body}\n\n"
+                    "Create the delivery plan, package tiers, and a sample deliverable now:"
+                )
+                plan_md = (llm_chat(sys_prompt, user_prompt, max_tokens=1500) or "").strip()
+                deliverable_md = plan_md
+                
+                # If the opportunity involves code/software, create an actual code file
+                code_deliverable = ""
+                if any(keyword in (opp_title + " " + opp_platform).lower() for keyword in ["code", "script", "app", "website", "api", "software", "program", "tool"]):
+                    try:
+                        code_sys = (
+                            "You are creating a minimal working code sample for a freelance opportunity.\n"
+                            "Output ONLY code (no markdown, no explanations) that demonstrates the core functionality.\n"
+                            "Keep it under 200 lines and make it runnable.\n"
+                        )
+                        code_user = (
+                            f"Opportunity: {opp_title}\n"
+                            f"Platform: {opp_platform}\n"
+                            f"Create a minimal working code sample that demonstrates the core value proposition.\n"
+                        )
+                        code_deliverable = (llm_chat(code_sys, code_user, max_tokens=800) or "").strip()
+                        if code_deliverable and not code_deliverable.startswith("Error"):
+                            # Determine file extension based on opportunity type
+                            ext = "py"  # Default to Python
+                            if "javascript" in opp_title.lower() or "js" in opp_title.lower() or "web" in opp_title.lower():
+                                ext = "js"
+                            elif "html" in opp_title.lower():
+                                ext = "html"
+                            elif "css" in opp_title.lower():
+                                ext = "css"
+                            
+                            # Save code as artifact
+                            if tools and "artifact_put" in tools:
+                                try:
+                                    code_filename = f"sample.{ext}"
+                                    tools["artifact_put"](str(job_id or ""), code_filename, code_deliverable, f"text/{ext}")
+                                    deliverable_md += f"\n\n## Sample Code Deliverable\n\n"
+                                    deliverable_md += f"Created `{code_filename}` in workspace. Preview:\n\n"
+                                    deliverable_md += f"```{ext}\n{code_deliverable[:500]}\n```\n"
+                                    if len(code_deliverable) > 500:
+                                        deliverable_md += f"\n*(... {len(code_deliverable) - 500} more characters)*\n"
+                                    evidence_kv["code_deliverable"] = code_filename
+                                except Exception as e:
+                                    deliverable_md += f"\n\n## Sample Code\n\n(Error saving code: {str(e)[:200]})\n"
+                    except Exception:
+                        pass
+                
+                # Generate email template if tools are available
+                email_template = ""
+                opp_fingerprint = ""
+                if tools and "email_template_generate" in tools:
+                    try:
+                        email_template = tools["email_template_generate"](opp_title, opp_platform or "freelance platform")
+                        if email_template and not email_template.startswith("Error"):
+                            deliverable_md += f"\n\n## Client Outreach Email\n\n{email_template}\n"
+                            evidence_kv["email_included"] = "true"
+                            
+                            # Simulate client response if tools are available
+                            if tools and "client_response_simulate" in tools and "opportunities_update" in tools:
+                                try:
+                                    # Find opportunity fingerprint by matching title/platform/url
+                                    # We'll need to get it from the opportunity library
+                                    # For now, try to construct a reasonable fingerprint or fetch from library
+                                    opps_list = []
+                                    if tools and "opportunities_list" in tools:
+                                        try:
+                                            opps_list = tools["opportunities_list"](50) or []
+                                        except Exception:
+                                            pass
+                                    
+                                    # Find matching opportunity
+                                    for opp in opps_list:
+                                        if isinstance(opp, dict):
+                                            opp_t = str(opp.get("title") or "").strip()
+                                            opp_p = str(opp.get("platform") or "").strip()
+                                            if (opp_title.lower() in opp_t.lower() or opp_t.lower() in opp_title.lower()) and \
+                                               (opp_platform.lower() in opp_p.lower() or opp_p.lower() in opp_platform.lower()):
+                                                opp_fingerprint = str(opp.get("fingerprint") or "")
+                                                break
+                                    
+                                    if opp_fingerprint:
+                                        # Simulate client response
+                                        client_resp = tools["client_response_simulate"](opp_fingerprint, email_template)
+                                        if client_resp and not client_resp.get("error"):
+                                            resp_type = str(client_resp.get("response_type") or "")
+                                            resp_text = str(client_resp.get("response_text") or "")
+                                            deliverable_md += f"\n\n## Client Response (Simulated)\n\n"
+                                            deliverable_md += f"**Response Type:** {resp_type}\n\n"
+                                            deliverable_md += f"{resp_text}\n"
+                                            evidence_kv["client_response"] = resp_type
+                                            
+                                            # Update opportunity status to "delivering" if we got a positive response
+                                            if resp_type == "interested":
+                                                try:
+                                                    tools["opportunities_update"](opp_fingerprint, status="delivering", notes="Client showed interest")
+                                                except Exception:
+                                                    pass
+                                except Exception as e:
+                                    deliverable_md += f"\n\n## Client Response\n\n(Error simulating response: {str(e)[:200]})\n"
+                    except Exception as e:
+                        deliverable_md += f"\n\n## Client Outreach Email\n\n(Error generating email: {str(e)[:200]})\n"
             else:
                 try:
                     trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "enter_generic_llm"})
@@ -1911,6 +2047,9 @@ def maybe_langgraph_jobs(world) -> None:
         "memory_append": _lg_memory_append,
         "web_fetch": lambda url: web_fetch(str(url or "")),
         "opportunities_list": lambda limit=40: opportunities_list(int(limit)),
+        "opportunities_update": lambda fingerprint, status=None, notes=None, tags=None: opportunities_update(str(fingerprint), status, notes, tags),
+        "email_template_generate": lambda opp_title, opp_platform, client_name=None, package_tier=None: email_template_generate(str(opp_title), str(opp_platform), client_name, package_tier),
+        "client_response_simulate": lambda fingerprint, email_content: client_response_simulate(str(fingerprint), str(email_content)),
         "artifact_put": lambda job_id, path, content, content_type="text/plain": artifact_put(job_id, path, content, content_type),
     }
 
@@ -2129,6 +2268,76 @@ def opportunities_list(limit: int = 40) -> list[dict]:
         return items if isinstance(items, list) else []
     except Exception:
         return []
+
+
+def opportunities_update(fingerprint: str, status: Optional[str] = None, notes: Optional[str] = None, tags: Optional[list[str]] = None) -> dict:
+    """
+    Update an opportunity's status/notes/tags.
+    Status: new | selected | delivering | done | ignored
+    """
+    try:
+        payload = {
+            "fingerprint": str(fingerprint or "").strip(),
+        }
+        if status is not None:
+            payload["status"] = str(status).strip()
+        if notes is not None:
+            payload["notes"] = str(notes)[:2000]
+        if tags is not None:
+            payload["tags"] = [str(t)[:40] for t in tags if str(t).strip()][:20]
+        r = requests.post(f"{WORLD_API}/opportunities/update", json=payload, timeout=10)
+        return r.json() if r is not None else {"error": "no_response"}
+    except Exception as e:
+        return {"error": "opportunities_update_failed", "detail": str(e)[:200]}
+
+
+def email_template_generate(opportunity_title: str, opportunity_platform: str, client_name: Optional[str] = None, package_tier: Optional[str] = None) -> str:
+    """
+    Generate a professional client outreach email template for an opportunity.
+    Returns a complete email draft (subject + body).
+    """
+    try:
+        # Import here to avoid circular dependency
+        from agent_template.langgraph_runtime import llm_chat
+        sys_prompt = (
+            "You are writing a professional client outreach email for a freelance opportunity.\n"
+            "Generate a complete email with:\n"
+            "- Subject line (concise, value-focused)\n"
+            "- Body (brief intro, value proposition, clear next step)\n"
+            "- Professional but friendly tone\n"
+            "- No spammy language\n"
+            "- Keep total length under 300 words\n"
+        )
+        user_prompt = (
+            f"Opportunity: {opportunity_title}\n"
+            f"Platform: {opportunity_platform}\n"
+        )
+        if client_name:
+            user_prompt += f"Client name: {client_name}\n"
+        if package_tier:
+            user_prompt += f"Package tier: {package_tier}\n"
+        user_prompt += "\nGenerate the email now (subject line first, then body)."
+        
+        result = llm_chat(sys_prompt, user_prompt, max_tokens=400) or ""
+        return result.strip()
+    except Exception as e:
+        return f"Error generating email template: {str(e)[:200]}"
+
+
+def client_response_simulate(fingerprint: str, email_content: str) -> dict:
+    """
+    Simulate receiving a client response to an outreach email.
+    Returns a realistic client response based on opportunity quality and email content.
+    """
+    try:
+        payload = {
+            "fingerprint": str(fingerprint or "").strip(),
+            "email_content": str(email_content or ""),
+        }
+        r = requests.post(f"{WORLD_API}/opportunities/client_response", json=payload, timeout=15)
+        return r.json() if r is not None else {"error": "no_response"}
+    except Exception as e:
+        return {"error": "client_response_simulate_failed", "detail": str(e)[:200]}
 
 
 def _extract_json_array(raw: str) -> list:

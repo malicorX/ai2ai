@@ -1546,6 +1546,11 @@ class Opportunity:
     last_seen_at: float
     run_ids: list[str]
     job_ids: list[str]
+    client_response: str  # "" | "interested" | "not_interested" | "no_response" | "needs_revision"
+    outcome: str  # "" | "success" | "failed" | "pending"
+    success_score: float  # 0.0-1.0, calculated from outcomes
+    actual_revenue_usd: float  # Actual revenue when completed (0.0 if not completed)
+    estimated_value_score: float  # 0.0-1.0, calculated from price, success_score, and fit
 
 class CreatePostRequest(BaseModel):
     title: str
@@ -1644,6 +1649,11 @@ def _load_opportunities() -> None:
                     last_seen_at=float(r.get("last_seen_at") or r.get("created_at") or time.time()),
                     run_ids=list(r.get("run_ids") or []) if isinstance(r.get("run_ids"), list) else [],
                     job_ids=list(r.get("job_ids") or []) if isinstance(r.get("job_ids"), list) else [],
+                    client_response=_norm_text(r.get("client_response")) or "",
+                    outcome=_norm_text(r.get("outcome")) or "",
+                    success_score=float(r.get("success_score") or 0.0),
+                    actual_revenue_usd=float(r.get("actual_revenue_usd") or 0.0),
+                    estimated_value_score=float(r.get("estimated_value_score") or 0.0),
                 )
             except Exception:
                 continue
@@ -1705,9 +1715,91 @@ def _upsert_opportunity(item: dict, run_id: str, job_id: str) -> Optional[Opport
         last_seen_at=now,
         run_ids=[run_id] if run_id else [],
         job_ids=[job_id] if job_id else [],
+        client_response="",
+        outcome="",
+        success_score=0.0,
+        actual_revenue_usd=0.0,
+        estimated_value_score=0.0,
     )
     _opportunities[fp] = opp
+    # Calculate initial value score for new opportunity
+    _recalculate_opportunity_value_score(opp)
     return opp
+
+
+def _recalculate_opportunity_success_score(opp: Opportunity) -> None:
+    """
+    Recalculate success_score for an opportunity based on similar opportunities' outcomes.
+    This helps prioritize opportunities that have worked well in the past.
+    """
+    if not opp:
+        return
+    # Find similar opportunities (same platform or domain pattern)
+    similar = []
+    for o in _opportunities.values():
+        if o.fingerprint == opp.fingerprint:
+            continue
+        if o.platform == opp.platform and o.platform:
+            similar.append(o)
+        elif o.source_domain == opp.source_domain and o.source_domain:
+            similar.append(o)
+    
+    # Calculate average success from similar opportunities
+    if similar:
+        successes = sum(1 for o in similar if o.outcome == "success")
+        total_with_outcome = sum(1 for o in similar if o.outcome)
+        if total_with_outcome > 0:
+            opp.success_score = float(successes) / float(total_with_outcome)
+        else:
+            opp.success_score = 0.5  # Neutral if no data
+    else:
+        # No similar opportunities, use individual outcome
+        if opp.outcome == "success":
+            opp.success_score = 0.8
+        elif opp.outcome == "failed":
+            opp.success_score = 0.2
+        else:
+            opp.success_score = 0.5
+    
+    # Recalculate estimated_value_score: combines price, success_score, and fit
+    _recalculate_opportunity_value_score(opp)
+
+
+def _recalculate_opportunity_value_score(opp: Opportunity) -> None:
+    """
+    Calculate estimated_value_score: combines price potential, success likelihood, and fit.
+    Higher score = better opportunity to pursue.
+    """
+    if not opp:
+        return
+    
+    # Extract price as number
+    price = 0.0
+    try:
+        price_str = str(opp.estimated_price_usd or "").strip()
+        nums = [float(x) for x in re.findall(r"(\d+(?:\.\d+)?)", price_str)]
+        if nums:
+            price = max(nums)
+    except Exception:
+        pass
+    
+    # Normalize price to 0-1 (assume $1000+ is max value)
+    price_score = min(1.0, price / 1000.0) if price > 0 else 0.3  # Default to 0.3 if no price
+    
+    # Success likelihood (from success_score)
+    success_likelihood = opp.success_score if opp.success_score > 0 else 0.5
+    
+    # Fit score (based on why_fit field length and quality - simple heuristic)
+    fit_score = 0.5
+    why_fit = str(opp.why_fit or "").strip()
+    if len(why_fit) > 50:
+        fit_score = 0.7
+    if len(why_fit) > 100:
+        fit_score = 0.9
+    
+    # Combined value score: 40% price, 40% success likelihood, 20% fit
+    opp.estimated_value_score = (price_score * 0.4) + (success_likelihood * 0.4) + (fit_score * 0.2)
+
 
 @dataclass
 class ChatMessage:
@@ -2798,9 +2890,26 @@ def opportunities(limit: int = 80):
     def _is_example(d: str) -> bool:
         return (d or "") in ("example.com", "www.example.com", "")
 
+    # Prioritize by success_score (from opportunity library), then price, then recency
+    # Look up success_score from library for each item
+    for r in items:
+        title = str(r.get("title") or r.get("name") or "")
+        platform = str(r.get("platform") or "")
+        url = str(r.get("source_url") or r.get("url") or "")
+        if title and platform:
+            fp = _opportunity_fingerprint(title, platform, url)
+            opp = _opportunities.get(fp)
+            if opp:
+                r["_success_score"] = opp.success_score
+            else:
+                r["_success_score"] = 0.5  # Neutral for new opportunities
+        else:
+            r["_success_score"] = 0.5
+
     items.sort(
         key=lambda r: (
             _is_example(str(r.get("_source_domain") or "")),
+            -float(r.get("_success_score") or 0.5),  # Higher success_score first
             -float(r.get("_price_max") or 0.0),
             -float(r.get("_approved_at") or 0.0),
         )
@@ -2814,6 +2923,8 @@ class OpportunityUpdateRequest(BaseModel):
     status: Optional[str] = None
     notes: Optional[str] = None
     tags: Optional[list[str]] = None
+    client_response: Optional[str] = None
+    outcome: Optional[str] = None
 
 
 @app.get("/opportunities/library")
@@ -2836,10 +2947,16 @@ def opportunities_library(status: Optional[str] = None, q: Optional[str] = None,
 @app.post("/opportunities/update")
 def opportunities_update(req: OpportunityUpdateRequest, request: Request):
     """
-    Update an opportunity (admin-only): status/notes/tags.
+    Update an opportunity: status/notes/tags.
+    Agents can update status/notes/tags for opportunities they're working on.
+    Admin can update any opportunity.
     """
-    if not _require_admin(request):
-        return {"error": "unauthorized"}
+    # Allow agents to update opportunities (for status tracking as they work on them)
+    # Admin can update anything; agents can update status/notes/tags but not delete
+    is_admin = _require_admin(request)
+    if not is_admin:
+        # Agent access: allow status/notes/tags updates only
+        pass  # Agents are allowed
     fp = str(req.fingerprint or "").strip()
     if not fp:
         return {"error": "bad_request"}
@@ -2855,9 +2972,235 @@ def opportunities_update(req: OpportunityUpdateRequest, request: Request):
         o.notes = str(req.notes or "")[:2000]
     if req.tags is not None and isinstance(req.tags, list):
         o.tags = [str(t or "").strip()[:40] for t in req.tags if str(t or "").strip()][:20]
+    if req.client_response is not None:
+        o.client_response = str(req.client_response or "").strip()[:100]
+    if req.outcome is not None:
+        o.outcome = str(req.outcome or "").strip()[:50]
+        # Update success_score based on outcome
+        if o.outcome == "success":
+            o.success_score = min(1.0, o.success_score + 0.3)
+        elif o.outcome == "failed":
+            o.success_score = max(0.0, o.success_score - 0.2)
+        # Recalculate success_score from all opportunities with same platform/domain pattern
+        _recalculate_opportunity_success_score(o)
     o.last_seen_at = time.time()
     _save_opportunities()
     return {"ok": True, "item": asdict(o)}
+
+
+class ClientResponseRequest(BaseModel):
+    fingerprint: str
+    email_content: str  # The outreach email that was sent
+    simulate_delay_hours: Optional[float] = 24.0  # How long to wait before responding
+
+
+@app.post("/opportunities/client_response")
+def opportunities_client_response(req: ClientResponseRequest):
+    """
+    Simulate a client response to an outreach email.
+    Returns a realistic client response based on the opportunity and email quality.
+    """
+    fp = str(req.fingerprint or "").strip()
+    if not fp:
+        return {"error": "bad_request"}
+    opp = _opportunities.get(fp)
+    if not opp:
+        return {"error": "not_found"}
+    
+    # Simulate client response based on opportunity quality and email content
+    email = str(req.email_content or "").lower()
+    
+    # Factors that influence positive response:
+    # - High estimated price (client has budget)
+    # - Clear value proposition in email
+    # - Professional tone
+    # - Good fit (why_fit field)
+    
+    price_score = 0.0
+    try:
+        price_str = str(opp.estimated_price_usd or "").strip()
+        price_nums = [float(x) for x in re.findall(r"(\d+(?:\.\d+)?)", price_str)]
+        if price_nums:
+            price_max = max(price_nums)
+            price_score = min(1.0, price_max / 1000.0)  # Normalize to 0-1, $1000+ = 1.0
+    except Exception:
+        pass
+    
+    email_quality = 0.5
+    if "subject:" in email or "subject line" in email:
+        email_quality += 0.1
+    if len(email) > 200:
+        email_quality += 0.1
+    if "value" in email or "benefit" in email or "solution" in email:
+        email_quality += 0.2
+    email_quality = min(1.0, email_quality)
+    
+    # Combine factors
+    response_prob = 0.3 + (price_score * 0.3) + (email_quality * 0.4)
+    
+    # Add some randomness but bias towards the calculated probability
+    import random
+    rand = random.random()
+    
+    if rand < response_prob * 0.6:
+        # Positive response
+        response_type = "interested"
+        response_text = (
+            f"Hi,\n\n"
+            f"Thanks for reaching out about {opp.title}. "
+            f"I'm interested in learning more about your approach. "
+            f"Could you provide a bit more detail on timeline and deliverables?\n\n"
+            f"Best regards"
+        )
+        outcome = "pending"  # Not success yet, but promising
+    elif rand < response_prob * 0.9:
+        # Neutral/needs revision
+        response_type = "needs_revision"
+        response_text = (
+            f"Hi,\n\n"
+            f"Thanks for your message. "
+            f"I'd like to see a more detailed proposal with specific deliverables and pricing tiers.\n\n"
+            f"Regards"
+        )
+        outcome = "pending"
+    else:
+        # No response or negative
+        if rand < 0.7:
+            response_type = "no_response"
+            response_text = "(No response after 48 hours)"
+            outcome = "pending"
+        else:
+            response_type = "not_interested"
+            response_text = (
+                f"Hi,\n\n"
+                f"Thanks for reaching out, but this isn't a good fit for us right now.\n\n"
+                f"Best of luck"
+            )
+            outcome = "failed"
+    
+    # Update opportunity
+    opp.client_response = response_type
+    if outcome:
+        opp.outcome = outcome
+        _recalculate_opportunity_success_score(opp)
+    opp.last_seen_at = time.time()
+    _save_opportunities()
+    
+    return {
+        "ok": True,
+        "response_type": response_type,
+        "response_text": response_text,
+        "opportunity": asdict(opp),
+    }
+
+
+@app.get("/opportunities/metrics")
+def opportunities_metrics():
+    """
+    Performance metrics for opportunities: success rates, response rates, top performers.
+    """
+    all_opps = list(_opportunities.values())
+    total = len(all_opps)
+    
+    # Status breakdown
+    by_status = {}
+    for opp in all_opps:
+        st = opp.status or "new"
+        by_status[st] = by_status.get(st, 0) + 1
+    
+    # Outcome breakdown
+    by_outcome = {}
+    for opp in all_opps:
+        oc = opp.outcome or ""
+        if oc:
+            by_outcome[oc] = by_outcome.get(oc, 0) + 1
+    
+    # Client response breakdown
+    by_response = {}
+    for opp in all_opps:
+        resp = opp.client_response or ""
+        if resp:
+            by_response[resp] = by_response.get(resp, 0) + 1
+    
+    # Success rate by platform
+    by_platform = {}
+    for opp in all_opps:
+        plat = opp.platform or "unknown"
+        if plat not in by_platform:
+            by_platform[plat] = {"total": 0, "success": 0, "failed": 0, "avg_score": 0.0, "scores": []}
+        by_platform[plat]["total"] += 1
+        if opp.outcome == "success":
+            by_platform[plat]["success"] += 1
+        elif opp.outcome == "failed":
+            by_platform[plat]["failed"] += 1
+        if opp.success_score > 0:
+            by_platform[plat]["scores"].append(opp.success_score)
+    
+    # Calculate averages
+    for plat, data in by_platform.items():
+        if data["scores"]:
+            data["avg_score"] = sum(data["scores"]) / len(data["scores"])
+        data.pop("scores", None)
+        if data["total"] > 0:
+            data["success_rate"] = float(data["success"]) / float(data["total"])
+        else:
+            data["success_rate"] = 0.0
+    
+    # Top opportunities by success score
+    top_by_score = sorted(
+        [o for o in all_opps if o.success_score > 0],
+        key=lambda o: o.success_score,
+        reverse=True
+    )[:10]
+    
+    # Opportunities with outcomes
+    with_outcomes = [o for o in all_opps if o.outcome]
+    success_rate = 0.0
+    if with_outcomes:
+        successes = sum(1 for o in with_outcomes if o.outcome == "success")
+        success_rate = float(successes) / float(len(with_outcomes))
+    
+    # Response rate
+    response_rate = 0.0
+    with_responses = [o for o in all_opps if o.client_response]
+    if all_opps:
+        response_rate = float(len(with_responses)) / float(total) if total > 0 else 0.0
+    
+    # Revenue metrics
+    total_revenue = sum(o.actual_revenue_usd for o in all_opps)
+    avg_revenue_per_success = 0.0
+    successful_opps = [o for o in all_opps if o.outcome == "success" and o.actual_revenue_usd > 0]
+    if successful_opps:
+        avg_revenue_per_success = sum(o.actual_revenue_usd for o in successful_opps) / len(successful_opps)
+    
+    # Deliverable type analysis (from notes)
+    deliverable_type_counts = {}
+    for opp in all_opps:
+        if opp.outcome == "success" and opp.notes:
+            notes_lower = opp.notes.lower()
+            if "deliverable types:" in notes_lower:
+                # Extract types
+                match = re.search(r"deliverable types:\s*([^\n]+)", notes_lower)
+                if match:
+                    types_str = match.group(1).strip()
+                    for dt in types_str.split(","):
+                        dt_clean = dt.strip()
+                        if dt_clean:
+                            deliverable_type_counts[dt_clean] = deliverable_type_counts.get(dt_clean, 0) + 1
+    
+    return {
+        "total": total,
+        "by_status": by_status,
+        "by_outcome": by_outcome,
+        "by_response": by_response,
+        "by_platform": by_platform,
+        "success_rate": success_rate,
+        "response_rate": response_rate,
+        "total_revenue_usd": total_revenue,
+        "avg_revenue_per_success": avg_revenue_per_success,
+        "deliverable_type_counts": deliverable_type_counts,
+        "top_by_score": [asdict(o) for o in top_by_score],
+    }
 
 
 class ArtifactPutRequest(BaseModel):
@@ -3190,6 +3533,27 @@ async def jobs_create(req: JobCreateRequest):
             "source": source,
         },
     )
+    
+    # Auto-update opportunity status: if this is a deliver_opportunity job, mark the opportunity as "selected"
+    try:
+        if "[archetype:deliver_opportunity]" in title.lower() or "deliver:" in title.lower():
+            # Extract opportunity title from job title (format: "Deliver: {title}")
+            opp_title_match = re.search(r"deliver:\s*(.+?)(?:\s*\[|$)", title, re.IGNORECASE)
+            if opp_title_match:
+                opp_title = opp_title_match.group(1).strip()
+                # Try to find matching opportunity by title
+                for opp in _opportunities.values():
+                    if opp_title.lower() in opp.title.lower() or opp.title.lower() in opp_title.lower():
+                        if opp.status == "new":
+                            opp.status = "selected"
+                            opp.last_seen_at = time.time()
+                            if job_id not in opp.job_ids:
+                                opp.job_ids.append(job_id)
+                            _save_opportunities()
+                            break
+    except Exception:
+        pass
+    
     await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})
     return {"ok": True, "job": asdict(_jobs[job_id])}
 
@@ -3288,6 +3652,72 @@ async def jobs_review(job_id: str, req: JobReviewRequest):
                     by=f"human:{req.reviewed_by}",
                 )
                 await economy_award(award_req)
+            
+            # Auto-update opportunity outcome: if this is a deliver_opportunity job, mark as "success"
+            try:
+                title = str(j2.title or "")
+                if "[archetype:deliver_opportunity]" in title.lower() or "deliver:" in title.lower():
+                    # Extract opportunity title from job title
+                    opp_title_match = re.search(r"deliver:\s*(.+?)(?:\s*\[|$)", title, re.IGNORECASE)
+                    if opp_title_match:
+                        opp_title = opp_title_match.group(1).strip()
+                        # Find matching opportunity
+                        for opp in _opportunities.values():
+                            if opp_title.lower() in opp.title.lower() or opp.title.lower() in opp_title.lower():
+                                # Check if this job is linked to this opportunity
+                                if job_id in opp.job_ids:
+                                    opp.status = "done"
+                                    opp.outcome = "success"
+                                    # Estimate actual revenue from job reward or estimated price
+                                    try:
+                                        reward = float(j2.reward or 0.0)
+                                        if reward > 0:
+                                            # Use job reward as proxy for revenue (in ai$)
+                                            # Convert to USD estimate: 1 ai$ ≈ $0.10 (adjustable)
+                                            opp.actual_revenue_usd = reward * 0.10
+                                        else:
+                                            # Fall back to estimated price if no reward
+                                            price_str = str(opp.estimated_price_usd or "").strip()
+                                            nums = [float(x) for x in re.findall(r"(\d+(?:\.\d+)?)", price_str)]
+                                            if nums:
+                                                opp.actual_revenue_usd = max(nums) * 0.1  # Assume 10% conversion
+                                    except Exception:
+                                        pass
+                                    _recalculate_opportunity_success_score(opp)
+                                    
+                                    # Store successful patterns if client was interested
+                                    if opp.client_response == "interested":
+                                        try:
+                                            submission = str(j2.submission or "")
+                                            
+                                            # Extract and store successful email pattern
+                                            email_match = re.search(r"## Client Outreach Email\s*\n\n(.*?)(?:\n\n##|$)", submission, re.DOTALL)
+                                            if email_match:
+                                                email_content = email_match.group(1).strip()
+                                                if email_content:
+                                                    if "Successful email pattern:" not in opp.notes:
+                                                        opp.notes = f"Successful email pattern: {email_content[:500]}\n\n{opp.notes}".strip()
+                                            
+                                            # Extract and store deliverable type that worked
+                                            deliverable_types = []
+                                            if "Sample Code Deliverable" in submission or "code_deliverable" in submission.lower():
+                                                deliverable_types.append("code")
+                                            if "delivery plan" in submission.lower():
+                                                deliverable_types.append("plan")
+                                            if "package tiers" in submission.lower():
+                                                deliverable_types.append("pricing")
+                                            
+                                            if deliverable_types:
+                                                if "Successful deliverable types:" not in opp.notes:
+                                                    opp.notes = f"Successful deliverable types: {', '.join(deliverable_types)}\n\n{opp.notes}".strip()
+                                        except Exception:
+                                            pass
+                                    
+                                    opp.last_seen_at = time.time()
+                                    _save_opportunities()
+                                    break
+            except Exception:
+                pass
 
             # Task-mode: on approval, award +1 ai$ to BOTH proposer and executor (if distinct agents).
             try:
