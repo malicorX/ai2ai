@@ -3722,6 +3722,68 @@ async def jobs_review(job_id: str, req: JobReviewRequest):
                                         pass
                                     _recalculate_opportunity_success_score(opp)
                                     
+                                    # Auto-create follow-up sub-tasks for multi-step deliverables
+                                    try:
+                                        submission = str(j2.submission or "")
+                                        # Look for delivery plan steps in submission
+                                        # Format: "## Delivery Plan" or "## Steps" or numbered list
+                                        plan_match = re.search(r"##\s*(?:Delivery\s*Plan|Steps|Implementation\s*Plan)\s*\n\n(.*?)(?:\n\n##|$)", submission, re.DOTALL | re.IGNORECASE)
+                                        if plan_match:
+                                            plan_text = plan_match.group(1)
+                                            # Extract numbered or bulleted steps
+                                            steps = []
+                                            for line in plan_text.split("\n"):
+                                                line = line.strip()
+                                                # Match numbered steps (1., 2., etc.) or bullets (-, *)
+                                                step_match = re.match(r"^(?:\d+\.|[-*])\s*(.+)$", line)
+                                                if step_match:
+                                                    step_text = step_match.group(1).strip()
+                                                    if len(step_text) > 10:  # Only meaningful steps
+                                                        steps.append(step_text)
+                                            
+                                            # Create sub-tasks for first 3-5 steps (to avoid overwhelming)
+                                            if steps and len(steps) > 1:
+                                                created_by = str(j2.created_by or "agent_1")
+                                                for i, step in enumerate(steps[:5]):  # Max 5 sub-tasks
+                                                    sub_title = f"[archetype:deliver_step] Step {i+1}: {step[:100]}"
+                                                    sub_body = (
+                                                        f"This is a follow-up task for the approved deliver_opportunity job {job_id}.\n\n"
+                                                        f"**Parent Job**: {job_id} - {j2.title[:150]}\n\n"
+                                                        f"**Step**: {step}\n\n"
+                                                        f"**Context**: Complete this step as part of the multi-step delivery plan.\n\n"
+                                                        f"Acceptance criteria:\n"
+                                                        f"- Complete the step: {step[:200]}\n"
+                                                        f"- Provide evidence of completion\n"
+                                                        f"- Link to parent job artifacts if applicable\n\n"
+                                                        f"Evidence required in submission:\n"
+                                                        f"- Evidence section with step_completed=true\n"
+                                                        f"- Description of what was done\n"
+                                                    )
+                                                    
+                                                    # Create sub-task job
+                                                    sub_req = JobCreateRequest(
+                                                        title=sub_title,
+                                                        body=sub_body,
+                                                        reward=float(j2.reward or 0.0) * 0.3,  # 30% of parent reward
+                                                        created_by=created_by,
+                                                        parent_job_id=job_id,
+                                                    )
+                                                    try:
+                                                        sub_result = await jobs_create(sub_req)
+                                                        if isinstance(sub_result, dict) and "job" in sub_result:
+                                                            sub_job_id = sub_result["job"].get("job_id")
+                                                            if sub_job_id:
+                                                                # Link sub-task to opportunity
+                                                                if sub_job_id not in opp.job_ids:
+                                                                    opp.job_ids.append(sub_job_id)
+                                                    except Exception:
+                                                        pass  # Don't fail parent approval if sub-task creation fails
+                                                
+                                                if steps:
+                                                    _save_opportunities()
+                                    except Exception:
+                                        pass  # Don't fail parent approval if sub-task creation fails
+                                    
                                     # Store successful patterns if client was interested
                                     if opp.client_response == "interested":
                                         try:
