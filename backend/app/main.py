@@ -2496,6 +2496,7 @@ class Job:
     reward_mode: str = "manual"
     reward_calc: dict = field(default_factory=dict)
     source: str = "unknown"
+    parent_job_id: str = ""  # If set, this job is a sub-task and requires parent to be approved
 
 
 JobEventType = Literal["create", "claim", "submit", "verify", "review", "update", "cancel", "unclaim"]
@@ -2517,6 +2518,7 @@ class JobCreateRequest(BaseModel):
     created_by: str = "human"
     ratings: Optional[dict] = None
     auto_reward: bool = False
+    parent_job_id: Optional[str] = None  # If set, this is a sub-task of another job
 
 
 class JobClaimRequest(BaseModel):
@@ -2608,6 +2610,7 @@ def _apply_job_event(ev: JobEvent) -> None:
             reward_mode=str(d.get("reward_mode") or "manual")[:40],
             reward_calc=(dict(d.get("reward_calc") or {}) if isinstance(d.get("reward_calc"), dict) else {}),
             source=str(d.get("source") or "unknown")[:40],
+            parent_job_id=str(d.get("parent_job_id") or "")[:80],
         )
         return
 
@@ -2780,8 +2783,22 @@ def jobs_list(status: Optional[JobStatus] = None, limit: int = 50):
     jobs = list(_jobs.values())
     if status:
         jobs = [j for j in jobs if j.status == status]
-    jobs.sort(key=lambda j: j.created_at, reverse=True)
-    return {"jobs": [asdict(j) for j in jobs[:limit]]}
+    
+    # Filter out sub-tasks whose parents aren't approved yet
+    # (Sub-tasks are only claimable after parent is approved)
+    available_jobs = []
+    for j in jobs:
+        parent_id = getattr(j, "parent_job_id", "") or ""
+        if parent_id:
+            parent = _jobs.get(parent_id)
+            if not parent or parent.status != "approved":
+                # Parent not approved yet, hide this sub-task from open/claimed lists
+                if status in ("open", "claimed"):
+                    continue
+        available_jobs.append(j)
+    
+    available_jobs.sort(key=lambda j: j.created_at, reverse=True)
+    return {"jobs": [asdict(j) for j in available_jobs[:limit]]}
 
 
 @app.get("/jobs/{job_id}")
@@ -3516,6 +3533,15 @@ async def jobs_create(req: JobCreateRequest):
         reward, reward_calc = _calc_reward_from_ratings(ratings)
         reward_mode = "auto_ratings"
 
+    # Validate parent_job_id if provided
+    parent_job_id = str(req.parent_job_id or "").strip()
+    if parent_job_id:
+        parent_job = _jobs.get(parent_job_id)
+        if not parent_job:
+            return {"error": "parent_job_not_found", "parent_job_id": parent_job_id}
+        # Parent must be approved for sub-task to be claimable
+        # (We allow creating sub-tasks even if parent isn't approved yet, but they won't be claimable)
+    
     job_id = str(uuid.uuid4())
     ev = _append_job_event(
         "create",
@@ -3525,6 +3551,7 @@ async def jobs_create(req: JobCreateRequest):
             "body": body,
             "reward": reward,
             "created_by": created_by,
+            "parent_job_id": parent_job_id,
             "created_at": time.time(),
             "fingerprint": fp,
             "ratings": ratings,
@@ -3565,6 +3592,16 @@ async def jobs_claim(job_id: str, req: JobClaimRequest):
     j = _jobs.get(job_id)
     if not j or j.status != "open":
         return {"error": "not_claimable"}
+    
+    # Check if this is a sub-task and parent is approved
+    parent_id = getattr(j, "parent_job_id", "") or ""
+    if parent_id:
+        parent = _jobs.get(parent_id)
+        if not parent:
+            return {"error": "parent_job_not_found", "parent_job_id": parent_id}
+        if parent.status != "approved":
+            return {"error": "parent_not_approved", "parent_job_id": parent_id, "parent_status": parent.status}
+    
     ensure_account(req.agent_id)
     ev = _append_job_event("claim", job_id, {"agent_id": req.agent_id, "created_at": time.time()})
     await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})
