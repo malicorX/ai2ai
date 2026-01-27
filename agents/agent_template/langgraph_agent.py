@@ -573,12 +573,32 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
         # Check memories for patterns to avoid (outcome-driven learning)
         memories = state.get("memories") or []
         failure_patterns: List[str] = []
+        failed_archetypes: set = set()
+        failed_verifiers: set = set()
+        successful_archetypes: set = set()
+        successful_verifiers: set = set()
         for m in memories:
             text = str(m.get("text") or "").lower()
             tags = [str(t).lower() for t in (m.get("tags") or [])]
+            importance = float(m.get("importance") or 0.0)
+            
             # Look for rejection/redo_failed memories with high importance
-            if any(t in tags for t in ["rejected", "redo_failed", "policy"]) and float(m.get("importance") or 0.0) > 0.9:
+            if any(t in tags for t in ["rejected", "redo_failed", "policy"]) and importance > 0.9:
                 failure_patterns.append(text)
+                # Extract archetype and verifier from tags for filtering
+                for tag in tags:
+                    if tag.startswith("archetype:"):
+                        failed_archetypes.add(tag.replace("archetype:", ""))
+                    if tag.startswith("verifier:"):
+                        failed_verifiers.add(tag.replace("verifier:", ""))
+            
+            # Also track successful patterns to reinforce good behavior
+            if any(t in tags for t in ["approved", "success_pattern"]) and importance > 0.85:
+                for tag in tags:
+                    if tag.startswith("archetype:"):
+                        successful_archetypes.add(tag.replace("archetype:", ""))
+                    if tag.startswith("verifier:"):
+                        successful_verifiers.add(tag.replace("verifier:", ""))
         
         # Bridge scan -> execution: if there are approved market_scan items, propose a concrete "deliver this" task.
         # This keeps the system doing useful work instead of drifting into toy problems.
