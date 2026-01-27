@@ -681,10 +681,16 @@ def _auto_verify_task(job: Job, submission: str) -> AutoVerifyOutcome:
             return AutoVerifyOutcome(True, False, "auto_verify failed: missing ```json``` code fence in submission", "json_list", {})
         if len(code) > 20000:
             return AutoVerifyOutcome(True, False, "auto_verify failed: json too large", "json_list", {})
+        # Debug: log what we extracted
+        try:
+            import logging
+            logging.info(f"json_list verifier: extracted {len(code)} chars, first 100: {code[:100]}")
+        except Exception:
+            pass
         try:
             obj = json.loads(code)
         except Exception as e:
-            return AutoVerifyOutcome(True, False, f"auto_verify failed: invalid json ({e})", "json_list", {})
+            return AutoVerifyOutcome(True, False, f"auto_verify failed: invalid json ({e}), extracted length: {len(code)}, first 50 chars: {code[:50]!r}", "json_list", {"extracted_length": len(code), "extracted_preview": code[:200]})
         if not isinstance(obj, list):
             return AutoVerifyOutcome(True, False, "auto_verify failed: expected a JSON list (array)", "json_list", {"type": str(type(obj))})
         min_items = 0
