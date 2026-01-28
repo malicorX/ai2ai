@@ -87,14 +87,14 @@ All output is logged to `scripts/run_all_tests.<yyyyMMdd-HHmmss>.log` (e.g. `run
 ```
 Use this after verifier changes so the backend on sparky1 is rebuilt before the suite runs. Add `-SkipVerifierUnit` to skip the local verifier step (e.g. when backend deps aren’t installed locally).
 
-Runs in order: **(1)** backend json_list verifier (local), **(2)** `quick_test.ps1`, **(3)** `test_run.ps1` (json_list), **(4)** `test_run.ps1 -TaskType gig` (Fiverr-style short deliverable), **(5)** `test_proposer_review.ps1`, **(6)** `test_proposer_review_reject.ps1`. Stops on first failure. Use `-SkipVerifierUnit` to skip step 1 (e.g. when backend deps aren’t installed locally). Step 4 exercises Fiverr-style tasks (tagline, bio, social post, etc.); real Fiverr search (proposer discovers gigs via web_search) requires `WEB_SEARCH_ENABLED=1` and `SERPER_API_KEY` on the backend. If step 1 passes but step 3 (test_run) fails with “invalid json (Expecting value…)”, deploy the backend to sparky1 and re-run.
+Runs in order: **(1)** backend json_list verifier (local), **(2)** `quick_test.ps1`, **(3)** `test_run.ps1 -TaskType gig` (Fiverr-style short deliverable), **(4)** `test_proposer_review.ps1`, **(5)** `test_proposer_review_reject.ps1`. Stops on first failure. Use `-SkipVerifierUnit` to skip step 1 (e.g. when backend deps aren’t installed locally). Step 3 exercises Fiverr-style tasks (tagline, bio, social post, etc.); real Fiverr search (proposer discovers gigs via web_search) requires `WEB_SEARCH_ENABLED=1` and `SERPER_API_KEY` on the backend.
 
 ## Test Scripts Overview
 
 | Script | Purpose |
 |--------|---------|
 | `scripts/deploy_and_run_tests.ps1` | Deploy backend to sparky1, then run full suite. Use after verifier/backend changes. Params: `-BackendUrl`, `-SkipVerifierUnit`, `-CopyOnly`, `-Docker`. |
-| `scripts/run_all_tests.ps1` | Run full suite (6 steps): verifier_unit → quick_test → test_run (json_list) → test_run (gig) → test_proposer_review → test_proposer_review_reject. Step 4 = Fiverr-style gig task. Stop on first failure. Logs to `scripts/run_all_tests.<timestamp>.log`. `-SkipVerifierUnit` skips step 1. |
+| `scripts/run_all_tests.ps1` | Run full suite (5 steps): verifier_unit → quick_test → test_run (gig) → test_proposer_review → test_proposer_review_reject. Step 3 = Fiverr-style gig task. Stop on first failure. Logs to `scripts/run_all_tests.<timestamp>.log`. `-SkipVerifierUnit` skips step 1. |
 | `backend/test_json_list_verifier.py` | Local unit test for json_list extraction (```json fence, array-of-objects). Run from backend dir with deps. |
 | `scripts/quick_test.ps1` | Health check (backend, world, jobs, economy, memory, opportunities). ~30 s. |
 | `scripts/test_run.ps1` | Single-job lifecycle: create → claim → submit → verify → approve. Default `-TaskType json_list` (auto_verify); use `-TaskType gig` for Fiverr-style short deliverable (proposer_review). json_list requires `backend_version: "balanced_array"`. |

@@ -1,4 +1,4 @@
-# Run full test suite: backend verifier (local) -> health -> single-job lifecycle -> proposer-review (approve + reject).
+# Run full test suite: backend verifier (local) -> health -> single-job lifecycle (gig) -> proposer-review (approve + reject).
 # Exits on first failure. Use from repo root: .\scripts\run_all_tests.ps1 -BackendUrl http://sparky1:8000
 # All output is logged to scripts/run_all_tests.<yyyyMMdd-HHmmss>.log
 
@@ -18,13 +18,13 @@ try {
     Write-Host ""
     Write-Host ""
     Write-Host "============================================================" -ForegroundColor Cyan
-    Write-Host "Test suite: verifier_unit -> quick_test -> test_run (json_list) -> test_run (gig) -> test_proposer_review -> test_proposer_review_reject" -ForegroundColor Cyan
+    Write-Host "Test suite: verifier_unit -> quick_test -> test_run (gig) -> test_proposer_review -> test_proposer_review_reject" -ForegroundColor Cyan
     Write-Host "Backend: $BackendUrl" -ForegroundColor Cyan
     Write-Host "============================================================" -ForegroundColor Cyan
 
     if (-not $SkipVerifierUnit) {
         Write-Host ""
-        Write-Host "--- 1/6 backend json_list verifier (local) ---" -ForegroundColor Yellow
+        Write-Host "--- 1/5 backend json_list verifier (local) ---" -ForegroundColor Yellow
         Push-Location "$root\backend" | Out-Null
         try {
             python test_json_list_verifier.py
@@ -37,11 +37,11 @@ try {
         }
     } else {
         Write-Host ""
-        Write-Host "--- 1/6 backend json_list verifier (skipped -SkipVerifierUnit) ---" -ForegroundColor Gray
+        Write-Host "--- 1/5 backend json_list verifier (skipped -SkipVerifierUnit) ---" -ForegroundColor Gray
     }
 
     Write-Host ""
-    Write-Host "--- 2/6 quick_test ---" -ForegroundColor Yellow
+    Write-Host "--- 2/5 quick_test ---" -ForegroundColor Yellow
     & "$scriptDir\quick_test.ps1" -BackendUrl $BackendUrl
     if ($LASTEXITCODE -ne 0) {
         Write-Host "quick_test.ps1 failed (exit $LASTEXITCODE)" -ForegroundColor Red
@@ -49,15 +49,7 @@ try {
     }
 
     Write-Host ""
-    Write-Host "--- 3/6 test_run (json_list) ---" -ForegroundColor Yellow
-    & "$scriptDir\test_run.ps1" -BackendUrl $BackendUrl
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "test_run.ps1 failed (exit $LASTEXITCODE)" -ForegroundColor Red
-        exit $LASTEXITCODE
-    }
-
-    Write-Host ""
-    Write-Host "--- 4/6 test_run (gig / Fiverr-style) ---" -ForegroundColor Yellow
+    Write-Host "--- 3/5 test_run (gig / Fiverr-style) ---" -ForegroundColor Yellow
     & "$scriptDir\test_run.ps1" -BackendUrl $BackendUrl -TaskType gig
     if ($LASTEXITCODE -ne 0) {
         Write-Host "test_run.ps1 -TaskType gig failed (exit $LASTEXITCODE)" -ForegroundColor Red
@@ -65,7 +57,7 @@ try {
     }
 
     Write-Host ""
-    Write-Host "--- 5/6 test_proposer_review ---" -ForegroundColor Yellow
+    Write-Host "--- 4/5 test_proposer_review ---" -ForegroundColor Yellow
     & "$scriptDir\test_proposer_review.ps1" -BackendUrl $BackendUrl
     if ($LASTEXITCODE -ne 0) {
         Write-Host "test_proposer_review.ps1 failed (exit $LASTEXITCODE)" -ForegroundColor Red
@@ -73,7 +65,7 @@ try {
     }
 
     Write-Host ""
-    Write-Host "--- 6/6 test_proposer_review_reject ---" -ForegroundColor Yellow
+    Write-Host "--- 5/5 test_proposer_review_reject ---" -ForegroundColor Yellow
     & "$scriptDir\test_proposer_review_reject.ps1" -BackendUrl $BackendUrl -PenaltyAmount 1.0
     if ($LASTEXITCODE -ne 0) {
         Write-Host "test_proposer_review_reject.ps1 failed (exit $LASTEXITCODE)" -ForegroundColor Red

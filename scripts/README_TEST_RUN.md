@@ -114,8 +114,8 @@ Job ID: abc123-def456-...
 
 ## Task types
 
-- **`json_list`** (default) — Structured JSON list task with auto_verify (3 items, name/category/value). Used by `run_all_tests.ps1`.
-- **`gig`** — Fiverr-style short deliverable: product tagline, feature list, social post, email subject, or short bio. Uses `[verifier:proposer_review]`; no auto_verify; script approves as proposer. Run manually: `.\scripts\test_run.ps1 -TaskType gig`
+- **`json_list`** (default) — Structured JSON list task with auto_verify (3 items, name/category/value). Run manually: `.\scripts\test_run.ps1` (not used by `run_all_tests.ps1`).
+- **`gig`** — Fiverr-style short deliverable: product tagline, feature list, social post, email subject, or short bio. Uses `[verifier:proposer_review]`; no auto_verify; script approves as proposer. Used by `run_all_tests.ps1` (step 3).
 
 ## Parameters
 

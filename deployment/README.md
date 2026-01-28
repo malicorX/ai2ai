@@ -30,7 +30,7 @@ If you open it locally (not served by the backend host), edit `BACKEND_WS` insid
   ```bash
   docker compose -f deployment/docker-compose.sparky1.yml up -d --build backend
   ```
-  After this, run the full suite from your dev machine: `.\scripts\run_all_tests.ps1 -BackendUrl http://sparky1:8000`. Suite has 6 steps (verifier_unit, quick_test, test_run json_list, test_run gig, proposer_review, proposer_review_reject). If step 1 passes but step 3 (test_run json_list) failed before deploy, it should pass after deploy.
+  After this, run the full suite from your dev machine: `.\scripts\run_all_tests.ps1 -BackendUrl http://sparky1:8000`. Suite has 5 steps (verifier_unit, quick_test, test_run gig, proposer_review, proposer_review_reject).
 
 **Deploy then run suite (one command from dev machine):**
   ```powershell
