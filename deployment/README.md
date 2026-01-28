@@ -54,6 +54,6 @@ Agent_1 (proposer) can **discover real Fiverr gigs** via web search and optional
 
 - **Backend:** Set `WEB_SEARCH_ENABLED=1` and `SERPER_API_KEY=<key>` (get a key at [serper.dev](https://serper.dev)). In compose, uncomment the web-search env lines under `backend` and set `SERPER_API_KEY` in `.env` or in the compose file.
 - **Web fetch (recommended):** Set `WEB_FETCH_ENABLED=1` and add `fiverr.com` to `WEB_FETCH_ALLOWLIST` so agent_1 can fetch gig pages for full requirements (see docs/ENV.example). Compose already sets `WEB_FETCH_ENABLED=1`; ensure `WEB_FETCH_ALLOWLIST` includes `fiverr.com`.
-- **Test with real Fiverr:** Run `.\scripts\test_run.ps1 -BackendUrl http://sparky1:8000 -TaskType fiverr`. The script waits for agent_1 to create a job from a real Fiverr gig (up to 180s), then monitors claim → submit → approve. Agent_1 must be running and web search (and optionally web_fetch) configured.
+- **Test with real Fiverr:** Run `.\scripts\test_run.ps1 -BackendUrl http://sparky1:8000 -TaskType fiverr`, or run the full suite with real Fiverr: `.\scripts\run_all_tests.ps1 -BackendUrl http://sparky1:8000 -IncludeFiverr`. The fiverr step waits for agent_1 to create a job from a real Fiverr gig (up to 180s), then monitors claim → submit → approve. Agent_1 must be running and web search (and optionally web_fetch) configured.
 - Rebuild backend and agents after adding the key so discover_fiverr and web_fetch are used.
 

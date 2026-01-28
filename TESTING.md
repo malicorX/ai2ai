@@ -94,7 +94,7 @@ Runs in order: **(1)** backend json_list verifier (local), **(2)** `quick_test.p
 | Script | Purpose |
 |--------|---------|
 | `scripts/deploy_and_run_tests.ps1` | Deploy backend to sparky1, then run full suite. Use after verifier/backend changes. Params: `-BackendUrl`, `-SkipVerifierUnit`, `-CopyOnly`, `-Docker`. |
-| `scripts/run_all_tests.ps1` | Run full suite (5 steps): verifier_unit → quick_test → test_run (gig) → test_proposer_review → test_proposer_review_reject. Step 3 = Fiverr-style gig task. Stop on first failure. Logs to `scripts/run_all_tests.<timestamp>.log`. `-SkipVerifierUnit` skips step 1. |
+| `scripts/run_all_tests.ps1` | Run full suite (5 steps, or 6 with `-IncludeFiverr`): verifier_unit → quick_test → test_run (gig) → test_proposer_review → test_proposer_review_reject [→ test_run (fiverr)]. Step 3 = gig; step 6 (optional) = real Fiverr from agent_1. Stop on first failure. Logs to `scripts/run_all_tests.<timestamp>.log`. `-SkipVerifierUnit` skips step 1; `-IncludeFiverr` adds real Fiverr run (requires WEB_SEARCH_ENABLED, agent_1). |
 | `backend/test_json_list_verifier.py` | Local unit test for json_list extraction (```json fence, array-of-objects). Run from backend dir with deps. |
 | `scripts/quick_test.ps1` | Health check (backend, world, jobs, economy, memory, opportunities). ~30 s. |
 | `scripts/test_run.ps1` | Single-job lifecycle: create → claim → submit → verify → approve. `-TaskType`: `json_list` (auto_verify), `gig` (canned Fiverr-style), or `fiverr` (wait for agent_1 real Fiverr job via discover_fiverr). json_list requires `backend_version: "balanced_array"`. |

@@ -1,10 +1,12 @@
 # Run full test suite: backend verifier (local) -> health -> single-job lifecycle (gig) -> proposer-review (approve + reject).
+# Optional: -IncludeFiverr adds test_run (fiverr) — wait for agent_1 to create a real Fiverr job (requires WEB_SEARCH_ENABLED, agent_1 running).
 # Exits on first failure. Use from repo root: .\scripts\run_all_tests.ps1 -BackendUrl http://sparky1:8000
 # All output is logged to scripts/run_all_tests.<yyyyMMdd-HHmmss>.log
 
 param(
     [string]$BackendUrl = "http://sparky1:8000",
-    [switch]$SkipVerifierUnit
+    [switch]$SkipVerifierUnit,
+    [switch]$IncludeFiverr
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,7 +20,9 @@ try {
     Write-Host ""
     Write-Host ""
     Write-Host "============================================================" -ForegroundColor Cyan
-    Write-Host "Test suite: verifier_unit -> quick_test -> test_run (gig) -> test_proposer_review -> test_proposer_review_reject" -ForegroundColor Cyan
+    $suiteDesc = "verifier_unit -> quick_test -> test_run (gig) -> test_proposer_review -> test_proposer_review_reject"
+    if ($IncludeFiverr) { $suiteDesc += " -> test_run (fiverr)" }
+    Write-Host "Test suite: $suiteDesc" -ForegroundColor Cyan
     Write-Host "Backend: $BackendUrl" -ForegroundColor Cyan
     Write-Host "============================================================" -ForegroundColor Cyan
 
@@ -70,6 +74,16 @@ try {
     if ($LASTEXITCODE -ne 0) {
         Write-Host "test_proposer_review_reject.ps1 failed (exit $LASTEXITCODE)" -ForegroundColor Red
         exit $LASTEXITCODE
+    }
+
+    if ($IncludeFiverr) {
+        Write-Host ""
+        Write-Host "--- 6/6 test_run (fiverr / real Fiverr from agent_1) ---" -ForegroundColor Yellow
+        & "$scriptDir\test_run.ps1" -BackendUrl $BackendUrl -TaskType fiverr
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "test_run.ps1 -TaskType fiverr failed (exit $LASTEXITCODE). Ensure agent_1 is running and WEB_SEARCH_ENABLED=1, SERPER_API_KEY set." -ForegroundColor Red
+            exit $LASTEXITCODE
+        }
     }
 
     Write-Host ""
