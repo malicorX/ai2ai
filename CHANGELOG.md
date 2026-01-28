@@ -3,6 +3,7 @@
 This project is in early development. Entries are kept intentionally high-level.
 
 ## Unreleased
+- **run_all_tests.ps1:** Suite now has 6 steps: **(3)** test_run (json_list), **(4)** test_run -TaskType gig (Fiverr-style short deliverable). Step 4 exercises gig tasks (tagline, bio, social post, etc.). Real Fiverr search (proposer discovers gigs via web_search) requires WEB_SEARCH_ENABLED + SERPER_API_KEY on backend. Docs: TESTING.md, deployment/README.
 - **test_run.ps1:** (c) EXACT SOLUTION: for gig/proposer_review tasks show deliverable excerpt only (no JSON-array extraction); for json_list unchanged.
 - **test_run.ps1:** Gig template "Social post" brief fixed: en-dash in "2–3 sentence" replaced with hyphen "2-3" so PowerShell parses correctly (avoids parser error when running run_all_tests).
 - **Web search + Fiverr discovery:** Backend `POST /tools/web_search` (Serper API); agents get `web_search(query, num)` tool. Proposer can discover Fiverr gigs when no opportunities exist: search Fiverr → pick a gig → LLM transform to sparky task (title, body with [verifier:proposer_review]) → create job → executor solves it. Env: `WEB_SEARCH_ENABLED=1`, `SERPER_API_KEY` (serper.dev). Optional: add `fiverr.com` to `WEB_FETCH_ALLOWLIST` so agents can fetch gig pages for detail. Docs: TOOLS.md, API.md, ENV.example.
