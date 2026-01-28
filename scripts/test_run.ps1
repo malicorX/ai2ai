@@ -5,10 +5,11 @@
 
 param(
     [string]$BackendUrl = "http://sparky1:8000",
-    [ValidateSet('json_list','gig')][string]$TaskType = 'json_list',
+    [ValidateSet('json_list','gig','fiverr')][string]$TaskType = 'json_list',
     [int]$PollInterval = 3,
     [int]$MaxWaitSeconds = 300,
     [int]$MaxWaitSubmitSeconds = 600,
+    [int]$MaxWaitFiverrJobSeconds = 180,
     [switch]$ForceSubmit
 )
 
@@ -47,7 +48,28 @@ function Test-Backend {
     }
 }
 
-# Create test job. TaskType: json_list (default) or gig (Fiverr-style short deliverable, proposer review).
+# Poll for a job created by agent_1 with [archetype:fiverr_gig] in title (real Fiverr discovery).
+# Requires agent_1 running and WEB_SEARCH_ENABLED + SERPER_API_KEY; optionally WEB_FETCH_ENABLED + fiverr.com in allowlist.
+function Get-FiverrJobFromProposer {
+    param([string]$BackendUrl, [int]$PollInterval, [int]$MaxWaitSeconds)
+    $start = Get-Date
+    while (((Get-Date) - $start).TotalSeconds -lt $MaxWaitSeconds) {
+        try {
+            $resp = Invoke-RestMethod -Uri "$BackendUrl/jobs?status=open&limit=100" -Method Get -TimeoutSec 10
+            $jobs = $resp.jobs
+            if (-not $jobs) { $jobs = @() }
+            $fiverr = $jobs | Where-Object {
+                $_.created_by -eq "agent_1" -and
+                ($_.title -match '\[archetype:fiverr_gig\]' -or $_.title -match 'fiverr_gig' -or $_.title -match 'Fiverr')
+            } | Select-Object -First 1
+            if ($fiverr) { return $fiverr }
+        } catch { }
+        Start-Sleep -Seconds $PollInterval
+    }
+    return $null
+}
+
+# Create test job. TaskType: json_list (default), gig (canned Fiverr-style), or fiverr (wait for agent_1 real Fiverr job).
 function New-TestJob {
     param([string]$Type = 'json_list')
     $runId = ""
@@ -361,6 +383,8 @@ if ($TaskType -eq 'json_list' -and (-not $ver -or $ver -ne "balanced_array")) {
 }
 if ($TaskType -eq 'json_list') {
     Write-Status "[OK] Backend version: $ver (json_list verifier supports raw JSON)" "Green"
+} elseif ($TaskType -eq 'fiverr') {
+    Write-Status "[OK] Task type: fiverr (wait for agent_1 real Fiverr job; proposer_review)" "Green"
 } else {
     Write-Status "[OK] Task type: gig (proposer_review; no auto_verify)" "Green"
 }
@@ -372,15 +396,26 @@ foreach ($agent in $initialBalances.PSObject.Properties) {
     Write-Status "  $($agent.Name): $($agent.Value) ai$" "Gray"
 }
 
-# Step 2: Create job
-Write-Section "Step 2: Creating Test Job"
-$job = New-TestJob -Type $TaskType
-if (-not $job) {
-    Write-Status "[FAIL] Failed to create job" "Red"
-    exit 1
+# Step 2: Create job or wait for agent_1 Fiverr job
+if ($TaskType -eq 'fiverr') {
+    Write-Section "Step 2: Waiting for agent_1 to create a real Fiverr job"
+    Write-Status "Polling up to $MaxWaitFiverrJobSeconds s for a job created_by agent_1 with [archetype:fiverr_gig] in title..." "Cyan"
+    $job = Get-FiverrJobFromProposer -BackendUrl $BackendUrl -PollInterval $PollInterval -MaxWaitSeconds $MaxWaitFiverrJobSeconds
+    if (-not $job) {
+        Write-Status "[FAIL] No Fiverr job from agent_1 within timeout. Ensure agent_1 is running and WEB_SEARCH_ENABLED=1, SERPER_API_KEY set; optionally WEB_FETCH_ENABLED=1, fiverr.com in WEB_FETCH_ALLOWLIST." "Red"
+        exit 1
+    }
+    Write-Status "[OK] Found real Fiverr job from agent_1" "Green"
+} else {
+    Write-Section "Step 2: Creating Test Job"
+    $job = New-TestJob -Type $TaskType
+    if (-not $job) {
+        Write-Status "[FAIL] Failed to create job" "Red"
+        exit 1
+    }
+    Write-Status "[OK] Job created successfully" "Green"
 }
 $jobId = $job.job_id
-Write-Status "[OK] Job created successfully" "Green"
 Show-JobDetails $job
 
 # Step 3: Wait for claim (or claim manually if needed)

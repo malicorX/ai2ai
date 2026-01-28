@@ -325,6 +325,26 @@ def _extract_json_obj(raw: str) -> Optional[dict]:
         return None
 
 
+def _strip_html_for_llm(html_text: str, max_chars: int = 6000) -> str:
+    """
+    Best-effort strip HTML so LLM gets readable text (e.g. from Fiverr gig pages).
+    Removes script/style, strips tags, collapses whitespace.
+    """
+    if not (html_text or "").strip():
+        return ""
+    text = str(html_text)
+    # Remove script and style blocks (and their content)
+    text = re.sub(r"<script[^>]*>[\s\S]*?</script>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<style[^>]*>[\s\S]*?</style>", " ", text, flags=re.IGNORECASE)
+    # Replace tags with space
+    text = re.sub(r"<[^>]+>", " ", text)
+    # Decode common entities
+    text = text.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
+    # Collapse whitespace and trim
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:max_chars] if text else ""
+
+
 def _extract_redo_for(body: str) -> str:
     """
     Parse a deterministic redo marker like: [redo_for:<job_id>]
@@ -1202,16 +1222,22 @@ def node_act(state: AgentState, config: Any = None) -> AgentState:
         return state
 
     if kind == "discover_fiverr":
-        # Search Fiverr (web_search), pick a gig, transform to sparky task, create job so executor can solve it.
+        # Real Fiverr: web_search -> pick gig URL -> web_fetch page -> strip HTML -> LLM transform -> create job.
         run_tag = _run_tag(state.get("run_id", ""))
         search_queries = [
             "site:fiverr.com logo design gig",
-            "site:fiverr.com writing gig",
-            "site:fiverr.com social media gig",
+            "site:fiverr.com copywriting gig",
+            "site:fiverr.com social media post gig",
+            "site:fiverr.com email subject lines gig",
+            "site:fiverr.com product description gig",
+            "site:fiverr.com blog post gig",
+            "site:fiverr.com video script gig",
+            "site:fiverr.com tagline gig",
         ]
-        query = search_queries[len(run_tag) % len(search_queries)]  # rotate query
+        idx = int(hashlib.md5((run_tag or "").encode()).hexdigest(), 16) % len(search_queries)
+        query = search_queries[idx]
         try:
-            out = tools.get("web_search", lambda q, n: {"results": [], "error": "no_tool"})(query, 8)
+            out = tools.get("web_search", lambda q, n: {"results": [], "error": "no_tool"})(query, 10)
         except Exception:
             out = {"results": [], "error": "exception"}
         results = out.get("results") or []
@@ -1225,39 +1251,40 @@ def node_act(state: AgentState, config: Any = None) -> AgentState:
         chosen = None
         for r in results:
             url = str(r.get("url") or "")
-            if "fiverr.com" in url.lower():
+            if "fiverr.com" in url.lower() and "/" in url.replace("https://", "").replace("http://", ""):
                 chosen = r
                 break
         if not chosen:
             chosen = results[0]
         title_src = str(chosen.get("title") or "")[:300]
-        snippet_src = str(chosen.get("snippet") or "")[:600]
-        url_src = str(chosen.get("url") or "")[:500]
-        # Optional: fetch page for more detail (Fiverr may block; use title+snippet if fetch fails)
+        snippet_src = str(chosen.get("snippet") or "")[:800]
+        url_src = str(chosen.get("url") or "").strip()[:500]
+        # Always try web_fetch for real gig detail (requires WEB_FETCH_ENABLED=1 and fiverr.com in WEB_FETCH_ALLOWLIST)
         extra_detail = ""
         if tools.get("web_fetch") and url_src:
             try:
                 fetch_out = tools["web_fetch"](url_src)
                 if fetch_out.get("ok") and fetch_out.get("text"):
-                    extra_detail = (fetch_out.get("text") or "")[:3000].replace("\n", " ")
+                    raw_html = (fetch_out.get("text") or "")[:50000]
+                    extra_detail = _strip_html_for_llm(raw_html, max_chars=4000)
             except Exception:
                 pass
-        # LLM: transform Fiverr gig -> sparky task (title, body with acceptance criteria, proposer_review)
+        # LLM: transform real Fiverr gig -> sparky task with clear acceptance criteria and deliverable description
         sys_transform = (
-            "You are the proposer. Given a Fiverr-style gig (title + snippet from search), output a single task the other agent can execute. "
-            "Return STRICT JSON ONLY: {\"title\": \"...\", \"body\": \"...\", \"reward\": 0.05}. "
+            "You are the proposer. You have a REAL Fiverr gig (from search + optional page fetch). "
+            "Output a single task the executor agent can complete. Return STRICT JSON ONLY: {\"title\": \"...\", \"body\": \"...\", \"reward\": 0.05}. "
             "Rules: title must be clear and start with [archetype:fiverr_gig]. "
-            "Body must include: [verifier:proposer_review], [reviewer:creator], then 'Acceptance criteria:' with 3-5 bullets, "
-            "then a short 'Deliverable:' description so the executor knows what to produce (e.g. a short text, a list, a plan). "
-            "Keep body under 1200 chars. Reward between 0.03 and 0.1."
+            "Body must include: [verifier:proposer_review], [reviewer:creator], then 'Acceptance criteria:' with 3-6 concrete bullets (what the client gets, format, length), "
+            "then a 'Deliverable:' paragraph so the executor knows exactly what to produce (e.g. 'A 3-bullet feature list for a fitness app', 'Three email subject lines under 60 chars'). "
+            "Extract real requirements from the gig (delivery time, revisions, format). Keep body under 1500 chars. Reward between 0.03 and 0.15."
         )
         user_transform = (
             f"Fiverr result:\nTitle: {title_src}\nSnippet: {snippet_src}\nURL: {url_src}\n"
-            + (f"\nExtra (from page): {extra_detail[:1500]}" if extra_detail else "")
+            + (f"\nPage content (stripped): {extra_detail}" if extra_detail else "")
             + "\n\nOutput the sparky task JSON now."
         )
         try:
-            raw = llm_chat(sys_transform, user_transform, max_tokens=520)
+            raw = llm_chat(sys_transform, user_transform, max_tokens=650)
         except Exception:
             raw = ""
         obj = _extract_json_obj(raw) or {}
@@ -1282,15 +1309,15 @@ def node_act(state: AgentState, config: Any = None) -> AgentState:
         except Exception:
             jid = ""
         if jid:
-            tools["chat_send"](f"[task:{jid}] Fiverr-style task: {title_src[:80]}. Claim and deliver with required evidence.")
+            tools["chat_send"](f"[task:{jid}] Real Fiverr gig: {title_src[:80]}. Claim and deliver with required evidence.")
             try:
-                tools["memory_append"]("event", f"Discovered Fiverr gig -> job {jid}: {title_src[:100]}", ["job", "fiverr_gig", "proposed"], 0.65)
+                tools["memory_append"]("event", f"Discovered real Fiverr gig -> job {jid}: {title_src[:100]}", ["job", "fiverr_gig", "proposed"], 0.65)
             except Exception:
                 pass
             state["last_job_id"] = jid
             state["acted"] = True
             try:
-                tools["trace_event"]("status", "discover_fiverr: job created", {"job_id": jid, "source_title": title_src[:120]})
+                tools["trace_event"]("status", "discover_fiverr: job created", {"job_id": jid, "source_title": title_src[:120], "url": url_src[:200]})
             except Exception:
                 pass
         return state

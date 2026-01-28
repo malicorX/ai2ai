@@ -1905,15 +1905,35 @@ def _do_job(job: dict, tools: Optional[dict] = None) -> str:
                     trace_event("status", "do_job_stage", {"job_id": str(job_id or ""), "stage": "enter_generic_llm"})
                 except Exception:
                     pass
-                sys_prompt = (
-                    "You are completing a task. Output ONLY the deliverable in markdown.\n"
-                    "Rules:\n"
-                    "- Be concrete and satisfy the acceptance criteria.\n"
-                    "- If the job asks for a specific format (table/list/json fence), follow it exactly.\n"
-                    "- No fluff.\n"
+                # Complex tasks (Fiverr-style, long body, many criteria): richer prompt and higher token budget
+                is_complex = (
+                    len(body or "") > 600
+                    or len(acceptance or []) >= 4
+                    or "fiverr_gig" in (title or "").lower()
+                    or "fiverr" in (title or "").lower()
                 )
+                if is_complex:
+                    sys_prompt = (
+                        "You are an expert freelancer completing a real client-style task (e.g. Fiverr gig). "
+                        "Output ONLY the deliverable in markdown—no preamble.\n"
+                        "Rules:\n"
+                        "- Satisfy every acceptance criterion explicitly (format, length, word count, tone).\n"
+                        "- If the job specifies a structure (bullets, numbered list, sections), follow it exactly.\n"
+                        "- Match the requested deliverable type (tagline, post, subject lines, description, etc.).\n"
+                        "- Be concrete and client-ready; no filler or meta-commentary.\n"
+                    )
+                    max_tok = 1500
+                else:
+                    sys_prompt = (
+                        "You are completing a task. Output ONLY the deliverable in markdown.\n"
+                        "Rules:\n"
+                        "- Be concrete and satisfy the acceptance criteria.\n"
+                        "- If the job asks for a specific format (table/list/json fence), follow it exactly.\n"
+                        "- No fluff.\n"
+                    )
+                    max_tok = 900
                 user_prompt = f"Job title:\n{title}\n\nJob body:\n{body}\n\nReturn the deliverable now:"
-                deliverable_md = (llm_chat(sys_prompt, user_prompt, max_tokens=900) or "").strip()
+                deliverable_md = (llm_chat(sys_prompt, user_prompt, max_tokens=max_tok) or "").strip()
                 # If verifier is json_list but we went through generic path, try to extract/fix JSON
                 if verifier_tag == "json_list" and deliverable_md:
                     try:

@@ -115,16 +115,18 @@ Job ID: abc123-def456-...
 ## Task types
 
 - **`json_list`** (default) — Structured JSON list task with auto_verify (3 items, name/category/value). Run manually: `.\scripts\test_run.ps1` (not used by `run_all_tests.ps1`).
-- **`gig`** — Fiverr-style short deliverable: product tagline, feature list, social post, email subject, or short bio. Uses `[verifier:proposer_review]`; no auto_verify; script approves as proposer. Used by `run_all_tests.ps1` (step 3).
+- **`gig`** — Canned Fiverr-style short deliverable (tagline, feature list, social post, etc.). Uses `[verifier:proposer_review]`; script approves. Used by `run_all_tests.ps1` (step 3).
+- **`fiverr`** — **Real Fiverr:** script does *not* create a job; it waits for agent_1 to create one via discover_fiverr (web_search + optional web_fetch). Requires agent_1 running and `WEB_SEARCH_ENABLED=1`, `SERPER_API_KEY`; optionally `WEB_FETCH_ENABLED=1`, `fiverr.com` in `WEB_FETCH_ALLOWLIST`. Run: `.\scripts\test_run.ps1 -TaskType fiverr`.
 
 ## Parameters
 
 ### PowerShell
 - `-BackendUrl` - Backend URL (default: `http://sparky1:8000`)
-- `-TaskType` - `json_list` (default) or `gig` (Fiverr-style short text task, proposer review)
+- `-TaskType` - `json_list` (default), `gig` (canned Fiverr-style), or `fiverr` (wait for agent_1 real Fiverr job)
 - `-PollInterval` - Polling interval in seconds (default: `3`)
 - `-MaxWaitSeconds` - Maximum wait time for claim (default: `300`)
 - `-MaxWaitSubmitSeconds` - Maximum wait for agent to submit (default: `600`)
+- `-MaxWaitFiverrJobSeconds` - When `-TaskType fiverr`, max wait for agent_1 to create a Fiverr job (default: `180`)
 - `-ForceSubmit` - If agent does not submit in time, submit minimal deliverable (backend-only test)
 
 ### Bash

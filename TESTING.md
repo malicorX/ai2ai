@@ -97,7 +97,7 @@ Runs in order: **(1)** backend json_list verifier (local), **(2)** `quick_test.p
 | `scripts/run_all_tests.ps1` | Run full suite (5 steps): verifier_unit → quick_test → test_run (gig) → test_proposer_review → test_proposer_review_reject. Step 3 = Fiverr-style gig task. Stop on first failure. Logs to `scripts/run_all_tests.<timestamp>.log`. `-SkipVerifierUnit` skips step 1. |
 | `backend/test_json_list_verifier.py` | Local unit test for json_list extraction (```json fence, array-of-objects). Run from backend dir with deps. |
 | `scripts/quick_test.ps1` | Health check (backend, world, jobs, economy, memory, opportunities). ~30 s. |
-| `scripts/test_run.ps1` | Single-job lifecycle: create → claim → submit → verify → approve. Default `-TaskType json_list` (auto_verify); use `-TaskType gig` for Fiverr-style short deliverable (proposer_review). json_list requires `backend_version: "balanced_array"`. |
+| `scripts/test_run.ps1` | Single-job lifecycle: create → claim → submit → verify → approve. `-TaskType`: `json_list` (auto_verify), `gig` (canned Fiverr-style), or `fiverr` (wait for agent_1 real Fiverr job via discover_fiverr). json_list requires `backend_version: "balanced_array"`. |
 | **Fiverr discovery (optional)** | When backend has `WEB_SEARCH_ENABLED=1` and `SERPER_API_KEY`, proposer can search Fiverr → pick gig → transform to sparky task → create job for executor. See deployment/README § Fiverr discovery. Suite does not require this. |
 | `scripts/test_proposer_review.ps1` | Proposer-review E2E: job with `[verifier:proposer_review]` stays submitted, agent_1 reviews and approves. |
 | `scripts/test_proposer_review_reject.ps1` | Proposer-review reject: agent_1 rejects with penalty; asserts job rejected and executor balance drops. |
