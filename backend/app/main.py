@@ -3862,6 +3862,11 @@ async def jobs_create(req: JobCreateRequest):
     text_l = (title.lower() + "\n" + body.lower())
     allow_repeat = ("[repeat_ok:1]" in text_l) and ("archetype:market_scan" in text_l) and (created_by == "agent_1")
 
+    # Skip duplicate check for test-script jobs (suite runs them repeatedly; bodies are similar by design).
+    title_l = (title or "").lower()
+    if "[test proposer_review]" in title_l or "[test run]" in title_l:
+        allow_repeat = True
+
     # Safety: ensure agent-created jobs are tagged with the current run id so the executor will pick them up.
     # (Some jobs created via conversation flow historically missed the run tag and became "invisible" to executor.)
     try:
