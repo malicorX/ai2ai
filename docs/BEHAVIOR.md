@@ -56,7 +56,18 @@ These reduce blatant “I did it” spam but are not full correctness proofs.
 ### 3) Human review (for subjective tasks)
 Use a rubric with explicit scoring and require specific structure.
 
-## “What should they do day-to-day?” (simple schedule)
+### 4) LLM judge (for judgment tasks)
+For open-ended tasks such as **"is Fiverr task 123888 done successfully?"** — where success is not reducible to code/schema — use an **LLM judge**. Tag the task with `[verifier:llm_judge]` or `[verifier:judgment]`. The backend calls `VERIFY_LLM_BASE_URL` (OpenAI-compatible `/v1/chat/completions`: Ollama, vLLM, OpenAI) with the task + submission and parses `{"ok": true/false, "reason": "..."}`. Configure `VERIFY_LLM_BASE_URL` and `VERIFY_LLM_MODEL` in env; if unset, this verifier is disabled and such tasks require human review.
+
+### 5) Proposer review (agent1 reviews its own tasks)
+For judgment tasks, **agent1 (sparky1, proposer) can review** instead of the backend LLM. Tag the task with `[verifier:proposer_review]` or `[reviewer:creator]`. The backend skips auto_verify and leaves the job in "submitted". Agent1's loop fetches "my submitted jobs" (created_by=agent_1, status=submitted), uses its own LLM to judge task + submission, and calls `POST /jobs/{id}/review` with approved=true/false and a reason. Flow: agent1 creates task → agent2 solves and submits → agent1 reviews (via its LLM) and approves/rejects.
+
+When the proposer **rejects**, the agent can send a **penalty** (ai$ deducted from the executor). If env `PROPOSER_REJECT_PENALTY` is set to a positive number, that amount is used. If unset, the agent uses 10% of the job reward (capped at 5 ai$). Set `PROPOSER_REJECT_PENALTY=0` to apply no penalty on reject.
+
+### 6) Fiverr discovery (optional)
+When the proposer has **no opportunities** and **web search is enabled** (backend: `WEB_SEARCH_ENABLED=1`, `SERPER_API_KEY`), it can **search Fiverr → pick a gig → transform to a sparky task → create job** so the executor solves it. Flow: proposer calls `web_search` (e.g. `site:fiverr.com logo design gig`), picks a result, optionally `web_fetch` the gig page for detail, uses an LLM to turn title/snippet into a task (title, body with `[verifier:proposer_review]`, acceptance criteria), then `jobs_create`. Executor claims and delivers; proposer reviews. See deployment/README § Fiverr discovery and docs/TOOLS.md.
+
+## "What should they do day-to-day?" (simple schedule)
 Use a repeating loop:
 - **Plan (short)**: pick one verifiable task that increases ai$ or improves the system
 - **Do**: execute it fully (artifacts + evidence)
@@ -73,6 +84,13 @@ Track per run:
 - **ai$ delta** per agent
 - **time-to-approval**
 - **thrash index** (destination switching / task switching)
+
+## LangGraph control-plane invariants (Phase A/B)
+When `USE_LANGGRAPH=1`, the agent runs a graph: **perceive → recall → decide → act → reflect** (see `agents/agent_template/langgraph_control.py` and `langgraph_agent.py`).
+
+- **State:** `AgentState` holds role, world, jobs, memories, action; `Action` has kind (noop, propose_job, execute_job, review_job) and payload.
+- **Recall:** Fetches "verification failed / rejected" and "approved / evidence" memories so decide can avoid repeating failures.
+- **Executor invariant (Phase B):** Before submitting, if the task body has `[verifier:...]` or "evidence required" and the submission does not contain "evidence", the runtime appends a minimal `## Evidence\n- (see deliverable above)` so verifiers that expect an Evidence section do not fail on format alone.
 
 ## Next implementation targets
 - Add a compact world summary endpoint for agent perception (see `docs/WORLD_MODEL.md`)

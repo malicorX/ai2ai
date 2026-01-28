@@ -23,7 +23,7 @@ The script performs a complete end-to-end test:
 1. **Tests Backend Connection** - Verifies backend is accessible
 2. **Creates Test Job** - Creates a simple, verifiable JSON task
 3. **Waits for Claim** - Monitors until an agent claims the job (or claims manually)
-4. **Submits Deliverable** - Submits a valid test deliverable
+4. **Waits for Agent to Submit** - Polls until the claiming agent (sparky2) produces and submits via do_job + jobs_submit; creativity lives on agents. Use `-ForceSubmit` to submit a minimal deliverable if the agent times out (backend-only test).
 5. **Waits for Verification** - Monitors auto-verification results
 6. **Approves Job** - Approves the job if verification passed
 7. **Checks Economy** - Shows ai$ balance changes
@@ -73,9 +73,9 @@ Step 3: Waiting for Job to be Claimed
 [14:23:22] ✅ Job claimed by: agent_2
 
 ============================================================
-Step 4: Submitting Test Deliverable
+Step 4: Waiting for agent to submit (creativity on sparky1/sparky2)
 ============================================================
-[14:23:23] ✅ Deliverable submitted
+[14:23:23] [OK] Agent agent_2 submitted
 
 ============================================================
 Step 5: Waiting for Auto-Verification
@@ -112,12 +112,20 @@ View job in UI: http://sparky1:8000/ui/
 Job ID: abc123-def456-...
 ```
 
+## Task types
+
+- **`json_list`** (default) — Structured JSON list task with auto_verify (3 items, name/category/value). Used by `run_all_tests.ps1`.
+- **`gig`** — Fiverr-style short deliverable: product tagline, feature list, social post, email subject, or short bio. Uses `[verifier:proposer_review]`; no auto_verify; script approves as proposer. Run manually: `.\scripts\test_run.ps1 -TaskType gig`
+
 ## Parameters
 
 ### PowerShell
 - `-BackendUrl` - Backend URL (default: `http://sparky1:8000`)
+- `-TaskType` - `json_list` (default) or `gig` (Fiverr-style short text task, proposer review)
 - `-PollInterval` - Polling interval in seconds (default: `3`)
 - `-MaxWaitSeconds` - Maximum wait time for claim (default: `300`)
+- `-MaxWaitSubmitSeconds` - Maximum wait for agent to submit (default: `600`)
+- `-ForceSubmit` - If agent does not submit in time, submit minimal deliverable (backend-only test)
 
 ### Bash
 - `BACKEND_URL` - Backend URL (default: `http://sparky1:8000`)
@@ -136,10 +144,16 @@ Job ID: abc123-def456-...
 - Check agent_2 logs: `docker logs agent_2`
 - The script will attempt to claim manually if possible
 
+### Script stuck on "[!!] Job status changed to: approved" (Step 3)
+- If the agent was very fast, the job may already be submitted/approved when the script first polls. The script now treats "submitted" or "approved" in Step 3 as success and proceeds to Step 4–8. Upgrade to the latest test_run.ps1 if you see an infinite loop here.
+
 ### "Auto-verification did not complete"
 - Verification may need manual trigger
 - Check backend logs for verification errors
 - Verify job has correct verifier tag
+
+### "invalid json (Expecting value: line 1 column 2)" / verifier extracts `[run:...]`
+- Backend json_list verifier may be outdated. Rebuild and restart the backend on sparky1 so it uses the updated extraction (```json fence first, then array-of-objects). See deployment/README § After code changes.
 
 ### "Failed to approve job"
 - Check if verification passed

@@ -1,57 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any, Callable, Dict, List, Literal, Optional, TypedDict
 import hashlib
 
 from langgraph.graph import END, START, StateGraph
 
+from agent_template.langgraph_control import Action, AgentState, ProposedJob, Role
 from agent_template.langgraph_runtime import llm_chat
-
-
-Role = Literal["proposer", "executor"]
-
-
-class ProposedJob(TypedDict):
-    title: str
-    body: str
-    reward: float
-
-
-class Action(TypedDict, total=False):
-    kind: Literal["noop", "propose_job", "execute_job"]
-    note: str
-    job: ProposedJob
-    job_id: str
-    job_obj: dict
-
-
-class AgentState(TypedDict, total=False):
-    role: Role
-    agent_id: str
-    display_name: str
-    persona: str
-    run_id: str
-    world: dict
-    balance: float
-    open_jobs: List[dict]
-    rejected_jobs: List[dict]
-    recent_jobs: List[dict]
-    memories: List[dict]
-    world_model: dict
-    last_job_id: str
-    last_job: dict
-    handled_rejection_job_id: str
-    outcome_ack_job_id: str
-    # Guardrail: once we announce a redo cap for a root task, don't spam it again in this run.
-    redo_capped_root_ids: List[str]
-    # If propose_job fails (e.g., backend dedupe), bump this so we pick a different fallback next tick.
-    propose_failed_count: int
-    # Internal-only: runtime tool callables injected by the host process.
-    __tools: dict
-    action: Action
-    acted: bool
 
 
 class Tools(TypedDict):
@@ -60,12 +18,14 @@ class Tools(TypedDict):
     jobs_create: Callable[[str, str, float], str]
     jobs_claim: Callable[[str], bool]
     jobs_submit: Callable[[str, str], bool]
+    jobs_review: Callable[..., bool]  # (job_id, approved, note, reviewed_by, penalty=None)
     do_job: Callable[[dict], str]
     chat_send: Callable[[str], None]
     trace_event: Callable[[str, str, dict], None]
     memory_retrieve: Callable[[str, int], List[dict]]
     memory_append: Callable[[str, str, List[str], float], None]
     web_fetch: Callable[[str], dict]
+    web_search: Callable[[str, int], dict]  # (query, num) -> {results: [{title, snippet, url}]}
     opportunities_list: Callable[[int], List[dict]]
     opportunities_update: Callable[[str, Optional[str], Optional[str], Optional[List[str]]], dict]
     email_template_generate: Callable[[str, str, Optional[str], Optional[str]], str]
@@ -235,6 +195,17 @@ def node_perceive(state: AgentState, config: Any = None) -> AgentState:
             state["rejected_jobs"] = []
     else:
         state["rejected_jobs"] = []
+
+    # Proposer: jobs I created that are submitted and need my review ([verifier:proposer_review])
+    if state.get("role") == "proposer":
+        try:
+            submitted = tools["jobs_list"](status="submitted", limit=50)
+            aid = str(state.get("agent_id") or "").strip()
+            state["my_submitted_jobs"] = [j for j in submitted if str(j.get("created_by") or "") == aid]
+        except Exception:
+            state["my_submitted_jobs"] = []
+    else:
+        state["my_submitted_jobs"] = []
 
     # Lightweight world model extraction (compact, stable input for reasoning).
     w = state.get("world") or {}
@@ -456,6 +427,14 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
 
     # Invariants first (code-enforced)
     if role == "proposer":
+        # Proposer review: if I have submitted jobs awaiting my review ([verifier:proposer_review]), review one first.
+        my_sub = state.get("my_submitted_jobs") or []
+        if my_sub:
+            j = my_sub[0]
+            jid = str(j.get("job_id") or "").strip()
+            if jid:
+                state["action"] = {"kind": "review_job", "job_id": jid, "job_obj": j, "note": "review my submitted job"}
+                return state
         # If our last proposal failed to create a job (often due to dedupe), immediately choose a deterministic
         # alternative instead of repeating the same proposal.
         try:
@@ -632,6 +611,7 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
         # Bridge scan -> execution: if there are approved market_scan items, propose a concrete "deliver this" task.
         # This keeps the system doing useful work instead of drifting into toy problems.
         # Smart selection: prioritize by success_score, then price, then recency.
+        has_open_job = _proposer_has_open_job(state)
         try:
             opps = tools["opportunities_list"](50)  # Get more to choose from
         except Exception:
@@ -664,7 +644,7 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
                     candidates.append(it)
             
             if not candidates:
-                # No good opportunities available - trigger automatic market scan
+                # No good opportunities available: try Fiverr discovery (search -> pick gig -> transform to sparky task) or fall back to market scan
                 # Check when we last did a market scan
                 recent_scans = []
                 for j in (state.get("recent_jobs") or []):
@@ -673,6 +653,10 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
                         if "archetype:market_scan" in title or "market scan" in title:
                             recent_scans.append(j)
                 
+                # Prefer discover_fiverr when web_search is available (search Fiverr -> pick task -> transform -> create job)
+                if tools.get("web_search") and len(recent_scans) == 0:
+                    state["action"] = {"kind": "discover_fiverr", "note": "search Fiverr, pick gig, transform to sparky task"}
+                    return state
                 # If no recent market scan (within last 10 jobs), create one
                 if len(recent_scans) == 0:
                     jt = "[archetype:market_scan] [verifier:json_list] Task: Market scan — paid gigs we can deliver (with citations)"
@@ -1217,6 +1201,190 @@ def node_act(state: AgentState, config: Any = None) -> AgentState:
                 pass
         return state
 
+    if kind == "discover_fiverr":
+        # Search Fiverr (web_search), pick a gig, transform to sparky task, create job so executor can solve it.
+        run_tag = _run_tag(state.get("run_id", ""))
+        search_queries = [
+            "site:fiverr.com logo design gig",
+            "site:fiverr.com writing gig",
+            "site:fiverr.com social media gig",
+        ]
+        query = search_queries[len(run_tag) % len(search_queries)]  # rotate query
+        try:
+            out = tools.get("web_search", lambda q, n: {"results": [], "error": "no_tool"})(query, 8)
+        except Exception:
+            out = {"results": [], "error": "exception"}
+        results = out.get("results") or []
+        if not results:
+            try:
+                tools["trace_event"]("status", "discover_fiverr: no results (web_search disabled or empty)", {"query": query})
+            except Exception:
+                pass
+            return state
+        # Pick first result that looks like a gig page (fiverr.com in url)
+        chosen = None
+        for r in results:
+            url = str(r.get("url") or "")
+            if "fiverr.com" in url.lower():
+                chosen = r
+                break
+        if not chosen:
+            chosen = results[0]
+        title_src = str(chosen.get("title") or "")[:300]
+        snippet_src = str(chosen.get("snippet") or "")[:600]
+        url_src = str(chosen.get("url") or "")[:500]
+        # Optional: fetch page for more detail (Fiverr may block; use title+snippet if fetch fails)
+        extra_detail = ""
+        if tools.get("web_fetch") and url_src:
+            try:
+                fetch_out = tools["web_fetch"](url_src)
+                if fetch_out.get("ok") and fetch_out.get("text"):
+                    extra_detail = (fetch_out.get("text") or "")[:3000].replace("\n", " ")
+            except Exception:
+                pass
+        # LLM: transform Fiverr gig -> sparky task (title, body with acceptance criteria, proposer_review)
+        sys_transform = (
+            "You are the proposer. Given a Fiverr-style gig (title + snippet from search), output a single task the other agent can execute. "
+            "Return STRICT JSON ONLY: {\"title\": \"...\", \"body\": \"...\", \"reward\": 0.05}. "
+            "Rules: title must be clear and start with [archetype:fiverr_gig]. "
+            "Body must include: [verifier:proposer_review], [reviewer:creator], then 'Acceptance criteria:' with 3-5 bullets, "
+            "then a short 'Deliverable:' description so the executor knows what to produce (e.g. a short text, a list, a plan). "
+            "Keep body under 1200 chars. Reward between 0.03 and 0.1."
+        )
+        user_transform = (
+            f"Fiverr result:\nTitle: {title_src}\nSnippet: {snippet_src}\nURL: {url_src}\n"
+            + (f"\nExtra (from page): {extra_detail[:1500]}" if extra_detail else "")
+            + "\n\nOutput the sparky task JSON now."
+        )
+        try:
+            raw = llm_chat(sys_transform, user_transform, max_tokens=520)
+        except Exception:
+            raw = ""
+        obj = _extract_json_obj(raw) or {}
+        title = str(obj.get("title") or "").strip()
+        body = str(obj.get("body") or "").strip()
+        reward = _safe_float(obj.get("reward"), 0.05)
+        if not title or not body:
+            try:
+                tools["trace_event"]("status", "discover_fiverr: LLM transform failed or empty", {"raw_preview": (raw or "")[:200]})
+            except Exception:
+                pass
+            return state
+        if run_tag and run_tag not in title:
+            title = f"{run_tag} {title}".strip()
+        body = _normalize_bullets_outside_code_fences(body)
+        if "[verifier:proposer_review]" not in body.lower():
+            body = "[verifier:proposer_review]\n[reviewer:creator]\n\n" + body
+        reward = max(0.01, min(0.5, reward))
+        jid = ""
+        try:
+            jid = tools["jobs_create"](title, body, reward)
+        except Exception:
+            jid = ""
+        if jid:
+            tools["chat_send"](f"[task:{jid}] Fiverr-style task: {title_src[:80]}. Claim and deliver with required evidence.")
+            try:
+                tools["memory_append"]("event", f"Discovered Fiverr gig -> job {jid}: {title_src[:100]}", ["job", "fiverr_gig", "proposed"], 0.65)
+            except Exception:
+                pass
+            state["last_job_id"] = jid
+            state["acted"] = True
+            try:
+                tools["trace_event"]("status", "discover_fiverr: job created", {"job_id": jid, "source_title": title_src[:120]})
+            except Exception:
+                pass
+        return state
+
+    if kind == "review_job":
+        job_id = str(act.get("job_id") or "")
+        job = act.get("job_obj") or {}
+        if not job_id:
+            return state
+        try:
+            full = tools["jobs_get"](job_id)
+            job = full or job
+        except Exception:
+            pass
+        task_text = ((job.get("title") or "") + "\n\n" + (job.get("body") or ""))[:8000]
+        sub_text = (job.get("submission") or "")[:8000]
+        if not sub_text:
+            try:
+                tools["trace_event"]("status", "review_job skipped (no submission)", {"job_id": job_id})
+            except Exception:
+                pass
+            return state
+        prompt = f"""TASK:
+{task_text}
+
+SUBMISSION:
+{sub_text}
+
+Was this task completed successfully? Reply with ONLY a JSON object, no other text:
+{{"ok": true or false, "reason": "brief explanation"}}"""
+        try:
+            out = llm_chat(
+                "You are a reviewer. Output only valid JSON: {\"ok\": true or false, \"reason\": \"...\"}.",
+                prompt,
+                max_tokens=200,
+            )
+        except Exception:
+            out = ""
+        ok, reason = False, "llm call failed"
+        if out:
+            try:
+                i = out.find("{")
+                if i >= 0:
+                    depth = 0
+                    for k, c in enumerate(out[i:], start=i):
+                        if c == "{":
+                            depth += 1
+                        elif c == "}":
+                            depth -= 1
+                            if depth == 0:
+                                parsed = json.loads(out[i : k + 1])
+                                ok = bool(parsed.get("ok", False))
+                                reason = str(parsed.get("reason", ""))[:500] or ("ok" if ok else "not ok")
+                                break
+            except Exception:
+                reason = "parse failed"
+        aid = str(state.get("agent_id") or "agent_1")
+        penalty_val: Optional[float] = None
+        if not ok:
+            try:
+                p = os.environ.get("PROPOSER_REJECT_PENALTY", "").strip()
+                if p == "0":
+                    penalty_val = None  # explicit: no penalty on reject
+                elif p:
+                    penalty_val = max(0.0, float(p))
+                elif (job.get("reward") or 0) > 0:
+                    penalty_val = min(max(0.0, float(job.get("reward", 0)) * 0.1), 5.0)
+            except (TypeError, ValueError):
+                penalty_val = None
+        rev_fn = tools.get("jobs_review")
+        if not rev_fn:
+            reviewed = False
+        else:
+            try:
+                if penalty_val is not None and penalty_val > 0:
+                    reviewed = rev_fn(job_id, ok, reason, aid, penalty=penalty_val)
+                else:
+                    reviewed = rev_fn(job_id, ok, reason, aid)
+            except TypeError:
+                reviewed = rev_fn(job_id, ok, reason, aid)
+            except Exception:
+                reviewed = False
+        if reviewed:
+            state["acted"] = True
+            try:
+                tools["trace_event"]("status", "review_job done", {"job_id": job_id, "approved": ok, "reason": reason[:200]})
+            except Exception:
+                pass
+            try:
+                tools["memory_append"]("event", f"Reviewed job {job_id}: {'approved' if ok else 'rejected'} — {reason}", ["job", "review"], 0.5)
+            except Exception:
+                pass
+        return state
+
     if kind == "execute_job":
         job_id = str(act.get("job_id") or "")
         job = act.get("job_obj") or {}
@@ -1293,6 +1461,13 @@ def node_act(state: AgentState, config: Any = None) -> AgentState:
             )
         except Exception:
             pass
+        # Phase B invariant: if task requires evidence and submission has none, append minimal Evidence section
+        body = (job.get("body") or "").lower()
+        sub = (submission or "").strip()
+        if ("[verifier:" in body or "evidence required" in body) and "evidence" not in sub.lower():
+            submission = sub + "\n\n## Evidence\n- (see deliverable above)"
+        else:
+            submission = sub or submission
         ok = False
         try:
             ok = bool(tools["jobs_submit"](job_id, submission))

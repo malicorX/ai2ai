@@ -171,6 +171,18 @@ Request:
 ### v2: PayPal webhook (admin/system)
 `POST /payments/paypal/webhook` (signature verification + idempotency required)
 
+## Tool gateways (agents)
+
+### `POST /tools/web_fetch`
+Request: `{ "agent_id", "agent_name", "url", "timeout_seconds?", "max_bytes?" }`.  
+Response: `{ "ok", "url", "text", "bytes", ... }` or `{ "error", "reason" }`.  
+Requires `WEB_FETCH_ENABLED=1`; optional `WEB_FETCH_ALLOWLIST` (comma-separated domains).
+
+### `POST /tools/web_search`
+Request: `{ "agent_id", "agent_name", "query", "num"? }`.  
+Response: `{ "ok", "results": [ { "title", "snippet", "url" } ] }` or `{ "error", "results": [] }`.  
+Requires `WEB_SEARCH_ENABLED=1` and `SERPER_API_KEY` (Serper API). Used by proposer for Fiverr discovery (search → pick gig → transform to sparky task → create job).
+
 ## WebSockets
 
 ### `WS /ws/world`

@@ -894,6 +894,34 @@ def jobs_submit(job_id: str, submission: str) -> bool:
     return bool(data.get("ok"))
 
 
+def jobs_review(
+    job_id: str,
+    approved: bool,
+    note: str,
+    reviewed_by: str | None = None,
+    penalty: float | None = None,
+) -> bool:
+    """Proposer/creator reviews a submission (e.g. for [verifier:proposer_review] tasks)."""
+    by = reviewed_by or AGENT_ID
+    payload: dict = {
+        "approved": bool(approved),
+        "reviewed_by": by,
+        "note": str(note or "")[:2000],
+        "payout": None,
+        "penalty": float(penalty) if penalty is not None and penalty > 0 else None,
+    }
+    r = requests.post(
+        f"{WORLD_API}/jobs/{job_id}/review",
+        json=payload,
+        timeout=15,
+    )
+    try:
+        data = r.json()
+    except Exception:
+        return False
+    return "error" not in data and bool(data.get("ok"))
+
+
 def events_list(upcoming_only: bool = True, limit: int = 20):
     r = requests.get(f"{WORLD_API}/events", params={"upcoming_only": str(upcoming_only).lower(), "limit": limit}, timeout=10)
     r.raise_for_status()
@@ -2144,12 +2172,14 @@ def maybe_langgraph_jobs(world) -> None:
         "jobs_create": jobs_create,
         "jobs_claim": jobs_claim,
         "jobs_submit": jobs_submit,
+        "jobs_review": jobs_review,
         "do_job": _do_job,
         "chat_send": _lg_chat_send,
         "trace_event": trace_event,
         "memory_retrieve": lambda q, k=8: memory_retrieve(q, k=int(k)),
         "memory_append": _lg_memory_append,
         "web_fetch": lambda url: web_fetch(str(url or "")),
+        "web_search": lambda query, num=10: web_search(str(query or ""), int(num or 10)),
         "opportunities_list": lambda limit=40: opportunities_list(int(limit)),
         "opportunities_update": lambda fingerprint, status=None, notes=None, tags=None: opportunities_update(str(fingerprint), status, notes, tags),
         "email_template_generate": lambda opp_title, opp_platform, client_name=None, package_tier=None: email_template_generate(str(opp_title), str(opp_platform), client_name, package_tier),
@@ -2336,6 +2366,27 @@ def web_fetch(url: str, timeout_seconds: float = 15.0, max_bytes: int = 200000) 
         return r.json() if r is not None else {"error": "no_response"}
     except Exception as e:
         return {"error": "web_fetch_failed", "detail": str(e)[:200]}
+
+
+def web_search(query: str, num: int = 10) -> dict:
+    """
+    Tool Gateway: web search via backend (Serper API). For discovering Fiverr gigs, research, etc.
+    Returns dict {ok:bool, results:[{title, snippet, url}]} or {error:..., results:[]}.
+    """
+    try:
+        payload = {
+            "agent_id": AGENT_ID,
+            "agent_name": DISPLAY_NAME or AGENT_ID,
+            "query": str(query or "")[:500],
+            "num": max(1, min(int(num or 10), 20)),
+        }
+        r = requests.post(f"{WORLD_API}/tools/web_search", json=payload, timeout=25)
+        out = r.json() if r is not None else {}
+        if "results" not in out:
+            out["results"] = []
+        return out
+    except Exception as e:
+        return {"error": "web_search_failed", "detail": str(e)[:200], "results": []}
 
 
 def artifact_put(job_id: str, path: str, content: str, content_type: str = "text/plain") -> dict:

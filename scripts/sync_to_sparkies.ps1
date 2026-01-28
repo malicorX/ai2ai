@@ -77,6 +77,7 @@ if ($Mode -eq "push" -or $Mode -eq "both") {
     $filesToSync = @(
         "agents/agent_template/agent.py",
         "agents/agent_template/langgraph_agent.py",
+        "agents/agent_template/langgraph_control.py",
         "agents/agent_template/langgraph_runtime.py",
         "backend/app/main.py",
         "backend/app/static/index.html",
@@ -106,6 +107,7 @@ if ($Mode -eq "push" -or $Mode -eq "both") {
     $filesToSync2 = @(
         "agents/agent_template/agent.py",
         "agents/agent_template/langgraph_agent.py",
+        "agents/agent_template/langgraph_control.py",
         "agents/agent_template/langgraph_runtime.py",
         "backend/app/main.py",
         "backend/app/static/index.html",

@@ -25,7 +25,13 @@ docker compose -f docker-compose.sparky2.yml up -d agent_2
 
 ### 2. Run Automated Tests
 
-**From cursorComputer (or any machine with backend access):**
+**Option A – Full suite (PowerShell, from repo root):**
+```powershell
+.\scripts\run_all_tests.ps1 -BackendUrl http://sparky1:8000
+```
+Runs: quick_test → test_run → test_proposer_review → test_proposer_review_reject. See `TESTING.md` for details.
+
+**Option B – Python E2E:**
 ```bash
 cd ~/ai_ai2ai
 python scripts/test_workflow.py --backend-url http://sparky1:8000

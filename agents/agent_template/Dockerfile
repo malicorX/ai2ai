@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY agent.py .
 COPY langgraph_runtime.py ./agent_template/langgraph_runtime.py
+COPY langgraph_control.py ./agent_template/langgraph_control.py
 COPY langgraph_agent.py ./agent_template/langgraph_agent.py
 
 ENV PYTHONUNBUFFERED=1

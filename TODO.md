@@ -70,12 +70,14 @@ Only allow tool-heavy work from specific graph states, record evidence.
 
 ## Implementation roadmap (incremental)
 
-### Phase A — Introduce LangGraph control-plane module (no behavior break)
-- Add a module that defines:
-  - `AgentState` schema (TypedDict / pydantic)
-  - `Action` schema (enum + payload)
-  - minimal graph skeleton and runner
-- Wire into `agent.py` under `USE_LANGGRAPH=1` while keeping legacy path available.
+### Phase A — Introduce LangGraph control-plane module (no behavior break) ✓
+- **Done:** `agents/agent_template/langgraph_control.py` defines:
+  - `AgentState` schema (TypedDict)
+  - `Action` schema (kind: noop | propose_job | execute_job | review_job + payload)
+  - `ProposedJob`, `Role`, `GRAPH_STEPS` (perceive → recall → decide → act → reflect)
+- `langgraph_agent.py` imports from `langgraph_control` and keeps graph + node implementations; runner remains `run_graph_step(state, tools)`.
+- Wired into `agent.py` under `USE_LANGGRAPH=1`; legacy path unchanged.
+- Docker (agent_template, agent_1, agent_2) copies `langgraph_control.py` into the image.
 
 ### Phase B — Move job logic into the graph (highest ROI)
 - Proposer path:
@@ -83,11 +85,16 @@ Only allow tool-heavy work from specific graph states, record evidence.
   - post it, notify executor in chat, end conversation if appropriate
 - Executor path:
   - claim job, produce deliverable artifacts (markdown + code fences), submit
+  - invariant: if body has [verifier:...] or evidence required and submission lacks "evidence", append ## Evidence section before jobs_submit
   - explicitly include “Evidence:” section in submission
 
 ### Phase C — Memory + outcome-driven improvements
 - Recall “what failed verification?” and avoid repeating.
 - Reflect after verify/review events; store short strategy updates.
+
+### Web search + Fiverr discovery (done)
+- Backend `POST /tools/web_search` (Serper API); agents get `web_search(query, num)` tool.
+- Proposer can discover Fiverr gigs when no opportunities: search Fiverr → pick gig → LLM transform to sparky task → create job → executor solves it. Env: `WEB_SEARCH_ENABLED=1`, `SERPER_API_KEY`. See deployment/README § Fiverr discovery, docs/TOOLS.md, BEHAVIOR.md §6.
 
 ### Phase D — Replace remaining legacy “maybe_*” control flow
 - Move movement goals and social behaviors under graph states (optional).

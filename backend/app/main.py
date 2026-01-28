@@ -71,6 +71,11 @@ WEB_FETCH_TIMEOUT_SECONDS = float(os.getenv("WEB_FETCH_TIMEOUT_SECONDS", "15"))
 WEB_FETCH_MAX_BYTES = int(float(os.getenv("WEB_FETCH_MAX_BYTES", "200000")))  # 200 KB default
 WEB_FETCH_MAX_PER_REQUEST = int(float(os.getenv("WEB_FETCH_MAX_PER_REQUEST", "3")))  # per call, for batch support later
 
+# --- Tool Gateway: web search (Serper API) ---
+WEB_SEARCH_ENABLED = os.getenv("WEB_SEARCH_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+SERPER_API_KEY = os.getenv("SERPER_API_KEY", "").strip()
+SERPER_SEARCH_URL = "https://google.serper.dev/search"
+
 # Run/session id (helps agents reset local state after /admin/new_run without restarting containers)
 _run_id: str = time.strftime("%Y%m%d-%H%M%S")
 _run_started_at: float = time.time()
@@ -79,6 +84,12 @@ EMBEDDINGS_BASE_URL = os.getenv("EMBEDDINGS_BASE_URL", "").rstrip("/")
 EMBEDDINGS_MODEL = os.getenv("EMBEDDINGS_MODEL", "llama3.1:8b")
 EMBEDDINGS_TRUNCATE = int(os.getenv("EMBEDDINGS_TRUNCATE", "256"))
 EMBEDDINGS_TIMEOUT_SECONDS = float(os.getenv("EMBEDDINGS_TIMEOUT_SECONDS", "30"))
+
+# LLM-based verification for judgment tasks (e.g. "is Fiverr task 123888 done successfully?")
+# Use OpenAI-compatible /v1/chat/completions (Ollama, vLLM, OpenAI).
+VERIFY_LLM_BASE_URL = os.getenv("VERIFY_LLM_BASE_URL", "").rstrip("/")
+VERIFY_LLM_MODEL = os.getenv("VERIFY_LLM_MODEL", os.getenv("OLLAMA_MODEL", "llama3.1:8b"))
+VERIFY_LLM_TIMEOUT_SECONDS = float(os.getenv("VERIFY_LLM_TIMEOUT_SECONDS", "60"))
 
 
 def _append_jsonl(path: Path, obj: dict) -> None:
@@ -392,7 +403,7 @@ def root():
 
 @app.get("/run")
 def run_info():
-    return {"run_id": _run_id, "started_at": _run_started_at}
+    return {"run_id": _run_id, "started_at": _run_started_at, "backend_version": "balanced_array"}
 
 
 def _list_run_dirs(limit: int = 50) -> list[dict]:
@@ -698,39 +709,106 @@ def _auto_verify_task(job: Job, submission: str) -> AutoVerifyOutcome:
         except Exception:
             return (False, True, "", [])
 
+    def _balanced_array(s: str) -> Optional[str]:
+        """Extract first complete JSON array [...] from text. Robust to line endings / fences."""
+        i = (s or "").find("[")
+        if i < 0:
+            return None
+        depth = 0
+        for j in range(i, len(s)):
+            if s[j] == "[":
+                depth += 1
+            elif s[j] == "]":
+                depth -= 1
+                if depth == 0:
+                    return s[i : j + 1]
+        return None
+
+    def _balanced_array_of_objects(s: str) -> Optional[str]:
+        """Extract first [...] that looks like a JSON array of objects (starts with [ then {).
+        Skips tag-like brackets such as [run:...] or [TEST_RUN_ID:...].
+        """
+        t = s or ""
+        i = 0
+        while True:
+            i = t.find("[", i)
+            if i < 0:
+                return None
+            j = i + 1
+            while j < len(t) and t[j] in " \t\r\n":
+                j += 1
+            if j < len(t) and t[j] == "{":
+                depth = 0
+                for k in range(i, len(t)):
+                    if t[k] == "[":
+                        depth += 1
+                    elif t[k] == "]":
+                        depth -= 1
+                        if depth == 0:
+                            return t[i : k + 1]
+                return None
+            i = i + 1
+
     def _verifier_json_list() -> Optional[AutoVerifyOutcome]:
         # Explicit tag preferred.
         vtag = _extract_bracket_tag("verifier").lower()
         if vtag not in ("json_list",):
             return None
-        code = _extract_code_fence(text, "json") or _extract_code_fence(text, "javascript")
+        # 1) Prefer ```json / ```javascript fence so agent output in fences is used.
+        code: Optional[str] = None
+        for lang in ("json", "javascript"):
+            g = re.search(rf"(?s)```\s*{re.escape(lang)}\s*\r?\n([\s\S]*?)\r?\n\s*```", (text or ""), re.IGNORECASE)
+            if g and (g.group(1) or "").strip():
+                code = (g.group(1) or "").strip()
+                break
         if not code:
-            # Try the final fallback: extract JSON array directly
-            json_match = re.search(r'(\[[\s\S]*?\])', text or "", re.MULTILINE | re.DOTALL)
-            if json_match:
-                code = json_match.group(1).strip()
-            else:
-                return AutoVerifyOutcome(True, False, "auto_verify failed: missing ```json``` code fence in submission", "json_list", {"submission_preview": (text or "")[:500]})
+            code = _extract_code_fence(text, "json") or _extract_code_fence(text, "javascript")
+        # 2) Array-of-objects [... { ... }]: skips tag-like [run:...], [TEST_RUN_ID:...].
+        if not code:
+            code = _balanced_array_of_objects(text or "")
+        # 3) Any balanced [...] (can pick up [run:...] if no array-of-objects found).
+        if not code:
+            code = _balanced_array(text or "")
+        if not code:
+            return AutoVerifyOutcome(True, False, "auto_verify failed: no JSON array found in submission", "json_list", {"submission_preview": (text or "")[:500]})
         if len(code) > 20000:
             return AutoVerifyOutcome(True, False, "auto_verify failed: json too large", "json_list", {"extracted_length": len(code)})
+        # Normalize: strip BOM and leading/trailing whitespace (handles encoding/transport quirks)
+        code = (code or "").strip()
+        if code.startswith("\ufeff"):
+            code = code[1:].lstrip()
         # Debug: log what we extracted
         try:
             import logging
             logging.info(f"json_list verifier: extracted {len(code)} chars, first 100: {code[:100]}")
         except Exception:
             pass
+        obj = None
         try:
             obj = json.loads(code)
         except Exception as e:
-            # Always include artifacts for debugging
-            artifacts = {
-                "extracted_length": len(code),
-                "extracted_preview": code[:200] if code else "(empty)",
-                "extracted_full": code[:5000] if code else "(empty)",  # Limit to 5KB to avoid huge artifacts
-                "error_type": str(type(e).__name__),
-                "error_msg": str(e)[:200]
-            }
-            return AutoVerifyOutcome(True, False, f"auto_verify failed: invalid json ({e})", "json_list", artifacts)
+            # If extraction returned invalid/truncated JSON, try array-of-objects or fence (not generic _balanced_array which can be [run:...])
+            fallback = _balanced_array_of_objects(text or "")
+            if not fallback:
+                for lang in ("json", "javascript"):
+                    g = re.search(rf"(?s)```\s*{re.escape(lang)}\s*\r?\n([\s\S]*?)\r?\n\s*```", (text or ""), re.IGNORECASE)
+                    if g and (g.group(1) or "").strip():
+                        fallback = (g.group(1) or "").strip()
+                        break
+            if fallback:
+                try:
+                    obj = json.loads(fallback)
+                except Exception:
+                    pass
+            if obj is None:
+                artifacts = {
+                    "extracted_length": len(code),
+                    "extracted_preview": code[:200] if code else "(empty)",
+                    "extracted_full": code[:5000] if code else "(empty)",
+                    "error_type": str(type(e).__name__),
+                    "error_msg": str(e)[:200],
+                }
+                return AutoVerifyOutcome(True, False, f"auto_verify failed: invalid json ({e})", "json_list", artifacts)
         if not isinstance(obj, list):
             return AutoVerifyOutcome(True, False, "auto_verify failed: expected a JSON list (array)", "json_list", {"type": str(type(obj))})
         min_items = 0
@@ -1063,13 +1141,31 @@ if __name__ == '__main__':
         except Exception as e:
             return AutoVerifyOutcome(True, False, f"auto_verify failed: python test verifier exception: {str(e)[:200]}", "python_test", {})
 
+    def _verifier_llm_judge() -> Optional[AutoVerifyOutcome]:
+        """
+        Judgment verifier for open-ended tasks (e.g. "is Fiverr task 123888 done successfully?").
+        Requires [verifier:llm_judge] or [verifier:judgment] and VERIFY_LLM_BASE_URL.
+        """
+        vtag = _extract_bracket_tag("verifier").lower()
+        if vtag not in ("llm_judge", "judgment", "judge"):
+            return None
+        if not VERIFY_LLM_BASE_URL:
+            return AutoVerifyOutcome(True, False, "auto_verify failed: llm judge requested but VERIFY_LLM_BASE_URL not set", "llm_judge", {})
+        task_summary = ((job.title or "") + "\n\n" + (job.body or ""))[:8000]
+        result = _llm_judge_call(task_summary, text)
+        if result is None:
+            return AutoVerifyOutcome(True, False, "auto_verify failed: llm judge call failed or timed out", "llm_judge", {})
+        ok, reason = result
+        note = f"auto_verify ok: {reason}" if ok else f"auto_verify failed: {reason}"
+        return AutoVerifyOutcome(True, ok, note, "llm_judge", {"reason": reason[:500]})
+
     def _verifier_acceptance_criteria_only() -> Optional[AutoVerifyOutcome]:
         ac_present, ac_ok, ac_note, bullets = _verify_acceptance_criteria()
         if not ac_present:
             return None
         return AutoVerifyOutcome(True, bool(ac_ok), ac_note if ac_note else "auto_verify ok: acceptance criteria satisfied", "acceptance_criteria", {"acceptance_criteria": bullets[:10]})
 
-    for v in (_verifier_primes_smallest_five, _verifier_python_test, _verifier_python_run, _verifier_json_list, _verifier_md_table, _verifier_acceptance_criteria_only):
+    for v in (_verifier_primes_smallest_five, _verifier_python_test, _verifier_python_run, _verifier_json_list, _verifier_md_table, _verifier_llm_judge, _verifier_acceptance_criteria_only):
         out = v()
         if out is not None:
             return out
@@ -2440,6 +2536,70 @@ def _get_embedding(text: str) -> Optional[List[float]]:
             if EMBEDDINGS_TRUNCATE > 0 and len(out) > EMBEDDINGS_TRUNCATE:
                 out = out[:EMBEDDINGS_TRUNCATE]
             return out
+    except Exception:
+        return None
+
+
+def _llm_judge_call(task_summary: str, submission: str) -> Optional[tuple[bool, str]]:
+    """
+    Call an LLM to judge whether a task was completed successfully.
+    Uses OpenAI-compatible /v1/chat/completions (Ollama, vLLM, OpenAI).
+    Returns (ok, reason) or None on error/missing config.
+    """
+    if not VERIFY_LLM_BASE_URL:
+        return None
+    prompt = f"""You are a verifier. Given a TASK and a SUBMISSION, decide if the task was completed successfully.
+
+TASK:
+{task_summary[:6000]}
+
+SUBMISSION:
+{submission[:6000]}
+
+Reply with ONLY a JSON object, no other text:
+{{"ok": true or false, "reason": "brief explanation"}}
+"""
+    payload = {
+        "model": VERIFY_LLM_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "temperature": 0.0,
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url=f"{VERIFY_LLM_BASE_URL}/v1/chat/completions",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=VERIFY_LLM_TIMEOUT_SECONDS) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            obj = json.loads(raw)
+            choices = obj.get("choices") or []
+            if not choices:
+                return None
+            content = (choices[0].get("message") or {}).get("content") or ""
+            # Extract first {...} from response (LLM may wrap in markdown)
+            if "```" in content:
+                m = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", content)
+                if m:
+                    content = m.group(1)
+            i = content.find("{")
+            if i < 0:
+                return None
+            depth = 0
+            for k, c in enumerate(content[i:], start=i):
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        parsed = json.loads(content[i : k + 1])
+                        ok = bool(parsed.get("ok", False))
+                        reason = str(parsed.get("reason", ""))[:1000] or ("ok" if ok else "not ok")
+                        return (ok, reason)
+            return None
     except Exception:
         return None
 
@@ -3862,34 +4022,42 @@ async def jobs_submit(job_id: str, req: JobSubmitRequest):
     await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(_jobs[job_id])}})
 
     # Auto-verify certain task templates and auto-approve on success.
-    # IMPORTANT: payout should be tied to verification/approval, not to "submission" alone.
-    try:
-        j2 = _jobs.get(job_id)
-        if j2 and j2.status == "submitted":
-            out = _auto_verify_task(j2, sub)
-            # Record the verifier result for UI / auditing (include artifacts).
-            if out.matched:
-                _append_job_event(
-                    "verify",
-                    job_id,
-                    {"ok": bool(out.ok), "note": out.note, "verifier": out.verifier, "artifacts": out.artifacts, "created_at": time.time()},
-                )
-            if out.matched and out.ok:
-                review_req = JobReviewRequest(approved=True, reviewed_by="system:auto_verify", note=out.note, payout=0.0, penalty=None)
-                await jobs_review(job_id, review_req)
-            elif out.matched and (not out.ok):
-                # If we had a verifier and it failed, auto-reject and penalize the submitter.
-                if out.note.startswith("auto_verify failed"):
-                    review_req = JobReviewRequest(
-                        approved=False,
-                        reviewed_by="system:auto_verify",
-                        note=out.note,
-                        payout=0.0,
-                        penalty=max(0.0, TASK_FAIL_PENALTY),
+    # Skip auto_verify when [verifier:proposer_review] or [reviewer:creator]: proposer (e.g. agent1) will review.
+    j2 = _jobs.get(job_id)
+    proposer_review = False
+    if j2 and j2.status == "submitted":
+        hay = ((j2.title or "") + "\n" + (j2.body or "")).lower()
+        if "[verifier:proposer_review]" in hay or "[reviewer:creator]" in hay:
+            proposer_review = True
+    if not proposer_review:
+        try:
+            j2 = _jobs.get(job_id)
+            if j2 and j2.status == "submitted":
+                out = _auto_verify_task(j2, sub)
+                # Record the verifier result for UI / auditing (include artifacts).
+                if out.matched:
+                    _append_job_event(
+                        "verify",
+                        job_id,
+                        {"ok": bool(out.ok), "note": out.note, "verifier": out.verifier, "artifacts": out.artifacts, "created_at": time.time()},
                     )
+                if out.matched and out.ok:
+                    review_req = JobReviewRequest(approved=True, reviewed_by="system:auto_verify", note=out.note, payout=0.0, penalty=None)
                     await jobs_review(job_id, review_req)
-    except Exception:
-        pass
+                elif out.matched and (not out.ok):
+                    # If we had a verifier and it failed, auto-reject and penalize the submitter.
+                    if out.note.startswith("auto_verify failed"):
+                        review_req = JobReviewRequest(
+                            approved=False,
+                            reviewed_by="system:auto_verify",
+                            note=out.note,
+                            payout=0.0,
+                            penalty=max(0.0, TASK_FAIL_PENALTY),
+                        )
+                        await jobs_review(job_id, review_req)
+        except Exception as e:
+            import logging
+            logging.exception("auto_verify in submit failed: %s", e)
 
     return {"ok": True, "job": asdict(_jobs[job_id])}
 
@@ -4260,6 +4428,13 @@ class WebFetchRequest(BaseModel):
     max_bytes: Optional[int] = None
 
 
+class WebSearchRequest(BaseModel):
+    agent_id: str = "unknown"
+    agent_name: str = ""
+    query: str
+    num: int = 10  # max organic results to return
+
+
 _trace: List[TraceEvent] = []
 _trace_max = 600
 
@@ -4453,6 +4628,58 @@ async def tools_web_fetch(req: WebFetchRequest, request: Request):
     except Exception as e:
         _emit_trace(req.agent_id, req.agent_name, "error", "tool:web_fetch error", {"url": url[:500], "error": str(e)[:300]})
         return {"error": "fetch_failed", "detail": str(e)[:300]}
+
+
+@app.post("/tools/web_search")
+async def tools_web_search(req: WebSearchRequest, request: Request):
+    """
+    Tool Gateway: web search via Serper API (for agents: discover Fiverr gigs, research, etc.).
+
+    Guardrails:
+    - disabled unless WEB_SEARCH_ENABLED=1 and SERPER_API_KEY is set
+    - logs tool use to trace
+    """
+    global _tick
+    _tick += 1
+    if not WEB_SEARCH_ENABLED or not SERPER_API_KEY:
+        _emit_trace(req.agent_id, req.agent_name, "status", "tool:web_search disabled", {"reason": "WEB_SEARCH_ENABLED or SERPER_API_KEY missing"})
+        return {"error": "web_search_disabled", "results": []}
+
+    query = (req.query or "").strip()[:500]
+    if not query:
+        return {"error": "empty_query", "results": []}
+    num = max(1, min(int(req.num or 10), 20))
+
+    _emit_trace(req.agent_id, req.agent_name, "action", "tool:web_search start", {"query": query[:200], "num": num})
+    try:
+        body = json.dumps({"q": query, "num": num}).encode("utf-8")
+        request_obj = urllib.request.Request(
+            SERPER_SEARCH_URL,
+            data=body,
+            headers={
+                "X-API-KEY": SERPER_API_KEY,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request_obj, timeout=15) as resp:
+            raw = resp.read(512 * 1024)
+        data = json.loads(raw.decode("utf-8", errors="replace"))
+        organic = data.get("organic") or []
+        results = []
+        for i, item in enumerate(organic[:num]):
+            if not isinstance(item, dict):
+                continue
+            results.append({
+                "title": str(item.get("title") or "")[:400],
+                "snippet": str(item.get("snippet") or "")[:800],
+                "url": str(item.get("link") or "")[:2000],
+            })
+        _emit_trace(req.agent_id, req.agent_name, "action", "tool:web_search ok", {"query": query[:200], "count": len(results)})
+        return {"ok": True, "results": results}
+    except Exception as e:
+        _emit_trace(req.agent_id, req.agent_name, "error", "tool:web_search error", {"query": query[:200], "error": str(e)[:300]})
+        return {"error": "search_failed", "detail": str(e)[:300], "results": []}
 
 
 @app.get("/chat/topic")

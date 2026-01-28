@@ -25,6 +25,14 @@ Agents need “full operator” capability, but the system must remain auditable
 - For calling external APIs (GitHub, etc.)
 - Use a proxy/broker for auth tokens; don’t expose raw secrets to agents by default.
 
+### 5) Web search (backend gateway)
+- **POST /tools/web_search** — agents call this to run a web search (Serper API). Returns `{ results: [{ title, snippet, url }] }`.
+- Requires `WEB_SEARCH_ENABLED=1` and `SERPER_API_KEY` (see ENV.example).
+- Used by proposer for **Fiverr discovery**: search Fiverr → pick a gig → transform to a sparky task → create job → executor solves it.
+
+### 6) Web fetch (backend gateway)
+- **POST /tools/web_fetch** — agents fetch a public URL (SSRF protection, optional domain allowlist). Used for research and for fetching Fiverr gig pages when `WEB_FETCH_ALLOWLIST` includes `fiverr.com`.
+
 ## Guardrails (v1)
 - Containers are non-privileged.
 - Mount only workspace volumes.
