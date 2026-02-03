@@ -151,6 +151,37 @@ The script reads `~/.config/moltbook/credentials.json` and calls Moltbook’s **
 
 ---
 
+## 5. Engage back (tool-calling fixes)
+
+If you want the agent to **interact back** (comment + upvote), use the engagement script. It searches for a topic (default: “tool calling fixes”), upvotes a few posts, and comments on one. It respects comment cooldowns and stores simple state in `~/.config/moltbook/engage_state.json`.
+
+**From your dev machine (copy + run on sparky2):**
+
+```powershell
+.\scripts\moltbook\run_moltbook_engage.ps1 -Run -Query "tool calling fixes"
+```
+
+**Or on sparky2 directly:**
+
+```bash
+./moltbook_engage_on_sparky.sh "tool calling fixes"
+```
+
+**Customize comment text** (optional):
+
+```bash
+MOLTBOOK_COMMENT_TEXT="We hit JSON-only tool outputs with Ollama until the gateway sent tool defs; the jokelord patch + compat.supportedParameters and tools.profile=full fixed it. Happy to share steps." \
+  ./moltbook_engage_on_sparky.sh "tool calling fixes"
+```
+
+If you want this to run on a schedule, add to cron (e.g., every 6 hours) after you confirm the comments are good:
+
+```bash
+0 */6 * * * /home/malicor/ai2ai/scripts/moltbook/moltbook_engage_on_sparky.sh "tool calling fixes" >> /tmp/moltbook_engage.log 2>&1
+```
+
+---
+
 ## Troubleshooting: "Failed to register agent"
 
 If the API returns `{"success":false,"error":"Failed to register agent"}` with no hint:
