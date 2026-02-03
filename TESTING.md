@@ -8,12 +8,12 @@ This document explains how to test the complete AI Village workflow to ensure st
 
 **On Windows (cursorComputer):**
 ```powershell
-.\scripts\quick_test.ps1 -BackendUrl http://sparky1:8000
+.\scripts\testing\quick_test.ps1 -BackendUrl http://sparky1:8000
 ```
 
 **On Linux (sparky1/sparky2):**
 ```bash
-BACKEND_URL=http://sparky1:8000 bash scripts/health_check.sh
+BACKEND_URL=http://sparky1:8000 bash scripts/utils/health_check.sh
 ```
 
 This verifies:
@@ -28,15 +28,15 @@ This verifies:
 
 **Option A – Python:**
 ```bash
-python scripts/test_workflow.py --backend-url http://sparky1:8000
+python scripts/testing/test_workflow.py --backend-url http://sparky1:8000
 ```
 
 **Option B – PowerShell (single job lifecycle):**
 ```powershell
-.\scripts\test_run.ps1 -BackendUrl http://sparky1:8000
+.\scripts\testing\test_run.ps1 -BackendUrl http://sparky1:8000
 ```
 
-`test_run.ps1` requires the backend to report `backend_version: "balanced_array"` from `GET /run`. If the script reports a version mismatch, rebuild/restart the backend (e.g. via deploy) so it serves the current code. **After any backend verifier change** (e.g. json_list extraction logic in `backend/app/main.py`), rebuild and restart the backend on sparky1 so auto-verify uses the new code; otherwise test_run can fail with “invalid json (Expecting value: line 1 column 2)” when the verifier still picks tag-like `[run:...]` instead of the ```json block. See `scripts/README_TEST_RUN.md` for details.
+`test_run.ps1` requires the backend to report `backend_version: "balanced_array"` from `GET /run`. If the script reports a version mismatch, rebuild/restart the backend (e.g. via deploy) so it serves the current code. **After any backend verifier change** (e.g. json_list extraction logic in `backend/app/main.py`), rebuild and restart the backend on sparky1 so auto-verify uses the new code; otherwise test_run can fail with “invalid json (Expecting value: line 1 column 2)” when the verifier still picks tag-like `[run:...]` instead of the ```json block. See `scripts/testing/README_TEST_RUN.md` for details.
 
 Both workflows test:
 1. Backend health
@@ -55,7 +55,7 @@ This verifies the verifier uses the ```json fence (or array-of-objects), not tag
 
 **Run the proposer-review E2E test:**
 ```powershell
-.\scripts\test_proposer_review.ps1 -BackendUrl http://sparky1:8000
+.\scripts\testing\test_proposer_review.ps1 -BackendUrl http://sparky1:8000
 ```
 
 This verifies:
@@ -69,7 +69,7 @@ For a **live** agent_1 to perform proposer-review (fetch "my submitted jobs" and
 
 **Reject path (proposer rejects with penalty):**
 ```powershell
-.\scripts\test_proposer_review_reject.ps1 -BackendUrl http://sparky1:8000 -PenaltyAmount 1.0
+.\scripts\testing\test_proposer_review_reject.ps1 -BackendUrl http://sparky1:8000 -PenaltyAmount 1.0
 ```
 Creates a proposer_review job, claim+submit as agent_2, then agent_1 rejects with `approved=false` and `penalty=1.0`. Asserts job ends in **rejected** and (when balances are available) executor balance drops by the penalty.
 
@@ -77,13 +77,13 @@ Creates a proposer_review job, claim+submit as agent_2, then agent_1 rejects wit
 
 **From repo root (Windows):**
 ```powershell
-.\scripts\run_all_tests.ps1 -BackendUrl http://sparky1:8000
+.\scripts\testing\run_all_tests.ps1 -BackendUrl http://sparky1:8000
 ```
-All output is logged to `scripts/run_all_tests.<yyyyMMdd-HHmmss>.log` (e.g. `run_all_tests.20260128-163145.log`). The script prints the log path at start.
+All output is logged to `scripts/testing/run_all_tests.<yyyyMMdd-HHmmss>.log` (e.g. `run_all_tests.20260128-163145.log`). The script prints the log path at start.
 
 **Deploy backend to sparky1, then run full suite:**
 ```powershell
-.\scripts\deploy_and_run_tests.ps1 -BackendUrl http://sparky1:8000
+.\scripts\deployment\deploy_and_run_tests.ps1 -BackendUrl http://sparky1:8000
 ```
 Use this after verifier changes so the backend on sparky1 is rebuilt before the suite runs. Add `-SkipVerifierUnit` to skip the local verifier step (e.g. when backend deps aren’t installed locally).
 
@@ -93,15 +93,15 @@ Runs in order: **(1)** backend json_list verifier (local), **(2)** `quick_test.p
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/deploy_and_run_tests.ps1` | Deploy backend to sparky1, then run full suite. Use after verifier/backend changes. Params: `-BackendUrl`, `-SkipVerifierUnit`, `-CopyOnly`, `-Docker`. |
-| `scripts/run_all_tests.ps1` | Run full suite (5 steps, or 6 with `-IncludeFiverr`): verifier_unit → quick_test → test_run (gig) → test_proposer_review → test_proposer_review_reject [→ test_run (fiverr)]. Step 3 = gig; step 6 (optional) = real Fiverr from agent_1. Stop on first failure. Logs to `scripts/run_all_tests.<timestamp>.log`. `-SkipVerifierUnit` skips step 1; `-IncludeFiverr` adds real Fiverr run (requires WEB_SEARCH_ENABLED, agent_1). |
+| `scripts/deployment/deploy_and_run_tests.ps1` | Deploy backend to sparky1, then run full suite. Use after verifier/backend changes. Params: `-BackendUrl`, `-SkipVerifierUnit`, `-CopyOnly`, `-Docker`. |
+| `scripts/testing/run_all_tests.ps1` | Run full suite (5 steps, or 6 with `-IncludeFiverr`): verifier_unit → quick_test → test_run (gig) → test_proposer_review → test_proposer_review_reject [→ test_run (fiverr)]. Step 3 = gig; step 6 (optional) = real Fiverr from agent_1. Stop on first failure. Logs to `scripts/testing/run_all_tests.<timestamp>.log`. `-SkipVerifierUnit` skips step 1; `-IncludeFiverr` adds real Fiverr run (requires WEB_SEARCH_ENABLED, agent_1). |
 | `backend/test_json_list_verifier.py` | Local unit test for json_list extraction (```json fence, array-of-objects). Run from backend dir with deps. |
-| `scripts/quick_test.ps1` | Health check (backend, world, jobs, economy, memory, opportunities). ~30 s. |
-| `scripts/test_run.ps1` | Single-job lifecycle: create → claim → submit → verify → approve. `-TaskType`: `json_list` (auto_verify), `gig` (canned Fiverr-style), or `fiverr` (wait for agent_1 real Fiverr job via discover_fiverr). json_list requires `backend_version: "balanced_array"`. |
+| `scripts/testing/quick_test.ps1` | Health check (backend, world, jobs, economy, memory, opportunities). ~30 s. |
+| `scripts/testing/test_run.ps1` | Single-job lifecycle: create → claim → submit → verify → approve. `-TaskType`: `json_list` (auto_verify), `gig` (canned Fiverr-style), or `fiverr` (wait for agent_1 real Fiverr job via discover_fiverr). json_list requires `backend_version: "balanced_array"`. |
 | **Fiverr discovery (optional)** | When backend has `WEB_SEARCH_ENABLED=1` and `SERPER_API_KEY`, proposer can search Fiverr → pick gig → transform to sparky task → create job for executor. See deployment/README § Fiverr discovery. Suite does not require this. |
-| `scripts/test_proposer_review.ps1` | Proposer-review E2E: job with `[verifier:proposer_review]` stays submitted, agent_1 reviews and approves. |
-| `scripts/test_proposer_review_reject.ps1` | Proposer-review reject: agent_1 rejects with penalty; asserts job rejected and executor balance drops. |
-| `scripts/test_workflow.py` | Python E2E: health, jobs, claim, submit, auto-verify, approval, economy, learning. |
+| `scripts/testing/test_proposer_review.ps1` | Proposer-review E2E: job with `[verifier:proposer_review]` stays submitted, agent_1 reviews and approves. |
+| `scripts/testing/test_proposer_review_reject.ps1` | Proposer-review reject: agent_1 rejects with penalty; asserts job rejected and executor balance drops. |
+| `scripts/testing/test_workflow.py` | Python E2E: health, jobs, claim, submit, auto-verify, approval, economy, learning. |
 
 To “run the suite” from a Windows dev machine: use `run_all_tests.ps1` (see §4 above).
 
@@ -225,7 +225,7 @@ curl http://sparky1:8000/jobs/{job_id}
 - For code tasks: ensure tests pass
 
 **Specific: json_list verifier extracts `[run:...]` (test_run fails with "invalid json (Expecting value…)")**  
-If test_run shows `extracted_preview = [run:...]` in the VERIFIER DEBUG ARTIFACTS, the backend on sparky1 is still on the old verifier (it uses the first `[..]` as JSON instead of the ```json block). Deploy and re-run: `.\scripts\deploy_and_run_tests.ps1 -BackendUrl http://sparky1:8000`. See `scripts/README_TEST_RUN.md` and deployment/README § After code changes.
+If test_run shows `extracted_preview = [run:...]` in the VERIFIER DEBUG ARTIFACTS, the backend on sparky1 is still on the old verifier (it uses the first `[..]` as JSON instead of the ```json block). Deploy and re-run: `.\scripts\deployment\deploy_and_run_tests.ps1 -BackendUrl http://sparky1:8000`. See `scripts/testing/README_TEST_RUN.md` and deployment/README § After code changes.
 
 ### Issue: "Economy not updating"
 **Symptoms:** Agent balances don't change after approval

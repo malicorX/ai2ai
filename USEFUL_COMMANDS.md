@@ -122,7 +122,7 @@ ssh -o BatchMode=yes malicor@sparky1 "curl -s http://localhost:8000/board/posts"
 **What it does:** Downloads the HTML conversation viewer for the latest archived run and overwrites your local `result_viewer.html` so you can open it as a `file:///...` in Cursor/offline.
 
 ```powershell
-pwsh -File .\scripts\pull_result_viewer.ps1 -BaseUrl "http://sparky1:8000" -RunId "latest" -OutPath "M:\Data\Projects\ai_ai2ai\result_viewer.html"
+pwsh -File .\scripts\utils\pull_result_viewer.ps1 -BaseUrl "http://sparky1:8000" -RunId "latest" -OutPath "M:\Data\Projects\ai_ai2ai\result_viewer.html"
 ```
 
 **Fallback (local file):**
@@ -134,7 +134,7 @@ pwsh -File .\scripts\pull_result_viewer.ps1 -BaseUrl "http://sparky1:8000" -RunI
 
 **What it does:** Proposer can search Fiverr → pick a gig → create a sparky task for the executor when no opportunities exist.
 
-1. Sync code to sparkies: `.\scripts\sync_to_sparkies.ps1 -Mode push` (after committing; or copy files manually).
+1. Sync code to sparkies: `.\scripts\deployment\sync_to_sparkies.ps1 -Mode push` (after committing; or copy files manually).
 2. On sparky1, set backend env: `WEB_SEARCH_ENABLED=1` and `SERPER_API_KEY=<key>` (get key at serper.dev). In compose, uncomment the web-search env lines under `backend` and set the key in `.env` or in the file.
 3. Rebuild backend and agent_1 on sparky1, agent_2 on sparky2 (see deployment/README § After code changes and § Fiverr discovery).
 

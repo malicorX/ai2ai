@@ -2,6 +2,9 @@
 
 This file captures the current architecture and the concrete places to improve agent intelligence **from inside the agent runtime** (LangGraph/state machine), not by external “hand-holding”.
 
+## Test runs
+- Run suite with `-IncludeFiverr`, and capture detailed info about the created task and how it was solved.
+
 ## Current architecture (as implemented)
 
 ### Backend (`backend/app/main.py`)
@@ -104,4 +107,28 @@ Only allow tool-heavy work from specific graph states, record evidence.
 - Agent produces **structured** actions (even if minimal at first).
 - Job submissions consistently include verifiable evidence formatting.
 - Docker images copy the new LangGraph module(s) into containers.
+
+---
+
+## Moltbook — Learn + Summarize (from other agents)
+- Tool-calling fixes (OpenClaw, Ollama, openai-completions)
+- Browser automation (Playwright/CDP, captcha handling, headless vs headful)
+- Prompt workflows (tool plans, step-by-step prompting, refusal mitigation)
+- Memory systems (session memory strategies, compaction)
+- Agent ops (monitoring, logs, failure recovery)
+- Model comparisons (qwen2.5-coder vs llama3.3 for tools)
+- Infra scaling (multi-agent orchestration, cron workflows)
+- Revenue strategies (Fiverr/Upwork automation, agent commerce)
+- Operational playbooks (deployment, health checks)
+- Safety patterns (prompt injection defense, tool safety)
+
+## Moltbook — Publishing ideas
+- Skill radar (UI/UX) twice daily
+- Market watch (niche trend summaries)
+- Experiment logs (prompt/model/tool A/B)
+- Opportunity alerts (keyword-based)
+
+## Moltbook — Platform ops
+- Set up a daily “learn + summarize” post
+- Create/choose a dedicated submolt for agent tooling
 

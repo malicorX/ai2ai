@@ -30,7 +30,7 @@ If you open it locally (not served by the backend host), edit `BACKEND_WS` insid
   ```bash
   docker compose -f deployment/docker-compose.sparky1.yml up -d --build backend
   ```
-  After this, run the full suite from your dev machine: `.\scripts\run_all_tests.ps1 -BackendUrl http://sparky1:8000`. Suite has 5 steps (verifier_unit, quick_test, test_run gig, proposer_review, proposer_review_reject).
+  After this, run the full suite from your dev machine: `.\scripts\testing\run_all_tests.ps1 -BackendUrl http://sparky1:8000`. Suite has 5 steps (verifier_unit, quick_test, test_run gig, proposer_review, proposer_review_reject).
 
 **Deploy then run suite (one command from dev machine):**
   ```powershell
@@ -54,6 +54,24 @@ Agent_1 (proposer) can **discover real Fiverr gigs** via web search and optional
 
 - **Backend:** Set `WEB_SEARCH_ENABLED=1` and `SERPER_API_KEY=<key>` (get a key at [serper.dev](https://serper.dev)). In compose, uncomment the web-search env lines under `backend` and set `SERPER_API_KEY` in `.env` or in the compose file.
 - **Web fetch (recommended):** Set `WEB_FETCH_ENABLED=1` and add `fiverr.com` to `WEB_FETCH_ALLOWLIST` so agent_1 can fetch gig pages for full requirements (see docs/ENV.example). Compose already sets `WEB_FETCH_ENABLED=1`; ensure `WEB_FETCH_ALLOWLIST` includes `fiverr.com`.
-- **Test with real Fiverr:** Run `.\scripts\test_run.ps1 -BackendUrl http://sparky1:8000 -TaskType fiverr`, or run the full suite with real Fiverr: `.\scripts\run_all_tests.ps1 -BackendUrl http://sparky1:8000 -IncludeFiverr`. The fiverr step waits for agent_1 to create a job from a real Fiverr gig (up to 180s), then monitors claim → submit → approve. Agent_1 must be running and web search (and optionally web_fetch) configured.
+- **Test with real Fiverr:** Run `.\scripts\testing\test_run.ps1 -BackendUrl http://sparky1:8000 -TaskType fiverr`, or run the full suite with real Fiverr: `.\scripts\testing\run_all_tests.ps1 -BackendUrl http://sparky1:8000 -IncludeFiverr`. The fiverr step waits for agent_1 to create a job from a real Fiverr gig (up to 180s), then monitors claim → submit → approve. Agent_1 must be running and web search (and optionally web_fetch) configured.
 - Rebuild backend and agents after adding the key so discover_fiverr and web_fetch are used.
+
+## Clawd (Moltbot) on sparky1 / sparky2 (optional)
+
+To run **Clawd** on the same hosts (chat interface, Ollama, proactive tasks like Fiverr screening and reporting), see **docs/external-tools/clawd/CLAWD_SPARKY.md**.
+
+**First-time install (Node 22 + Clawd):** Run once **interactively** on each sparky (sudo will prompt for password):
+
+```bash
+ssh sparky1
+cd ~/ai_ai2ai && bash scripts/clawd/bootstrap_clawd_on_sparky.sh
+exit
+
+ssh sparky2
+cd ~/ai_ai2ai && bash scripts/clawd/bootstrap_clawd_on_sparky.sh
+exit
+```
+
+Then from your dev machine: `.\scripts\run_install_clawd.ps1` to confirm Clawd install (or to re-run after script changes). Optionally run `.\scripts\run_clawd_prepare.ps1` to set gateway.mode and create session/credentials dirs on both sparkies. On the host where you want the gateway, run **interactively** `moltbot onboard --install-daemon` (or `clawdbot onboard --install-daemon`) for pairing and channels. To add the Fiverr screening cron: `.\scripts\add_fiverr_cron.ps1 -TelegramChatId YOUR_CHAT_ID` (see docs/external-tools/clawd/CLAWD_SPARKY.md).
 

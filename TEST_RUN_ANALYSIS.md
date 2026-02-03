@@ -146,7 +146,7 @@ Connection refused: [Errno 111]
 After running a test, generate comprehensive report:
 
 ```powershell
-.\scripts\test_run_report.ps1 -JobId <job_id> -BackendUrl http://sparky1:8000
+.\scripts\testing\test_run_report.ps1 -JobId <job_id> -BackendUrl http://sparky1:8000
 ```
 
 This shows:
