@@ -678,8 +678,13 @@
 
     function drawAgents(agents) {
       const colors = ["#d32f2f", "#1976d2", "#388e3c", "#f57c00", "#7b1fa2", "#00838f"];
+      const nowSec = Date.now() / 1000;
+      const OFFLINE_SEC = 30;
       let i = 0;
       for (const a of (agents || [])) {
+        if (a.last_seen_at && (nowSec - a.last_seen_at) > OFFLINE_SEC) {
+          continue;
+        }
         ctx.fillStyle = colors[i++ % colors.length];
         ctx.fillRect(a.x * tile, a.y * tile, tile, tile);
         ctx.fillStyle = "#000";

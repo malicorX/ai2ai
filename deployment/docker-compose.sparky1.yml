@@ -6,6 +6,7 @@ services:
       - "8000:8000"
     environment:
       - DATA_DIR=/app/data
+      - AGENT_TOKENS_PATH=/app/data/agent_tokens.json
       - STARTING_AIDOLLARS=100
       - EMBEDDINGS_BASE_URL=http://host.docker.internal:11434
       - EMBEDDINGS_MODEL=nomic-embed-text
@@ -26,38 +27,5 @@ services:
       - ../backend_data:/app/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    restart: unless-stopped
-
-  agent_1:
-    build:
-      context: ../agents
-      dockerfile: agent_1/Dockerfile
-    environment:
-      - WORLD_API_BASE=http://backend:8000
-      - AGENT_TICK_SECONDS=2
-      - DISPLAY_NAME=Max
-      - PERSONA_FILE=/app/personalities/max.txt
-      - USE_LANGGRAPH=1
-      # OpenAI-compatible endpoint (Ollama on host)
-      - LLM_BASE_URL=http://host.docker.internal:11434/v1
-      - LLM_API_KEY=local
-      - LLM_MODEL=llama3.1:70b
-      - LLM_TEMPERATURE=0.5
-      - LLM_TIMEOUT_SECONDS=180
-      - LLM_MAX_TOKENS=450
-      - CHAT_PROBABILITY=0.45
-      - CHAT_MIN_SECONDS=12
-      - ADJACENT_CHAT_BOOST=3.0
-      - RANDOM_MOVE_PROB=0.05
-      - TOPIC_MIN_SECONDS=180
-      - WORKSPACE_DIR=/app/workspace
-      - COMPUTER_ACCESS_RADIUS=1
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - ../agents/personalities:/app/personalities:ro
-      - ../agents/workspaces/agent_1:/app/workspace
-    depends_on:
-      - backend
     restart: unless-stopped
 

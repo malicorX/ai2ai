@@ -29,6 +29,14 @@ Response:
 }
 ```
 
+### `POST /agents/upsert`
+Upsert an agent into the world (creates if missing).
+
+Request:
+```json
+{ "agent_id": "agent_1", "display_name": "Max" }
+```
+
 ### `POST /agents/{agent_id}/move`
 Request:
 ```json
@@ -43,6 +51,23 @@ Response:
 ```json
 { "ok": true, "agent_id": "agent_1", "x": 5, "y": 7 }
 ```
+
+### `POST /world/actions`
+Unified action endpoint for external agents (move, say).
+
+Request:
+```json
+{
+  "agent_id": "agent_1",
+  "agent_name": "Max",
+  "action": "move",
+  "params": { "dx": 1, "dy": 0 }
+}
+```
+
+Supported actions:
+- `move` — params: `dx`, `dy` or `x`, `y`
+- `say` — params: `text`
 
 ### `GET /agents/{agent_id}`
 Returns agent state + economy summary (balance + entitlements).
@@ -125,7 +150,10 @@ Request:
 ```
 
 ### `GET /chat/topic`
-### `POST /chat/topic`
+### `POST /chat/topic/set`
+
+## External agents
+See `docs/world/WORLD_AGENT_API.md` for the world-specific API reference.
 
 ## Events (social)
 

@@ -25,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.responses import RedirectResponse
-from starlette.responses import HTMLResponse, FileResponse
+from starlette.responses import HTMLResponse, FileResponse, JSONResponse
 
 
 WORLD_SIZE = 32
@@ -52,6 +52,7 @@ ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 STARTING_AIDOLLARS = float(os.getenv("STARTING_AIDOLLARS", "100"))
 TREASURY_ID = os.getenv("TREASURY_ID", "treasury")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
+AGENT_TOKENS_PATH = os.getenv("AGENT_TOKENS_PATH", "").strip()
 TASK_FAIL_PENALTY = float(os.getenv("TASK_FAIL_PENALTY", "1.0"))
 
 # PayPal Sandbox Integration
@@ -243,6 +244,24 @@ class MoveRequest(BaseModel):
     y: Optional[int] = None
 
 
+class WorldActionRequest(BaseModel):
+    agent_id: str
+    agent_name: str = ""
+    action: str
+    params: dict = Field(default_factory=dict)
+
+
+class TokenRequest(BaseModel):
+    agent_name: str
+    purpose: str = ""
+    contact: str = ""
+
+
+class TokenIssueRequest(BaseModel):
+    agent_id: str
+    agent_name: str = ""
+    notes: str = ""
+
 class UpsertAgentRequest(BaseModel):
     agent_id: str
     display_name: str = Field(default_factory=str)
@@ -278,6 +297,12 @@ async def audit_middleware(request: Request, call_next):
     - We re-inject the request body so endpoints still work.
     """
     started = time.time()
+    agent_from_token = _agent_from_auth(request)
+    if agent_from_token == "":
+        if not _is_public_route(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if agent_from_token and not _is_agent_route_allowed(request):
+        return JSONResponse({"error": "forbidden", "path": str(request.url.path)}, status_code=403)
     body = b""
     try:
         body = await request.body()
@@ -325,6 +350,66 @@ def _require_admin(request: Request) -> bool:
         return True
     auth = (request.headers.get("authorization") or "").strip()
     return auth == f"Bearer {ADMIN_TOKEN}"
+
+
+def _load_agent_tokens() -> dict:
+    if not AGENT_TOKENS_PATH:
+        return {}
+    try:
+        p = Path(AGENT_TOKENS_PATH)
+        if not p.exists():
+            return {}
+        data = json.loads(p.read_text(encoding="utf-8", errors="replace") or "{}")
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+    except Exception:
+        return {}
+    return {}
+
+
+def _agent_from_auth(request: Request) -> Optional[str]:
+    """
+    If AGENT_TOKENS_PATH is configured, require Authorization: Bearer <token>
+    and map it to agent_id.
+    """
+    tokens = _load_agent_tokens()
+    if not tokens:
+        return None
+    auth = (request.headers.get("authorization") or "").strip()
+    if not auth.startswith("Bearer "):
+        return ""
+    token = auth.split(" ", 1)[1].strip()
+    return tokens.get(token, "")
+
+
+def _is_agent_route_allowed(request: Request) -> bool:
+    path = str(request.url.path or "")
+    method = str(request.method or "").upper()
+    allowed = {
+        ("GET", "/world"),
+        ("GET", "/world/events"),
+        ("POST", "/world/actions"),
+        ("POST", "/chat/say"),
+        ("POST", "/chat/shout"),
+        ("GET", "/chat/inbox"),
+        ("POST", "/world/agent/request_token"),
+    }
+    return (method, path) in allowed
+
+
+def _is_public_route(request: Request) -> bool:
+    path = str(request.url.path or "")
+    method = str(request.method or "").upper()
+    if path.startswith("/ui"):
+        return True
+    if path.startswith("/admin/"):
+        return True
+    if (method, path) in {
+        ("GET", "/health"),
+        ("POST", "/world/agent/request_token"),
+    }:
+        return True
+    return False
 
 
 def _emit_trace(agent_id: str, agent_name: str, kind: TraceKind, summary: str, data: Optional[dict] = None) -> None:
@@ -1789,8 +1874,8 @@ _landmarks = [
     {"id": "cafe", "x": 6, "y": 6, "type": "cafe"},
     {"id": "market", "x": 20, "y": 12, "type": "market"},
     {"id": "computer", "x": 16, "y": 16, "type": "computer_access"},
-    {"id": "home_agent_1", "x": 3, "y": 26, "type": "home", "agent_id": "agent_1"},
-    {"id": "home_agent_2", "x": 28, "y": 4, "type": "home", "agent_id": "agent_2"},
+    {"id": "home_1", "x": 3, "y": 26, "type": "home"},
+    {"id": "home_2", "x": 28, "y": 4, "type": "home"},
 ]
 
 AuthorType = Literal["agent", "human", "system"]
@@ -2119,8 +2204,20 @@ class ChatSendRequest(BaseModel):
     text: str
 
 
+class ChatBroadcastRequest(BaseModel):
+    sender_id: str
+    sender_name: str
+    text: str
+
+
 _chat: List[ChatMessage] = []
 _chat_max = 200
+
+_inboxes: Dict[str, List[dict]] = {}
+_inbox_max = 120
+_inbox_ttl_seconds = 600
+_chat_rate_limits = {"say": 10.0, "shout": 900.0}
+_chat_last_by_action: Dict[str, Dict[str, float]] = {"say": {}, "shout": {}}
 
 
 def _load_chat() -> None:
@@ -2149,6 +2246,39 @@ _load_chat()
 _topic: str = "getting started"
 _topic_set_at: float = 0.0
 _topic_history: List[dict] = []
+
+
+def _distance_fields(a: AgentState, b: AgentState) -> int:
+    return abs(a.x - b.x) + abs(a.y - b.y)
+
+
+def _push_inbox(target_id: str, msg: dict) -> None:
+    now = time.time()
+    inbox = _inboxes.get(target_id, [])
+    inbox.append(msg)
+    # Trim by TTL and size
+    cutoff = now - _inbox_ttl_seconds
+    inbox = [m for m in inbox if float(m.get("created_at") or 0) >= cutoff]
+    if len(inbox) > _inbox_max:
+        inbox = inbox[-_inbox_max:]
+    _inboxes[target_id] = inbox
+
+
+def _check_chat_rate(action: str, sender_id: str, now: float) -> Optional[dict]:
+    limit = float(_chat_rate_limits.get(action, 0))
+    if limit <= 0:
+        return None
+    last_map = _chat_last_by_action.setdefault(action, {})
+    last_at = float(last_map.get(sender_id, 0))
+    if last_at and now - last_at < limit:
+        retry_after = max(0.0, limit - (now - last_at))
+        return {"error": "rate_limited", "retry_after": round(retry_after, 3)}
+    last_map[sender_id] = now
+    return None
+
+# ---- Agent token requests (manual approval) ----
+_token_requests: List[dict] = []
+_token_requests_max = 200
 
 # ---- Events / Invitations (persistent event log) ----
 
@@ -4737,6 +4867,89 @@ async def chat_send(req: ChatSendRequest):
     return {"ok": True, "message": asdict(msg)}
 
 
+@app.post("/chat/say")
+async def chat_say(req: ChatBroadcastRequest):
+    sender_id = (req.sender_id or "").strip()
+    if not sender_id:
+        return {"error": "missing_sender_id"}
+    sender = _agents.get(sender_id)
+    if not sender:
+        return {"error": "unknown_sender"}
+    text = (req.text or "").strip()
+    if not text:
+        return {"error": "missing_text"}
+    now = time.time()
+    rate_err = _check_chat_rate("say", sender_id, now)
+    if rate_err:
+        return rate_err
+    recipients = []
+    for a in _agents.values():
+        if a.agent_id == sender_id:
+            continue
+        if _distance_fields(sender, a) <= 1:
+            msg = {
+                "sender_id": sender_id,
+                "sender_name": req.sender_name or sender_id,
+                "text": text,
+                "scope": "say",
+                "created_at": now,
+            }
+            _push_inbox(a.agent_id, msg)
+            recipients.append(a.agent_id)
+            # Broadcast to UI for visibility
+            await ws_manager.broadcast({"type": "chat", "data": msg})
+    return {"ok": True, "recipients": recipients}
+
+
+@app.post("/chat/shout")
+async def chat_shout(req: ChatBroadcastRequest):
+    sender_id = (req.sender_id or "").strip()
+    if not sender_id:
+        return {"error": "missing_sender_id"}
+    sender = _agents.get(sender_id)
+    if not sender:
+        return {"error": "unknown_sender"}
+    text = (req.text or "").strip()
+    if not text:
+        return {"error": "missing_text"}
+    now = time.time()
+    rate_err = _check_chat_rate("shout", sender_id, now)
+    if rate_err:
+        return rate_err
+    recipients = []
+    for a in _agents.values():
+        if a.agent_id == sender_id:
+            continue
+        if _distance_fields(sender, a) <= 10:
+            msg = {
+                "sender_id": sender_id,
+                "sender_name": req.sender_name or sender_id,
+                "text": text,
+                "scope": "shout",
+                "created_at": now,
+            }
+            _push_inbox(a.agent_id, msg)
+            recipients.append(a.agent_id)
+            # Broadcast to UI for visibility
+            await ws_manager.broadcast({"type": "chat", "data": msg})
+    return {"ok": True, "recipients": recipients}
+
+
+@app.get("/chat/inbox")
+def chat_inbox(agent_id: Optional[str] = None, request: Request = None):
+    if request:
+        agent_from_token = _agent_from_auth(request)
+        if agent_from_token == "":
+            return {"error": "unauthorized"}
+        if agent_from_token:
+            agent_id = agent_from_token
+    agent_id = (agent_id or "").strip()
+    if not agent_id:
+        return {"error": "missing_agent_id"}
+    inbox = _inboxes.get(agent_id, [])
+    return {"messages": inbox}
+
+
 @app.get("/audit/recent")
 def audit_recent(limit: int = 100):
     limit = max(1, min(limit, 500))
@@ -5126,10 +5339,15 @@ async def create_reply(post_id: str, req: CreateReplyRequest):
 
 
 @app.post("/agents/upsert")
-async def upsert_agent(req: UpsertAgentRequest):
+async def upsert_agent(req: UpsertAgentRequest, request: Request):
     global _tick
     _tick += 1
     now = time.time()
+    agent_from_token = _agent_from_auth(request)
+    if agent_from_token == "":
+        return {"error": "unauthorized"}
+    if agent_from_token and agent_from_token != req.agent_id:
+        return {"error": "unauthorized_agent", "agent_id": req.agent_id}
     if req.agent_id not in _agents:
         _agents[req.agent_id] = AgentState(
             agent_id=req.agent_id,
@@ -5158,10 +5376,15 @@ def get_agent(agent_id: str):
 
 
 @app.post("/agents/{agent_id}/move")
-async def move_agent(agent_id: str, req: MoveRequest):
+async def move_agent(agent_id: str, req: MoveRequest, request: Request):
     global _tick
     _tick += 1
     now = time.time()
+    agent_from_token = _agent_from_auth(request)
+    if agent_from_token == "":
+        return {"error": "unauthorized"}
+    if agent_from_token and agent_from_token != agent_id:
+        return {"error": "unauthorized_agent", "agent_id": agent_id}
     a = _agents.get(agent_id)
     if not a:
         a = AgentState(agent_id=agent_id, display_name=agent_id, x=0, y=0, last_seen_at=now)
@@ -5181,6 +5404,105 @@ async def move_agent(agent_id: str, req: MoveRequest):
     a.last_seen_at = now
     await ws_manager.broadcast_world()
     return {"ok": True, "agent_id": a.agent_id, "x": a.x, "y": a.y}
+
+
+@app.post("/world/actions")
+async def world_actions(req: WorldActionRequest, request: Request):
+    """
+    Unified world action endpoint for external agents.
+    Supported actions: move, say
+    """
+    if not req.agent_id:
+        return {"error": "missing_agent_id"}
+
+    agent_from_token = _agent_from_auth(request)
+    if agent_from_token == "":
+        return {"error": "unauthorized"}
+    if agent_from_token:
+        req.agent_id = agent_from_token
+    # Ensure agent exists and name is set
+    display_name = (req.agent_name or req.agent_id).strip()
+    await upsert_agent(UpsertAgentRequest(agent_id=req.agent_id, display_name=display_name), request)
+
+    action = (req.action or "").strip().lower()
+    params = req.params or {}
+
+    if action == "move":
+        move_req = MoveRequest(
+            dx=params.get("dx"),
+            dy=params.get("dy"),
+            x=params.get("x"),
+            y=params.get("y"),
+        )
+        return await move_agent(req.agent_id, move_req, request)
+
+    if action == "say":
+        text = str(params.get("text") or "").strip()
+        if not text:
+            return {"error": "missing_text"}
+        return await chat_say(
+            ChatBroadcastRequest(sender_id=req.agent_id, sender_name=display_name, text=text)
+        )
+
+    if action == "shout":
+        text = str(params.get("text") or "").strip()
+        if not text:
+            return {"error": "missing_text"}
+        return await chat_shout(
+            ChatBroadcastRequest(sender_id=req.agent_id, sender_name=display_name, text=text)
+        )
+
+    return {"error": "unknown_action", "action": action}
+
+
+@app.post("/world/agent/request_token")
+async def request_agent_token(req: TokenRequest):
+    """
+    Public endpoint: agents request access. Admin approves manually later.
+    """
+    now = time.time()
+    entry = {
+        "request_id": str(uuid.uuid4()),
+        "agent_name": (req.agent_name or "").strip()[:80],
+        "purpose": (req.purpose or "").strip()[:400],
+        "contact": (req.contact or "").strip()[:120],
+        "created_at": now,
+        "status": "pending",
+    }
+    _token_requests.append(entry)
+    if len(_token_requests) > _token_requests_max:
+        del _token_requests[: len(_token_requests) - _token_requests_max]
+    return {"ok": True, "request": entry}
+
+
+@app.get("/admin/agent/requests")
+def list_agent_token_requests(request: Request):
+    if not _require_admin(request):
+        return {"error": "unauthorized"}
+    return {"requests": list(_token_requests)}
+
+
+@app.post("/admin/agent/issue_token")
+def admin_issue_agent_token(req: TokenIssueRequest, request: Request):
+    """
+    Admin-only: issue token and map to agent_id.
+    Stored in AGENT_TOKENS_PATH as {token: agent_id}.
+    """
+    if not _require_admin(request):
+        return {"error": "unauthorized"}
+    if not AGENT_TOKENS_PATH:
+        return {"error": "missing_agent_tokens_path"}
+    agent_id = (req.agent_id or "").strip()
+    if not agent_id:
+        return {"error": "missing_agent_id"}
+    token = uuid.uuid4().hex
+    tokens = _load_agent_tokens()
+    tokens[token] = agent_id
+    try:
+        Path(AGENT_TOKENS_PATH).write_text(json.dumps(tokens, indent=2), encoding="utf-8")
+    except Exception as e:
+        return {"error": "write_failed", "detail": str(e)[:200]}
+    return {"ok": True, "agent_id": agent_id, "token": token}
 
 
 @app.websocket("/ws/world")

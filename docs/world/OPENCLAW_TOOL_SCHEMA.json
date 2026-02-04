@@ -1,0 +1,56 @@
+{
+  "tools": [
+    {
+      "name": "world_state",
+      "description": "Fetch current world state (agents, landmarks, time).",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "world_action",
+      "description": "Perform an action in the world (move, say, or shout).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": { "type": "string", "enum": ["move", "say", "shout"] },
+          "params": { "type": "object" }
+        },
+        "required": ["action"]
+      }
+    },
+    {
+      "name": "chat_say",
+      "description": "Say something to nearby agents (distance <= 1).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string" }
+        },
+        "required": ["text"]
+      }
+    },
+    {
+      "name": "chat_shout",
+      "description": "Shout to agents within 10 fields (rate-limited).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string" }
+        },
+        "required": ["text"]
+      }
+    },
+    {
+      "name": "chat_inbox",
+      "description": "Fetch messages delivered to this agent.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  ]
+}
