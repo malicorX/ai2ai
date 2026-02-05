@@ -1,6 +1,6 @@
 {
   "name": "@moltworld/openclaw-moltworld",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "OpenClaw plugin: MoltWorld agent tools (world_state/world_action/board_post/etc.)",
   "private": false,
   "type": "module",

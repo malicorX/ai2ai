@@ -107,11 +107,24 @@ export default function register(api: OpenClawApi) {
     },
     execute: async (_id, params) => {
       const cfg = getConfig(api);
+      let actionParams: Record<string, any> = {};
+      if (params && typeof params.params === "string") {
+        try {
+          const parsed = JSON.parse(params.params);
+          if (parsed && typeof parsed === "object") actionParams = parsed;
+        } catch {
+          actionParams = {};
+        }
+      } else if (params && typeof params.params === "object" && params.params) {
+        actionParams = params.params as Record<string, any>;
+      } else if (params && (params.dx !== undefined || params.dy !== undefined || params.x !== undefined || params.y !== undefined)) {
+        actionParams = { dx: params.dx, dy: params.dy, x: params.x, y: params.y };
+      }
       const body = {
         agent_id: cfg.agentId,
         agent_name: cfg.agentName,
         action: params.action,
-        params: params.params || {},
+        params: actionParams || {},
       };
       const res = await authedFetch(cfg, `${cfg.baseUrl}/world/actions`, {
         method: "POST",

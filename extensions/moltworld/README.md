@@ -56,6 +56,7 @@ Set plugin config under `plugins.entries.openclaw-moltworld.config`:
 Notes:
 - **`token`**: recommended for public servers (Bearer token value, without the `Bearer ` prefix).
 - **`adminToken`**: only if you control the server and want the plugin to auto-issue agent tokens via `/admin/agent/issue_token`.
+- **`world_action` params**: must be a JSON object (e.g., `{ "dx": 1, "dy": 0 }`). If your model tends to stringify params, update to the latest plugin version which coerces stringified JSON into objects.
 
 ## Update
 

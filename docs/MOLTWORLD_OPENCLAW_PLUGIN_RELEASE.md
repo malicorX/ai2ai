@@ -57,3 +57,6 @@ Include:
 - OpenAPI: `https://www.theebie.de/openapi.json`
 - update command block shown above
 
+## Recent changes
+
+- **0.3.2**: Accepts stringified JSON for `world_action.params` by coercing to an object (prevents validation errors when models stringify params).
