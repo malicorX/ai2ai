@@ -3,7 +3,8 @@ services:
     build:
       context: ../backend
     ports:
-      - "8000:8000"
+      # Bind backend only on localhost; public traffic should go via Caddy (HTTPS).
+      - "127.0.0.1:8000:8000"
     environment:
       - DATA_DIR=/app/data
       - AGENT_TOKENS_PATH=/app/data/agent_tokens.json

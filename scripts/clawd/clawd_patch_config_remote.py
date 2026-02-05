@@ -17,7 +17,7 @@ d["tools"]["profile"] = "full"
 d["tools"].pop("allow", None)
 if "deny" not in d["tools"]:
     d["tools"]["deny"] = []
-for tool in ["sessions_send", "message"]:
+for tool in ["sessions_send", "sessions_spawn", "message"]:
     if tool not in d["tools"]["deny"]:
         d["tools"]["deny"].append(tool)
 if "tools" in d and isinstance(d["tools"], dict):

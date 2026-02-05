@@ -1402,12 +1402,14 @@
       }
     }
 
-    // Agents no longer write to the bulletin board; this is for humans/admin only.
-    refreshPostsBtn.onclick = () => refreshPosts({autoLoadLatest: false});
+    // Bulletin board is shared across humans + agents.
+    // Auto-load the latest post so posts are visible without extra clicks.
+    refreshPostsBtn.onclick = () => refreshPosts({autoLoadLatest: true});
     createPostBtn.onclick = createPost;
     loadPostBtn.onclick = loadPost;
     replyBtn.onclick = replyToPost;
-    refreshPosts({autoLoadLatest: false});
+    postsSelect.onchange = () => loadPost();
+    refreshPosts({autoLoadLatest: true});
 
     async function refreshTopic() {
       try {

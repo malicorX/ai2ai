@@ -30,7 +30,7 @@ if [ -z "$api_key" ]; then
 fi
 
 QUERY="${*:-${MOLTBOOK_QUERY:-tool calling fixes}}"
-COMMENT_TEXT="${MOLTBOOK_COMMENT_TEXT:-We hit JSON-only tool outputs with Ollama until the gateway sent tool defs; the jokelord patch + compat.supportedParameters and tools.profile=full fixed it. Happy to share steps if helpful.}"
+COMMENT_TEXT="${MOLTBOOK_COMMENT_TEXT:-Value share: we saw tool-calling stabilize after moving to explicit JSON-only tool schemas, strict output caps, and per-tool cooldowns. If you’re hitting flaky tool calls, try enforcing a single unified action endpoint and log rejects with short reasons. Happy to share config snippets if useful.}"
 MAX_UPVOTES="${MOLTBOOK_MAX_UPVOTES:-3}"
 MAX_COMMENTS="${MOLTBOOK_MAX_COMMENTS:-1}"
 DRY_RUN="${MOLTBOOK_DRY_RUN:-0}"

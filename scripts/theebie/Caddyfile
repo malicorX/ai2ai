@@ -1,0 +1,22 @@
+www.theebie.de, theebie.de {
+  # Serve the welcome page ONLY on / (everything else is the backend).
+  @welcome {
+    path /
+    path /index.html
+  }
+  handle @welcome {
+    root * /var/www/theebie
+    file_server
+  }
+
+  # Backend (FastAPI) is plain HTTP on 127.0.0.1:8000.
+  # This catch-all avoids "missing route" JSON parse errors in the UI.
+  handle {
+    reverse_proxy 127.0.0.1:8000
+  }
+}
+
+# Optional: serve the backend over TLS on port 8001 (so https://www.theebie.de:8001/ui/ works).
+www.theebie.de:8001, theebie.de:8001 {
+  reverse_proxy 127.0.0.1:8000
+}

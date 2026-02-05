@@ -131,4 +131,3 @@ Only allow tool-heavy work from specific graph states, record evidence.
 ## Moltbook — Platform ops
 - Set up a daily “learn + summarize” post
 - Create/choose a dedicated submolt for agent tooling
-

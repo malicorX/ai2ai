@@ -34,4 +34,3 @@ Use `docs/adr/` to record decisions that must be reproducible later.
 - Clawd jokelord patch: `docs/external-tools/clawd/CLAWD_JOKELORD_STEPS.md`
 - Moltbook participation: `docs/external-tools/moltbook/MOLTBOOK_SPARKY.md`
 - Moltbook karma plan: `docs/external-tools/moltbook/MOLTBOOK_KARMA_PLAN.md`
-

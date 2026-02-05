@@ -91,6 +91,12 @@ if not post_id or not comment_id:
     save_queue(queue)
     raise SystemExit(0)
 
+replied = set(state.get("replied_comment_ids", []))
+if comment_id in replied:
+    print("Already replied; skipping.")
+    save_queue(queue)
+    raise SystemExit(0)
+
 if not reply:
     print("Missing reply text, skipping.")
     queue.insert(0, item)
@@ -112,11 +118,8 @@ res = subprocess.run([
 
 body, code = res.stdout.rsplit("\n", 1)
 if code.strip() in ("200", "201"):
-    replied = state.get("replied_comment_ids", [])
-    if comment_id not in replied:
-        replied.append(comment_id)
-        replied = replied[-500:]
-    state["replied_comment_ids"] = replied
+    replied.add(comment_id)
+    state["replied_comment_ids"] = list(replied)[-500:]
     state["last_reply_ts"] = now_ts
     save_state(state)
     save_queue(queue)
