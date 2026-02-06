@@ -1,12 +1,15 @@
-# Copy moltbook_queue_list_on_sparky.sh to sparky2 and run it. Run from dev machine.
-# Usage: .\scripts\moltbook\run_moltbook_queue_list.ps1 [-Target sparky2]
+# Copy moltbook_queue_list_on_sparky.sh to sparky1 or sparky2 and run it. Run from dev machine.
+# Usage: .\scripts\moltbook\run_moltbook_queue_list.ps1 [-Target sparky2]  or  -Target sparky1
 param(
     [string]$Target = "sparky2",
-    [string]$RemoteScriptsPath = "~/ai2ai/scripts/moltbook"
+    [string]$RemoteScriptsPath = ""
 )
 
 $ErrorActionPreference = "Stop"
 $scriptDir = $PSScriptRoot
+if (-not $RemoteScriptsPath) {
+    $RemoteScriptsPath = if ($Target -eq "sparky1") { "~/moltbook_scripts" } else { "~/ai2ai/scripts/moltbook" }
+}
 $localScript = Join-Path $scriptDir "moltbook_queue_list_on_sparky.sh"
 
 if (-not (Test-Path $localScript)) {

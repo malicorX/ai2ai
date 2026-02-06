@@ -383,9 +383,9 @@ def _agent_from_auth(request: Request) -> Optional[str]:
 
 
 def _is_agent_route_allowed(request: Request) -> bool:
-    path = str(request.url.path or "")
+    path = str(request.url.path or "").rstrip("/") or "/"
     method = str(request.method or "").upper()
-    allowed = {
+    allowed_exact = {
         ("GET", "/world"),
         ("GET", "/world/events"),
         ("POST", "/world/actions"),
@@ -394,7 +394,25 @@ def _is_agent_route_allowed(request: Request) -> bool:
         ("GET", "/chat/inbox"),
         ("POST", "/world/agent/request_token"),
     }
-    return (method, path) in allowed
+    if (method, path) in allowed_exact:
+        return True
+    # Allow full internal agent API (manual setup: sparky1/sparky2 with token)
+    if method not in ("GET", "POST"):
+        return False
+    allowed_prefixes = (
+        "/agents/",
+        "/chat/",
+        "/run",
+        "/jobs",
+        "/events",
+        "/memory/",
+        "/economy/",
+        "/tools/",
+        "/artifacts/",
+        "/opportunities",
+        "/trace/",
+    )
+    return any(path.startswith(p) for p in allowed_prefixes)
 
 
 def _is_public_route(request: Request) -> bool:

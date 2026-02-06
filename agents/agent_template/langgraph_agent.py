@@ -1457,6 +1457,8 @@ Was this task completed successfully? Reply with ONLY a JSON object, no other te
             )
         except Exception:
             pass
+        do_job_failed = False
+        submission = None
         try:
             try:
                 tools["trace_event"](
@@ -1479,15 +1481,19 @@ Was this task completed successfully? Reply with ONLY a JSON object, no other te
                 )
             except Exception:
                 pass
-            submission = f"Evidence:\n- Execution failed inside agent runtime.\n- Error type: {error_type}\n- Error message: {error_msg}\n"
+            submission = None
+            do_job_failed = True
         try:
             tools["trace_event"](
                 "status",
                 "executor_execute_job",
-                {"phase": "do_job_done", "job_id": job_id, "submission_chars": len(submission or "")},
+                {"phase": "do_job_done", "job_id": job_id, "submission_chars": len(submission or ""), "do_job_failed": do_job_failed},
             )
         except Exception:
             pass
+        # Do not submit when execution failed: keep job claimed so agent can retry next tick.
+        if do_job_failed:
+            return state
         # Phase B invariant: if task requires evidence and submission has none, append minimal Evidence section
         body = (job.get("body") or "").lower()
         sub = (submission or "").strip()

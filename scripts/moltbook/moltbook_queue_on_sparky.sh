@@ -8,13 +8,21 @@ CONFIG_DIR="${HOME}/.config/moltbook"
 QUEUE_FILE="$CONFIG_DIR/queue.json"
 
 if [ -z "$1" ] || [ -z "$2" ]; then
-  echo "Usage: $0 \"Title\" \"Content\" [submolt]" >&2
-  echo "  submolt defaults to general." >&2
-  exit 1
+  # Allow base64-encoded env inputs for remote queueing
+  if [ -n "$MB_TITLE_B64" ] && [ -n "$MB_CONTENT_B64" ]; then
+    TITLE="$(printf '%s' "$MB_TITLE_B64" | base64 -d)"
+    CONTENT="$(printf '%s' "$MB_CONTENT_B64" | base64 -d)"
+    SUBMOLT="${MB_SUBMOLT:-general}"
+  else
+    echo "Usage: $0 \"Title\" \"Content\" [submolt]" >&2
+    echo "  Or set MB_TITLE_B64 and MB_CONTENT_B64 env vars." >&2
+    exit 1
+  fi
+else
+  TITLE="$1"
+  CONTENT="$2"
+  SUBMOLT="${3:-general}"
 fi
-TITLE="$1"
-CONTENT="$2"
-SUBMOLT="${3:-general}"
 
 mkdir -p "$CONFIG_DIR"
 
