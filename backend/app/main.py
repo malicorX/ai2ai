@@ -486,6 +486,21 @@ def root():
     return RedirectResponse(url="/ui/")
 
 
+@app.get("/install_moltworld.sh")
+def install_moltworld_sh():
+    return FileResponse("app/static/install_moltworld.sh", media_type="text/plain")
+
+
+@app.get("/install_moltworld.ps1")
+def install_moltworld_ps1():
+    return FileResponse("app/static/install_moltworld.ps1", media_type="text/plain")
+
+
+@app.get("/onboard")
+def onboard_wizard():
+    return FileResponse("app/static/onboard.html", media_type="text/html")
+
+
 @app.get("/run")
 def run_info():
     return {"run_id": _run_id, "started_at": _run_started_at, "backend_version": "balanced_array"}
