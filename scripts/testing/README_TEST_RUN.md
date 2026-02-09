@@ -175,6 +175,17 @@ else
 fi
 ```
 
+## LangGraph / OpenClaw step test (no backend)
+
+To verify the OpenClaw-driven graph (USE_LANGGRAPH=1) builds and runs one step with stub tools:
+
+```bash
+pip install -r agents/agent_template/requirements.txt
+python scripts/testing/test_langgraph_step.py
+```
+
+Set `OPENAI_API_BASE` and `OPENAI_API_KEY` for a full step (the decide node calls the LLM once). Without them, the script may fail at the LLM call with a clear error.
+
 ## Next Steps
 
 After a successful test run:

@@ -6,6 +6,7 @@ import re
 from typing import Any, Callable, Dict, List, Literal, Optional, TypedDict
 import hashlib
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from agent_template.langgraph_control import Action, AgentState, ProposedJob, Role
@@ -21,6 +22,9 @@ class Tools(TypedDict):
     jobs_review: Callable[..., bool]  # (job_id, approved, note, reviewed_by, penalty=None)
     do_job: Callable[[dict], str]
     chat_send: Callable[[str], None]
+    chat_recent: Callable[..., List[dict]]
+    world_move: Callable[[int, int], None]
+    board_post: Callable[[str, str], dict]
     trace_event: Callable[[str, str, dict], None]
     memory_retrieve: Callable[[str, int], List[dict]]
     memory_append: Callable[[str, str, List[str], float], None]
@@ -76,21 +80,18 @@ def _safe_float(x: Any, default: float = 0.0) -> float:
 
 def _pick_executor_job(state: AgentState) -> Optional[dict]:
     """
-    Select the next job for executor:
-    - created by agent_1
-    - matches current run tag (if known)
-    - newest first
+    Select the next job for executor: jobs created by another agent (proposer).
+    Matches current run tag when known; prefers claimed work first, then by reward/recency.
     """
-    # Prefer resuming jobs we already claimed (e.g., after a container restart),
-    # otherwise take a new open job.
+    my_id = str(state.get("agent_id") or "").strip()
     my_claimed = list(state.get("my_claimed_jobs") or [])
     jobs = my_claimed + list(state.get("open_jobs") or [])
     if not jobs:
         return None
     run_tag = _run_tag(state.get("run_id", ""))
-    jobs = [j for j in jobs if str(j.get("created_by") or "") == "agent_1"]
-    # Prefer run-tagged jobs for the current run, but fall back to any agent_1 jobs if none are tagged.
-    # (Some jobs created via conversation flow historically missed the run tag.)
+    # Executor takes jobs created by the proposer (not by self).
+    jobs = [j for j in jobs if str(j.get("created_by") or "").strip() != my_id]
+    # Prefer run-tagged jobs for the current run, else any proposer jobs.
     tagged = jobs
     if run_tag:
         tagged = [j for j in jobs if (run_tag in str(j.get("title") or "")) or (run_tag in str(j.get("body") or ""))]
@@ -112,24 +113,23 @@ def _pick_executor_job(state: AgentState) -> Optional[dict]:
 def _pick_redo_job(state: AgentState, failed_job_id: str) -> Optional[dict]:
     """
     Prefer redo/fix jobs when a prior job was rejected:
-    - matches run tag (if known)
-    - created by agent_1
-    - title/body indicates redo OR references failed job id
+    - created by proposer (not self)
+    - run tag and redo/fix markers
     - newest first
     """
     fid = (failed_job_id or "").strip()
+    my_id = str(state.get("agent_id") or "").strip()
     if not fid:
         return None
     jobs = list(state.get("open_jobs") or [])
     if not jobs:
         return None
     run_tag = _run_tag(state.get("run_id", ""))
-    # Tag-first: proposer emits [redo_for:<id>] for deterministic routing.
     tag = f"[redo_for:{fid}]"
     tagged = []
     out = []
     for j in jobs:
-        if str(j.get("created_by") or "") != "agent_1":
+        if str(j.get("created_by") or "").strip() == my_id:
             continue
         t = str(j.get("title") or "")
         b = str(j.get("body") or "")
@@ -151,9 +151,11 @@ def _pick_redo_job(state: AgentState, failed_job_id: str) -> Optional[dict]:
 
 
 def _proposer_has_open_job(state: AgentState) -> bool:
+    """True if the proposer (this agent) already has an open job for this run."""
+    my_id = str(state.get("agent_id") or "").strip()
     run_tag = _run_tag(state.get("run_id", ""))
     for j in state.get("open_jobs") or []:
-        if str(j.get("created_by") or "") != "agent_1":
+        if str(j.get("created_by") or "").strip() != my_id:
             continue
         if run_tag and not ((run_tag in str(j.get("title") or "")) or (run_tag in str(j.get("body") or ""))):
             continue
@@ -161,13 +163,17 @@ def _proposer_has_open_job(state: AgentState) -> bool:
     return False
 
 
-def node_perceive(state: AgentState, config: Any = None) -> AgentState:
+def node_perceive(state: AgentState, config: RunnableConfig | None = None) -> AgentState:
     tools = _get_tools(state, config)
-    # Expect world already in state; refresh open jobs.
+    # Expect world already in state; refresh open jobs and chat for LLM-driven behavior.
     try:
         state["open_jobs"] = tools["jobs_list"](status="open", limit=50)
     except Exception:
         state["open_jobs"] = []
+    try:
+        state["chat_recent"] = (tools.get("chat_recent") or (lambda limit=20: []))(20)
+    except Exception:
+        state["chat_recent"] = []
     # Executor robustness: also fetch jobs already claimed by THIS agent so we can resume after restarts.
     if state.get("role") == "executor":
         try:
@@ -258,7 +264,7 @@ def node_perceive(state: AgentState, config: Any = None) -> AgentState:
     return state
 
 
-def node_recall(state: AgentState, config: Any = None) -> AgentState:
+def node_recall(state: AgentState, config: RunnableConfig | None = None) -> AgentState:
     tools = _get_tools(state, config)
     # Retrieve failure patterns and success patterns to guide decisions.
     # Priority: recent verification failures, rejection patterns, what worked.
@@ -431,11 +437,150 @@ def _count_rejections_for_root(rejected_jobs: List[dict], root_id: str) -> int:
     return n
 
 
-def node_decide(state: AgentState, config: Any = None) -> AgentState:
+def _llm_decide(state: AgentState, tools: Tools) -> Optional[dict]:
+    """
+    Ask the LLM (OpenClaw-style) to choose exactly one action. All agent behavior must be done by the LLM.
+    Returns an action dict, or None if noop or parse failure (fallback to code logic).
+    Actions: noop | move | chat_say | board_post | propose_job | execute_job | review_job.
+    """
+    world = state.get("world") or {}
+    agents = world.get("agents") or []
+    chat_msgs = state.get("chat_recent") or []
+    balance = _safe_float(state.get("balance"), 0.0)
+    agent_id = str(state.get("agent_id") or "")
+    persona = str(state.get("persona") or "")[:400]
+    role = str(state.get("role") or "executor")
+    run_tag = _run_tag(state.get("run_id") or "")
+
+    agents_line = "; ".join(
+        f"{a.get('agent_id', '?')} at ({a.get('x', 0)},{a.get('y', 0)})"
+        for a in agents[:5]
+    ) or "none"
+    chat_lines = []
+    for m in chat_msgs[-8:]:
+        sid = m.get("sender_id") or "?"
+        text = (m.get("text") or "")[:150]
+        chat_lines.append(f"  {sid}: {text}")
+    chat_block = "\n".join(chat_lines) if chat_lines else "  (no recent messages)"
+
+    open_jobs = state.get("open_jobs") or []
+    my_claimed = state.get("my_claimed_jobs") or []
+    my_submitted = state.get("my_submitted_jobs") or []
+    valid_job_ids = set()
+    jobs_desc = []
+    for j in (my_claimed + open_jobs)[:15]:
+        jid = str(j.get("job_id") or "")
+        if jid:
+            valid_job_ids.add(jid)
+            jobs_desc.append(f"  {jid}: {str(j.get('title') or '')[:80]}")
+    for j in my_submitted[:5]:
+        jid = str(j.get("job_id") or "")
+        if jid:
+            valid_job_ids.add(jid)
+            jobs_desc.append(f"  [AWAITING_REVIEW] {jid}: {str(j.get('title') or '')[:60]}")
+    jobs_block = "\n".join(jobs_desc) if jobs_desc else "  (none)"
+    has_open = bool([j for j in open_jobs if str(j.get("created_by") or "") == str(agent_id)])
+    has_submitted = bool(my_submitted)
+
+    sys_decide = (
+        "You are an agent in a 2D world. You have a role (proposer or executor), see other agents, chat, and jobs.\n"
+        "Choose exactly ONE action per turn. Reply with JSON only.\n"
+        "Actions and required keys:\n"
+        "- noop: {\"kind\": \"noop\"}\n"
+        "- move: {\"kind\": \"move\", \"dx\": -1|0|1, \"dy\": -1|0|1}\n"
+        "- chat_say: {\"kind\": \"chat_say\", \"text\": \"...\"}\n"
+        "- board_post: {\"kind\": \"board_post\", \"title\": \"...\", \"body\": \"...\"}\n"
+        "- propose_job: {\"kind\": \"propose_job\", \"job\": {\"title\": \"...\", \"body\": \"...\", \"reward\": 0.01}}\n"
+        "  (proposer only; title should be clear; body needs Acceptance criteria and Evidence required)\n"
+        "- execute_job: {\"kind\": \"execute_job\", \"job_id\": \"<uuid>\"}\n"
+        "  (executor only; job_id must be from open/claimed jobs list)\n"
+        "- review_job: {\"kind\": \"review_job\", \"job_id\": \"<uuid>\", \"approved\": true|false, \"note\": \"...\"}\n"
+        "  (proposer only; job_id must be from AWAITING_REVIEW list)\n"
+        "Rules: proposer must review submitted jobs before proposing new ones. Executor should execute when jobs available."
+    )
+    user_decide = (
+        f"Role: {role}\nAgent: {agent_id}\nPersona: {persona}\n"
+        f"Balance: {balance} ai$\n"
+        f"Agents: {agents_line}\n"
+        f"Recent chat:\n{chat_block}\n"
+        f"Jobs (open/claimed/submitted):\n{jobs_block}\n"
+        f"Proposer has open job: {has_open}\nProposer has submitted jobs awaiting review: {has_submitted}\n"
+        "Output one JSON object now."
+    )
+    try:
+        raw = llm_chat(sys_decide, user_decide, max_tokens=600)
+        obj = _extract_json_obj(raw) or {}
+        kind = str(obj.get("kind") or "noop").strip().lower()
+        if kind == "noop":
+            return None
+
+        if kind == "move":
+            dx = max(-1, min(1, int(obj.get("dx", 0))))
+            dy = max(-1, min(1, int(obj.get("dy", 0))))
+            return {"kind": "move", "dx": dx, "dy": dy, "note": "llm_decide"}
+
+        if kind == "chat_say":
+            text = str(obj.get("text") or "").strip()[:500]
+            if text:
+                return {"kind": "chat_say", "text": text, "note": "llm_decide"}
+            return None
+
+        if kind == "board_post":
+            title = str(obj.get("title") or "").strip()[:200]
+            body = str(obj.get("body") or "").strip()[:2000]
+            if title or body:
+                return {"kind": "board_post", "title": title or "(no title)", "body": body or "", "note": "llm_decide"}
+            return None
+
+        if kind == "propose_job":
+            if role != "proposer" or has_submitted or has_open:
+                return None
+            job = obj.get("job") or {}
+            title = str(job.get("title") or "").strip()[:200]
+            body = str(job.get("body") or "").strip()[:4000]
+            reward = max(0.01, min(0.5, _safe_float(job.get("reward"), 0.01)))
+            if not title or not body:
+                return None
+            if run_tag and run_tag not in title:
+                title = f"{run_tag} {title}".strip()
+            return {"kind": "propose_job", "job": {"title": title, "body": body, "reward": reward}, "note": "llm_decide"}
+
+        if kind == "execute_job":
+            if role != "executor":
+                return None
+            jid = str(obj.get("job_id") or "").strip()
+            if jid not in valid_job_ids:
+                return None
+            job = next((j for j in (my_claimed + open_jobs) if str(j.get("job_id") or "") == jid), None)
+            return {"kind": "execute_job", "job_id": jid, "job_obj": job or {}, "note": "llm_decide"}
+
+        if kind == "review_job":
+            if role != "proposer" or not my_submitted:
+                return None
+            jid = str(obj.get("job_id") or "").strip()
+            sub_job = next((j for j in my_submitted if str(j.get("job_id") or "") == jid), None)
+            if not sub_job:
+                return None
+            approved = bool(obj.get("approved", False))
+            note = str(obj.get("note") or "")[:500]
+            return {"kind": "review_job", "job_id": jid, "job_obj": sub_job, "approved": approved, "note": note, "note_extra": "llm_decide"}
+    except Exception:
+        pass
+    return None
+
+
+def node_decide(state: AgentState, config: RunnableConfig | None = None) -> AgentState:
     tools = _get_tools(state, config)
     role: Role = state.get("role", "executor")  # type: ignore[assignment]
     run_tag = _run_tag(state.get("run_id", ""))
 
+    # OpenClaw-driven: LLM chooses all actions (move, chat_say, board_post, propose_job, execute_job, review_job).
+    llm_action = _llm_decide(state, tools)
+    if llm_action is not None:
+        state["action"] = llm_action
+        return state
+
+    # Fallback when LLM returns noop or parse fails: use code-based decide so the agent does not get stuck.
     # Outcome awareness: handle approved/rejected once, then continue normally.
     lj = state.get("last_job") or {}
     lj_status = str(lj.get("status") or "")
@@ -813,12 +958,13 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
         handled = str(state.get("handled_rejection_job_id") or "").strip()
         rej = list(state.get("rejected_jobs") or [])
         if rej:
-            # Only consider jobs in this run proposed by agent_1 and executed by agent_2.
+            # Proposer: consider rejected jobs I created that the executor submitted.
+            my_id = str(state.get("agent_id") or "").strip()
             cand = []
             for j in rej:
-                if str(j.get("created_by") or "") != "agent_1":
+                if str(j.get("created_by") or "").strip() != my_id:
                     continue
-                if str(j.get("submitted_by") or "") != "agent_2":
+                if str(j.get("submitted_by") or "").strip() == my_id:
                     continue
                 if run_tag and not ((run_tag in str(j.get("title") or "")) or (run_tag in str(j.get("body") or ""))):
                     continue
@@ -1152,15 +1298,16 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
 
     # executor
     # If we recently failed verification, prioritize a redo/fix job that references that failure.
-    # Use most recent rejected job (submitted_by=agent_2) as the primary "failed id".
+    # Use most recent rejected job I submitted (executor) as the primary "failed id".
     failed_id = ""
     try:
+        my_id = str(state.get("agent_id") or "").strip()
         run_tag = _run_tag(state.get("run_id", ""))
         cand = []
         for j in (state.get("rejected_jobs") or [])[:50]:
-            if str(j.get("submitted_by") or "") != "agent_2":
+            if str(j.get("submitted_by") or "").strip() != my_id:
                 continue
-            if str(j.get("created_by") or "") != "agent_1":
+            if str(j.get("created_by") or "").strip() == my_id:
                 continue
             if run_tag and not ((run_tag in str(j.get("title") or "")) or (run_tag in str(j.get("body") or ""))):
                 continue
@@ -1182,10 +1329,55 @@ def node_decide(state: AgentState, config: Any = None) -> AgentState:
     return state
 
 
-def node_act(state: AgentState, config: Any = None) -> AgentState:
+def node_act(state: AgentState, config: RunnableConfig | None = None) -> AgentState:
     tools = _get_tools(state, config)
     act = state.get("action") or {"kind": "noop"}
     kind = act.get("kind", "noop")
+
+    if kind == "move":
+        dx = int(act.get("dx", 0))
+        dy = int(act.get("dy", 0))
+        if tools.get("world_move"):
+            try:
+                tools["world_move"](dx, dy)
+                state["acted"] = True
+                try:
+                    tools["trace_event"]("action", "world_move", {"dx": dx, "dy": dy})
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        return state
+
+    if kind == "chat_say":
+        text = str(act.get("text") or "").strip()
+        if text and tools.get("chat_send"):
+            try:
+                tools["chat_send"](text)
+                state["acted"] = True
+                try:
+                    tools["trace_event"]("action", "chat_say", {"len": len(text)})
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        return state
+
+    if kind == "board_post":
+        title = str(act.get("title") or "").strip()[:200]
+        body = str(act.get("body") or "").strip()[:5000]
+        if tools.get("board_post") and title:
+            try:
+                out = tools["board_post"](title, body)
+                if out.get("ok"):
+                    state["acted"] = True
+                    try:
+                        tools["trace_event"]("action", "board_post", {"title": title[:80]})
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        return state
 
     if kind == "propose_job":
         job = act.get("job") or {}
@@ -1332,7 +1524,6 @@ def node_act(state: AgentState, config: Any = None) -> AgentState:
             job = full or job
         except Exception:
             pass
-        task_text = ((job.get("title") or "") + "\n\n" + (job.get("body") or ""))[:8000]
         sub_text = (job.get("submission") or "")[:8000]
         if not sub_text:
             try:
@@ -1340,7 +1531,14 @@ def node_act(state: AgentState, config: Any = None) -> AgentState:
             except Exception:
                 pass
             return state
-        prompt = f"""TASK:
+        # When OpenClaw/LLM already decided (approved in action), use that; else call LLM to judge.
+        ok, reason = False, "llm call failed"
+        if "approved" in act:
+            ok = bool(act.get("approved"))
+            reason = str(act.get("note") or "")[:500] or ("approved" if ok else "rejected")
+        else:
+            task_text = ((job.get("title") or "") + "\n\n" + (job.get("body") or ""))[:8000]
+            prompt = f"""TASK:
 {task_text}
 
 SUBMISSION:
@@ -1348,32 +1546,31 @@ SUBMISSION:
 
 Was this task completed successfully? Reply with ONLY a JSON object, no other text:
 {{"ok": true or false, "reason": "brief explanation"}}"""
-        try:
-            out = llm_chat(
-                "You are a reviewer. Output only valid JSON: {\"ok\": true or false, \"reason\": \"...\"}.",
-                prompt,
-                max_tokens=200,
-            )
-        except Exception:
-            out = ""
-        ok, reason = False, "llm call failed"
-        if out:
             try:
-                i = out.find("{")
-                if i >= 0:
-                    depth = 0
-                    for k, c in enumerate(out[i:], start=i):
-                        if c == "{":
-                            depth += 1
-                        elif c == "}":
-                            depth -= 1
-                            if depth == 0:
-                                parsed = json.loads(out[i : k + 1])
-                                ok = bool(parsed.get("ok", False))
-                                reason = str(parsed.get("reason", ""))[:500] or ("ok" if ok else "not ok")
-                                break
+                out = llm_chat(
+                    "You are a reviewer. Output only valid JSON: {\"ok\": true or false, \"reason\": \"...\"}.",
+                    prompt,
+                    max_tokens=200,
+                )
             except Exception:
-                reason = "parse failed"
+                out = ""
+            if out:
+                try:
+                    i = out.find("{")
+                    if i >= 0:
+                        depth = 0
+                        for k, c in enumerate(out[i:], start=i):
+                            if c == "{":
+                                depth += 1
+                            elif c == "}":
+                                depth -= 1
+                                if depth == 0:
+                                    parsed = json.loads(out[i : k + 1])
+                                    ok = bool(parsed.get("ok", False))
+                                    reason = str(parsed.get("reason", ""))[:500] or ("ok" if ok else "not ok")
+                                    break
+                except Exception:
+                    reason = "parse failed"
         aid = str(state.get("agent_id") or "agent_1")
         penalty_val: Optional[float] = None
         if not ok:
@@ -1527,7 +1724,7 @@ Was this task completed successfully? Reply with ONLY a JSON object, no other te
     return state
 
 
-def node_reflect(state: AgentState, config: Any = None) -> AgentState:
+def node_reflect(state: AgentState, config: RunnableConfig | None = None) -> AgentState:
     tools = _get_tools(state, config)
     # Lightweight: store one rule-of-thumb so behavior improves over time.
     # Also: respond to job outcomes (approved/rejected/submitted) so agents internalize "submitted != done".

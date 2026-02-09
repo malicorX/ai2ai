@@ -1,8 +1,8 @@
 #!/bin/bash
-# Cron entry: check once per hour if there is something to post.
+# Cron entry: check periodically (e.g. every 2 hours) if there is something to post.
 # (a) If we already posted too many times today (daily cap), skip.
 # (b) If queue is empty, skip (no heartbeat — only post when there is meaningful content).
-# (c) If 30 min have not passed since last post, skip.
+# (c) If MIN_INTERVAL has not passed since last post, skip (default 2h; set MOLTBOOK_MIN_INTERVAL to override).
 # (d) Otherwise pop one item from queue, post it, update daily count and queue.
 #
 # Meaningful content is added to the queue by:
@@ -10,7 +10,7 @@
 # or by other scripts (e.g. after test run / deploy) or by moltbook_prepare_from_run_on_sparky.sh.
 #
 # Usage: ./moltbook_maybe_post_on_sparky.sh
-# Cron:  0 * * * * /path/moltbook_maybe_post_on_sparky.sh >> /tmp/moltbook_cron.log 2>&1
+# Cron:  0 */2 * * * /path/moltbook_maybe_post_on_sparky.sh >> /tmp/moltbook_cron.log 2>&1  (every 2 hours)
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -19,7 +19,8 @@ CONFIG_DIR="${HOME}/.config/moltbook"
 QUEUE_FILE="$CONFIG_DIR/queue.json"
 DAILY_POSTS_FILE="$CONFIG_DIR/daily_posts"
 LAST_POST="$CONFIG_DIR/last_post_ts"
-MIN_INTERVAL=1800   # 30 minutes
+# Best behavior: at most 1 post per 2 hours (7200). Override with MOLTBOOK_MIN_INTERVAL (seconds).
+MIN_INTERVAL="${MOLTBOOK_MIN_INTERVAL:-7200}"
 MAX_POSTS_PER_DAY="${MOLTBOOK_MAX_POSTS_PER_DAY:-5}"
 
 today=$(date -u +%Y-%m-%d)
@@ -34,7 +35,7 @@ if [ -f "$DAILY_POSTS_FILE" ]; then
   fi
 fi
 
-# 30 min since last post
+# Min interval since last post (default 2h)
 if [ -f "$LAST_POST" ]; then
   last=$(cat "$LAST_POST")
   elapsed=$((now - last))

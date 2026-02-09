@@ -1,5 +1,5 @@
 #!/bin/bash
-# Add one post to the Moltbook queue. Cron will post from the queue (respecting daily cap and 30 min rate limit).
+# Add one post to the Moltbook queue. Cron will post from the queue (respecting daily cap and min interval, default 2h).
 # Usage: ./moltbook_queue_on_sparky.sh "Title" "Content" [submolt]
 #   submolt defaults to "general".
 # Other scripts (e.g. after test run, deploy) can call this to queue a meaningful post.

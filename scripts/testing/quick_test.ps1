@@ -1,8 +1,17 @@
 # Quick PowerShell health check for AI Village system
+# Optional -BackendToken (or env BACKEND_TOKEN): use Bearer auth when backend requires it (e.g. sparky1:8000).
 
 param(
-    [string]$BackendUrl = "http://localhost:8000"
+    [string]$BackendUrl = "http://localhost:8000",
+    [string]$BackendToken = ""
 )
+
+if (-not $BackendToken) { $BackendToken = $env:BACKEND_TOKEN }
+$headers = @{}
+if ($BackendToken) {
+    $headers["Authorization"] = "Bearer $BackendToken"
+    Write-Host "Using Bearer token for backend requests." -ForegroundColor Gray
+}
 
 Write-Host "AI Village Health Check" -ForegroundColor Cyan
 Write-Host "==========================" -ForegroundColor Cyan
@@ -14,7 +23,9 @@ $ErrorActionPreference = "Continue"
 # Test 1: Backend health
 Write-Host "1. Testing backend health..." -NoNewline
 try {
-    $response = Invoke-WebRequest -Uri "$BackendUrl/world" -Method Get -TimeoutSec 5 -UseBasicParsing
+    $params = @{ Uri = "$BackendUrl/world"; Method = "Get"; TimeoutSec = 5; UseBasicParsing = $true }
+    if ($headers.Count -gt 0) { $params.Headers = $headers }
+    $response = Invoke-WebRequest @params
     if ($response.StatusCode -eq 200) {
         Write-Host " [OK] Backend is responding" -ForegroundColor Green
     } else {
@@ -23,13 +34,18 @@ try {
     }
 } catch {
     Write-Host " [FAIL] Backend is not responding: $_" -ForegroundColor Red
+    if ($_.Exception.Response.StatusCode -eq 401 -and -not $BackendToken) {
+        Write-Host "  Tip: Backend may require auth. Set BACKEND_TOKEN or pass -BackendToken, or use a public URL (e.g. https://www.theebie.de)." -ForegroundColor Yellow
+    }
     exit 1
 }
 
 # Test 2: World state
 Write-Host "2. Testing world state..." -NoNewline
 try {
-    $world = Invoke-RestMethod -Uri "$BackendUrl/world" -Method Get -TimeoutSec 5
+    $params = @{ Uri = "$BackendUrl/world"; Method = "Get"; TimeoutSec = 5 }
+    if ($headers.Count -gt 0) { $params.Headers = $headers }
+    $world = Invoke-RestMethod @params
     if ($world.agents) {
         $agentCount = $world.agents.Count
         Write-Host " [OK] World state accessible (agents: $agentCount)" -ForegroundColor Green
@@ -43,7 +59,9 @@ try {
 # Test 3: Jobs endpoint
 Write-Host "3. Testing jobs endpoint..." -NoNewline
 try {
-    $jobs = Invoke-RestMethod -Uri "$BackendUrl/jobs?limit=10" -Method Get -TimeoutSec 5
+    $params = @{ Uri = "$BackendUrl/jobs?limit=10"; Method = "Get"; TimeoutSec = 5 }
+    if ($headers.Count -gt 0) { $params.Headers = $headers }
+    $jobs = Invoke-RestMethod @params
     if ($jobs.jobs) {
         $openCount = ($jobs.jobs | Where-Object { $_.status -eq "open" }).Count
         Write-Host " [OK] Jobs endpoint working (open jobs: $openCount)" -ForegroundColor Green
@@ -57,7 +75,9 @@ try {
 # Test 4: Economy
 Write-Host "4. Testing economy endpoint..." -NoNewline
 try {
-    $balances = Invoke-RestMethod -Uri "$BackendUrl/economy/balances" -Method Get -TimeoutSec 5
+    $params = @{ Uri = "$BackendUrl/economy/balances"; Method = "Get"; TimeoutSec = 5 }
+    if ($headers.Count -gt 0) { $params.Headers = $headers }
+    $balances = Invoke-RestMethod @params
     if ($balances.balances) {
         Write-Host " [OK] Economy endpoint working" -ForegroundColor Green
     } else {
@@ -70,7 +90,9 @@ try {
 # Test 5: Memory
 Write-Host "5. Testing memory endpoint (agent_1)..." -NoNewline
 try {
-    $memory = Invoke-RestMethod -Uri "$BackendUrl/memory/agent_1/recent?limit=1" -Method Get -TimeoutSec 5
+    $params = @{ Uri = "$BackendUrl/memory/agent_1/recent?limit=1"; Method = "Get"; TimeoutSec = 5 }
+    if ($headers.Count -gt 0) { $params.Headers = $headers }
+    $memory = Invoke-RestMethod @params
     if ($memory.memories) {
         Write-Host " [OK] Memory endpoint working" -ForegroundColor Green
     } else {
@@ -83,7 +105,9 @@ try {
 # Test 6: Opportunities
 Write-Host "6. Testing opportunities endpoint..." -NoNewline
 try {
-    $opps = Invoke-RestMethod -Uri "$BackendUrl/opportunities?limit=5" -Method Get -TimeoutSec 5
+    $params = @{ Uri = "$BackendUrl/opportunities?limit=5"; Method = "Get"; TimeoutSec = 5 }
+    if ($headers.Count -gt 0) { $params.Headers = $headers }
+    $opps = Invoke-RestMethod @params
     if ($opps.items) {
         Write-Host " [OK] Opportunities endpoint working" -ForegroundColor Green
     } else {

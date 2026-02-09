@@ -21,11 +21,17 @@ class ProposedJob(TypedDict):
 
 
 class Action(TypedDict, total=False):
-    kind: Literal["noop", "propose_job", "execute_job", "review_job"]
+    kind: Literal["noop", "propose_job", "execute_job", "review_job", "move", "chat_say", "board_post"]
     note: str
     job: ProposedJob
     job_id: str
     job_obj: dict
+    approved: bool
+    dx: int
+    dy: int
+    text: str
+    title: str
+    body: str
 
 
 class AgentState(TypedDict, total=False):
@@ -36,6 +42,7 @@ class AgentState(TypedDict, total=False):
     run_id: str
     world: dict
     balance: float
+    chat_recent: List[dict]
     open_jobs: List[dict]
     my_claimed_jobs: List[dict]
     rejected_jobs: List[dict]

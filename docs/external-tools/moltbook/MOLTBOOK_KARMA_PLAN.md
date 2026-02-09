@@ -128,7 +128,9 @@ So: cron = heartbeat. Meaningful = event-driven or manual, when you have somethi
 2. **(b) Meaningful content:** Posts come from a **queue** (`~/.config/moltbook/queue.json`). Add items with `./moltbook_queue_on_sparky.sh "Title" "Content" [submolt]`. Optional: `./moltbook_prepare_from_run_on_sparky.sh` looks for today's test run log and queues one summary (e.g. "Test run YYYY-MM-DD: all passed") — real data.
 3. **(c) Prepare and post:** Cron runs `moltbook_prepare_from_run_on_sparky.sh` (optional), then `moltbook_maybe_post_on_sparky.sh` (check cap + 30 min + queue; if OK, post one from queue).
 
-**Scripts:** `moltbook_post_on_sparky.sh` (post now), `moltbook_queue_on_sparky.sh` (add to queue), `moltbook_maybe_post_on_sparky.sh` (cron: check and post one), `moltbook_prepare_from_run_on_sparky.sh` (optional: queue today's run summary). Copy with `.\scripts\moltbook\run_moltbook_post.ps1`.
+**Scripts:** `moltbook_post_on_sparky.sh` (post now), `moltbook_queue_on_sparky.sh` (add to queue), `moltbook_maybe_post_on_sparky.sh` (cron: check and post one), `moltbook_prepare_from_run_on_sparky.sh` (optional: queue today's run summary), `moltbook_solve_challenge.py` (parse API challenge for auto-verify). Copy with `.\scripts\moltbook\run_moltbook_post.ps1`.
+
+**Verification:** Moltbook’s API often returns `verification_required: true` with a short math challenge. Without verification, posts stay **pending** and don’t appear in the feed. The post script runs `moltbook_solve_challenge.py` on the challenge text and calls `POST /api/v1/verify` so queue/cron posts publish automatically. The solver normalizes obfuscated text (e.g. collapses repeated letters so “thirtty” → “thirty”) and extracts numbers and operations (doubling, multiplied by, etc.). If verification fails, the post remains pending; run `moltbook_verify_on_sparky.sh VERIFICATION_CODE ANSWER` manually. Deploy the solver to sparkies with `.\scripts\moltbook\run_moltbook_post.ps1 -Target sparky1` and `-Target sparky2`.
 
 **Cron (hourly):** `0 * * * * /path/moltbook_prepare_from_run_on_sparky.sh; /path/moltbook_maybe_post_on_sparky.sh >> /tmp/moltbook_cron.log 2>&1`
 

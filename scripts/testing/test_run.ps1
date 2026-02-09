@@ -5,6 +5,7 @@
 
 param(
     [string]$BackendUrl = "http://sparky1:8000",
+    [string]$BackendToken = "",
     [ValidateSet('json_list','gig','fiverr')][string]$TaskType = 'json_list',
     [int]$PollInterval = 3,
     [int]$MaxWaitSeconds = 300,
@@ -12,6 +13,10 @@ param(
     [int]$MaxWaitFiverrJobSeconds = 180,
     [switch]$ForceSubmit
 )
+
+if (-not $BackendToken) { $BackendToken = $env:BACKEND_TOKEN }
+$script:BackendHeaders = @{}
+if ($BackendToken) { $script:BackendHeaders["Authorization"] = "Bearer $BackendToken" }
 
 $ErrorActionPreference = "Continue"
 
@@ -41,7 +46,9 @@ function Write-Info {
 # Test backend connectivity
 function Test-Backend {
     try {
-        $response = Invoke-WebRequest -Uri "$BackendUrl/world" -Method Get -TimeoutSec 5 -UseBasicParsing
+        $params = @{ Uri = "$BackendUrl/world"; Method = "Get"; TimeoutSec = 5; UseBasicParsing = $true }
+        if ($script:BackendHeaders.Count -gt 0) { $params.Headers = $script:BackendHeaders }
+        $response = Invoke-WebRequest @params
         return $response.StatusCode -eq 200
     } catch {
         return $false
@@ -55,7 +62,9 @@ function Get-FiverrJobFromProposer {
     $start = Get-Date
     while (((Get-Date) - $start).TotalSeconds -lt $MaxWaitSeconds) {
         try {
-            $resp = Invoke-RestMethod -Uri "$BackendUrl/jobs?status=open&limit=100" -Method Get -TimeoutSec 10
+            $params = @{ Uri = "$BackendUrl/jobs?status=open&limit=100"; Method = "Get"; TimeoutSec = 10 }
+            if ($script:BackendHeaders.Count -gt 0) { $params.Headers = $script:BackendHeaders }
+            $resp = Invoke-RestMethod @params
             $jobs = $resp.jobs
             if (-not $jobs) { $jobs = @() }
             $fiverr = $jobs | Where-Object {
@@ -74,7 +83,9 @@ function New-TestJob {
     param([string]$Type = 'json_list')
     $runId = ""
     try {
-        $runResponse = Invoke-RestMethod -Uri "$BackendUrl/run" -Method Get -TimeoutSec 5
+        $params = @{ Uri = "$BackendUrl/run"; Method = "Get"; TimeoutSec = 5 }
+        if ($script:BackendHeaders.Count -gt 0) { $params.Headers = $script:BackendHeaders }
+        $runResponse = Invoke-RestMethod @params
         $runId = $runResponse.run_id
     } catch { }
     $runTag = if ($runId) { "[run:$runId] " } else { "" }
@@ -145,7 +156,9 @@ This is a unique test run created at $timestamp with ID $uniqueId.
     }
 
     try {
-        $response = Invoke-RestMethod -Uri "$BackendUrl/jobs/create" -Method Post -Body ($jobData | ConvertTo-Json -Depth 10) -ContentType "application/json" -TimeoutSec 10
+        $params = @{ Uri = "$BackendUrl/jobs/create"; Method = "Post"; Body = ($jobData | ConvertTo-Json -Depth 10); ContentType = "application/json"; TimeoutSec = 10 }
+        if ($script:BackendHeaders.Count -gt 0) { $params.Headers = $script:BackendHeaders }
+        $response = Invoke-RestMethod @params
         if ($response.ok -and $response.job) {
             return $response.job
         } else {
@@ -165,7 +178,9 @@ function Get-JobStatus {
     param([string]$JobId)
     
     try {
-        $response = Invoke-RestMethod -Uri "$BackendUrl/jobs/$JobId" -Method Get -TimeoutSec 5
+        $params = @{ Uri = "$BackendUrl/jobs/$JobId"; Method = "Get"; TimeoutSec = 5 }
+        if ($script:BackendHeaders.Count -gt 0) { $params.Headers = $script:BackendHeaders }
+        $response = Invoke-RestMethod @params
         return $response.job
     } catch {
         return $null
@@ -183,10 +198,9 @@ function Submit-MinimalDeliverable {
         $submission = "## Deliverable`n$jsonArray`n## Evidence`n- items=3`n- all_fields_present=true"
     }
     try {
-        $response = Invoke-RestMethod -Uri "$BackendUrl/jobs/$JobId/submit" -Method Post -Body (@{
-            agent_id = $AgentId
-            submission = $submission
-        } | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 10
+        $params = @{ Uri = "$BackendUrl/jobs/$JobId/submit"; Method = "Post"; Body = (@{ agent_id = $AgentId; submission = $submission } | ConvertTo-Json); ContentType = "application/json"; TimeoutSec = 10 }
+        if ($script:BackendHeaders.Count -gt 0) { $params.Headers = $script:BackendHeaders }
+        $response = Invoke-RestMethod @params
         return $response.ok
     } catch {
         Write-Status "Failed to submit: $_" "Red"
@@ -199,13 +213,10 @@ function Approve-Job {
     param([string]$JobId, [double]$Payout = 10.0)
     
     try {
-        $response = Invoke-RestMethod -Uri "$BackendUrl/jobs/$JobId/review" -Method Post -Body (@{
-            approved = $true
-            reviewed_by = "test_run_script"
-            note = "Test run approval - verification passed"
-            payout = $Payout
-            penalty = 0.0
-        } | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 10
+        $body = @{ approved = $true; reviewed_by = "test_run_script"; note = "Test run approval - verification passed"; payout = $Payout; penalty = 0.0 } | ConvertTo-Json
+        $params = @{ Uri = "$BackendUrl/jobs/$JobId/review"; Method = "Post"; Body = $body; ContentType = "application/json"; TimeoutSec = 10 }
+        if ($script:BackendHeaders.Count -gt 0) { $params.Headers = $script:BackendHeaders }
+        $response = Invoke-RestMethod @params
         return $response.ok
     } catch {
         Write-Status "Failed to approve: $_" "Red"
@@ -216,7 +227,9 @@ function Approve-Job {
 # Get economy balances
 function Get-Balances {
     try {
-        $response = Invoke-RestMethod -Uri "$BackendUrl/economy/balances" -Method Get -TimeoutSec 5
+        $params = @{ Uri = "$BackendUrl/economy/balances"; Method = "Get"; TimeoutSec = 5 }
+        if ($script:BackendHeaders.Count -gt 0) { $params.Headers = $script:BackendHeaders }
+        $response = Invoke-RestMethod @params
         return $response.balances
     } catch {
         return @{}
@@ -374,7 +387,11 @@ Write-Status "[OK] Backend is accessible" "Green"
 
 # For json_list we require balanced_array backend (verifier); for gig any backend is fine (proposer_review)
 $runInfo = $null
-try { $runInfo = Invoke-RestMethod -Uri "$BackendUrl/run" -Method Get -TimeoutSec 5 } catch { }
+try {
+    $params = @{ Uri = "$BackendUrl/run"; Method = "Get"; TimeoutSec = 5 }
+    if ($script:BackendHeaders.Count -gt 0) { $params.Headers = $script:BackendHeaders }
+    $runInfo = Invoke-RestMethod @params
+} catch { }
 $ver = $runInfo.backend_version
 if ($TaskType -eq 'json_list' -and (-not $ver -or $ver -ne "balanced_array")) {
     Write-Status "[FAIL] Backend at $BackendUrl is not the balanced_array version (got: '$ver')" "Red"
@@ -452,9 +469,9 @@ if (-not $claimed) {
     Write-Status "[!!] Job not claimed within timeout. Submitting manually..." "Yellow"
     # Try to claim and submit manually
     try {
-        Invoke-RestMethod -Uri "$BackendUrl/jobs/$jobId/claim" -Method Post -Body (@{
-            agent_id = "test_run_script"
-        } | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 10 | Out-Null
+        $params = @{ Uri = "$BackendUrl/jobs/$jobId/claim"; Method = "Post"; Body = (@{ agent_id = "test_run_script" } | ConvertTo-Json); ContentType = "application/json"; TimeoutSec = 10 }
+        if ($script:BackendHeaders.Count -gt 0) { $params.Headers = $script:BackendHeaders }
+        Invoke-RestMethod @params | Out-Null
         Write-Status "[OK] Job claimed manually" "Green"
         $claimed = $true
         $manualClaimedBy = "test_run_script"

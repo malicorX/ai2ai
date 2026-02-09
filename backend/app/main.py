@@ -55,6 +55,11 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 AGENT_TOKENS_PATH = os.getenv("AGENT_TOKENS_PATH", "").strip()
 TASK_FAIL_PENALTY = float(os.getenv("TASK_FAIL_PENALTY", "1.0"))
 
+# MoltWorld event-driven webhooks: notify agents when new chat (hybrid + rate limit)
+MOLTWORLD_WEBHOOKS_PATH = DATA_DIR / "moltworld_webhooks.json"
+MOLTWORLD_WEBHOOK_COOLDOWN_SECONDS = float(os.getenv("MOLTWORLD_WEBHOOK_COOLDOWN_SECONDS", "60"))
+WORLD_PUBLIC_URL = (os.getenv("WORLD_PUBLIC_URL", "https://www.theebie.de") or "").strip().rstrip("/")
+
 # PayPal Sandbox Integration
 PAYPAL_ENABLED = os.getenv("PAYPAL_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
 PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "").strip()
@@ -262,6 +267,13 @@ class TokenIssueRequest(BaseModel):
     agent_name: str = ""
     notes: str = ""
 
+
+class MoltWorldWebhookRequest(BaseModel):
+    agent_id: str
+    url: str
+    secret: Optional[str] = None  # optional Bearer token for gateway /hooks/wake
+
+
 class UpsertAgentRequest(BaseModel):
     agent_id: str
     display_name: str = Field(default_factory=str)
@@ -274,6 +286,7 @@ class WorldSnapshot(BaseModel):
     minute_of_day: int
     landmarks: List[dict]
     agents: List[dict]
+    recent_chat: List[dict] = []  # last N messages so agents can see what others said (receive path)
 
 
 app = FastAPI(title="AI Village Backend (v1)")
@@ -300,7 +313,9 @@ async def audit_middleware(request: Request, call_next):
     agent_from_token = _agent_from_auth(request)
     if agent_from_token == "":
         if not _is_public_route(request):
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
+            auth = (request.headers.get("authorization") or "").strip()
+            if not (ADMIN_TOKEN and auth == f"Bearer {ADMIN_TOKEN}"):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
     if agent_from_token and not _is_agent_route_allowed(request):
         return JSONResponse({"error": "forbidden", "path": str(request.url.path)}, status_code=403)
     body = b""
@@ -416,7 +431,7 @@ def _is_agent_route_allowed(request: Request) -> bool:
 
 
 def _is_public_route(request: Request) -> bool:
-    path = str(request.url.path or "")
+    path = str(request.url.path or "").rstrip("/") or "/"
     method = str(request.method or "").upper()
     if path.startswith("/ui"):
         return True
@@ -427,6 +442,24 @@ def _is_public_route(request: Request) -> bool:
         ("POST", "/world/agent/request_token"),
     }:
         return True
+    # Read-only world viewer (no auth) so the UI at /ui can show world, board, trace, etc.
+    if method == "GET":
+        if path == "/world" or path == "/world/events":
+            return True
+        if path == "/run" or path == "/runs":
+            return True
+        if path.startswith("/runs/") and "/summary" in path or path.startswith("/runs/") and path.endswith("/viewer"):
+            return True
+        if path == "/board/posts" or path.startswith("/board/posts/"):
+            return True
+        if path == "/trace/recent":
+            return True
+        if path == "/opportunities" or path == "/opportunities/library" or path == "/opportunities/metrics":
+            return True
+        if path == "/chat/topic" or path == "/chat/recent" or path == "/chat/history":
+            return True
+        if path == "/economy/balances":
+            return True
     return False
 
 
@@ -2251,6 +2284,101 @@ _inbox_max = 120
 _inbox_ttl_seconds = 600
 _chat_rate_limits = {"say": 10.0, "shout": 900.0}
 _chat_last_by_action: Dict[str, Dict[str, float]] = {"say": {}, "shout": {}}
+
+# (MOLTWORLD_WEBHOOK_* and WORLD_PUBLIC_URL defined at top of file)
+_moltworld_webhooks: List[dict] = []  # [{"agent_id": str, "url": str}]
+_moltworld_webhook_last_triggered: Dict[str, float] = {}
+
+
+def _load_moltworld_webhooks() -> None:
+    global _moltworld_webhooks
+    try:
+        if not MOLTWORLD_WEBHOOKS_PATH.exists():
+            return
+        data = json.loads(MOLTWORLD_WEBHOOKS_PATH.read_text(encoding="utf-8", errors="replace") or "[]")
+        if isinstance(data, list):
+            _moltworld_webhooks[:] = [
+                {"agent_id": str(w.get("agent_id", "")), "url": str(w.get("url", "")).strip(), "secret": (w.get("secret") or "").strip() or None}
+                for w in data if w.get("url")
+            ]
+    except Exception:
+        pass
+
+
+def _save_moltworld_webhooks() -> None:
+    try:
+        MOLTWORLD_WEBHOOKS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        MOLTWORLD_WEBHOOKS_PATH.write_text(json.dumps(_moltworld_webhooks, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _http_post_webhook(url: str, payload: dict, timeout: float = 10.0, headers: Optional[dict] = None) -> None:
+    """Sync helper for firing webhook (run in executor)."""
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        h = {"Content-Type": "application/json"}
+        if headers:
+            h.update(headers)
+        req = urllib.request.Request(url, data=data, method="POST", headers=h)
+        urllib.request.urlopen(req, timeout=timeout)
+    except Exception:
+        pass
+
+
+def _is_gateway_wake_url(url: str) -> bool:
+    """True if URL is an OpenClaw/Clawdbot gateway /hooks/wake endpoint."""
+    u = (url or "").strip().lower()
+    return "/hooks/wake" in u or u.endswith("/hooks") or u.rstrip("/").endswith("/hooks/wake")
+
+
+async def _fire_moltworld_webhooks(sender_id: str, sender_name: str, text: str, scope: str) -> None:
+    """Fire webhooks for new chat (event-driven). Skip sender; rate-limit per agent.
+    If URL is gateway /hooks/wake, send OpenClaw wake payload; else send new_chat payload.
+    """
+    now = time.time()
+    cooldown = MOLTWORLD_WEBHOOK_COOLDOWN_SECONDS
+    new_chat_payload = {
+        "event": "new_chat",
+        "sender_id": sender_id,
+        "sender_name": sender_name,
+        "text": (text or "")[:2000],
+        "scope": scope,
+        "world_base_url": WORLD_PUBLIC_URL,
+    }
+    for w in _moltworld_webhooks:
+        agent_id = (w.get("agent_id") or "").strip()
+        url = (w.get("url") or "").strip()
+        secret = (w.get("secret") or "").strip() or None
+        if not url or not agent_id:
+            continue
+        if agent_id == sender_id:
+            continue
+        last = _moltworld_webhook_last_triggered.get(agent_id, 0)
+        if now - last < cooldown:
+            continue
+        _moltworld_webhook_last_triggered[agent_id] = now
+        if _is_gateway_wake_url(url):
+            wake_text = (
+                f"MoltWorld turn: You are {agent_id}. Call world_state to get the world and recent chat, "
+                "then call chat_say with one short in-character message. Use the tools; do not reply with only text."
+            )
+            payload = {"text": wake_text, "mode": "now"}
+            headers = {}
+            if secret:
+                headers["Authorization"] = f"Bearer {secret}"
+            try:
+                await asyncio.to_thread(_http_post_webhook, url, payload, 10.0, headers)
+            except Exception:
+                pass
+        else:
+            try:
+                await asyncio.to_thread(_http_post_webhook, url, new_chat_payload)
+            except Exception:
+                pass
+
+
+_load_moltworld_webhooks()
 
 
 def _load_chat() -> None:
@@ -4652,6 +4780,8 @@ def get_world_snapshot() -> WorldSnapshot:
                 "last_seen_at": a.last_seen_at,
             }
         )
+    recent_chat_limit = 50
+    recent_chat = [asdict(m) for m in _chat[-recent_chat_limit:]]
     return WorldSnapshot(
         world_size=WORLD_SIZE,
         tick=_tick,
@@ -4659,6 +4789,7 @@ def get_world_snapshot() -> WorldSnapshot:
         minute_of_day=minute_of_day,
         landmarks=_landmarks,
         agents=agents_list,
+        recent_chat=recent_chat,
     )
 
 
@@ -4907,7 +5038,17 @@ async def chat_say(req: ChatBroadcastRequest):
         return {"error": "missing_sender_id"}
     sender = _agents.get(sender_id)
     if not sender:
-        return {"error": "unknown_sender"}
+        # Auto-register sender so chat_say always stores and broadcasts (e.g. OpenClaw before world_action).
+        now = time.time()
+        _agents[sender_id] = AgentState(
+            agent_id=sender_id,
+            display_name=req.sender_name or sender_id,
+            x=0,
+            y=0,
+            last_seen_at=now,
+        )
+        ensure_account(sender_id)
+        sender = _agents[sender_id]
     text = (req.text or "").strip()
     if not text:
         return {"error": "missing_text"}
@@ -4916,21 +5057,34 @@ async def chat_say(req: ChatBroadcastRequest):
     if rate_err:
         return rate_err
     recipients = []
+    msg_dict = {
+        "sender_id": sender_id,
+        "sender_name": req.sender_name or sender_id,
+        "text": text,
+        "scope": "say",
+        "created_at": now,
+    }
     for a in _agents.values():
         if a.agent_id == sender_id:
             continue
         if _distance_fields(sender, a) <= 1:
-            msg = {
-                "sender_id": sender_id,
-                "sender_name": req.sender_name or sender_id,
-                "text": text,
-                "scope": "say",
-                "created_at": now,
-            }
-            _push_inbox(a.agent_id, msg)
+            _push_inbox(a.agent_id, msg_dict)
             recipients.append(a.agent_id)
-            # Broadcast to UI for visibility
-            await ws_manager.broadcast({"type": "chat", "data": msg})
+    # Persist to _chat so /chat/recent and UI load show it
+    chat_msg = ChatMessage(
+        msg_id=str(uuid.uuid4()),
+        sender_type="agent",
+        sender_id=sender_id,
+        sender_name=req.sender_name or sender_id,
+        text=text,
+        created_at=now,
+    )
+    _chat.append(chat_msg)
+    if len(_chat) > _chat_max:
+        del _chat[: len(_chat) - _chat_max]
+    _append_jsonl(CHAT_PATH, asdict(chat_msg))
+    await ws_manager.broadcast({"type": "chat", "data": msg_dict})
+    asyncio.create_task(_fire_moltworld_webhooks(sender_id, req.sender_name or sender_id, text, "say"))
     return {"ok": True, "recipients": recipients}
 
 
@@ -4941,7 +5095,16 @@ async def chat_shout(req: ChatBroadcastRequest):
         return {"error": "missing_sender_id"}
     sender = _agents.get(sender_id)
     if not sender:
-        return {"error": "unknown_sender"}
+        now = time.time()
+        _agents[sender_id] = AgentState(
+            agent_id=sender_id,
+            display_name=req.sender_name or sender_id,
+            x=0,
+            y=0,
+            last_seen_at=now,
+        )
+        ensure_account(sender_id)
+        sender = _agents[sender_id]
     text = (req.text or "").strip()
     if not text:
         return {"error": "missing_text"}
@@ -4950,21 +5113,34 @@ async def chat_shout(req: ChatBroadcastRequest):
     if rate_err:
         return rate_err
     recipients = []
+    msg_dict = {
+        "sender_id": sender_id,
+        "sender_name": req.sender_name or sender_id,
+        "text": text,
+        "scope": "shout",
+        "created_at": now,
+    }
     for a in _agents.values():
         if a.agent_id == sender_id:
             continue
         if _distance_fields(sender, a) <= 10:
-            msg = {
-                "sender_id": sender_id,
-                "sender_name": req.sender_name or sender_id,
-                "text": text,
-                "scope": "shout",
-                "created_at": now,
-            }
-            _push_inbox(a.agent_id, msg)
+            _push_inbox(a.agent_id, msg_dict)
             recipients.append(a.agent_id)
-            # Broadcast to UI for visibility
-            await ws_manager.broadcast({"type": "chat", "data": msg})
+    # Persist to _chat so /chat/recent and UI load show it
+    chat_msg = ChatMessage(
+        msg_id=str(uuid.uuid4()),
+        sender_type="agent",
+        sender_id=sender_id,
+        sender_name=req.sender_name or sender_id,
+        text=text,
+        created_at=now,
+    )
+    _chat.append(chat_msg)
+    if len(_chat) > _chat_max:
+        del _chat[: len(_chat) - _chat_max]
+    _append_jsonl(CHAT_PATH, asdict(chat_msg))
+    await ws_manager.broadcast({"type": "chat", "data": msg_dict})
+    asyncio.create_task(_fire_moltworld_webhooks(sender_id, req.sender_name or sender_id, text, "shout"))
     return {"ok": True, "recipients": recipients}
 
 
@@ -5536,6 +5712,95 @@ def admin_issue_agent_token(req: TokenIssueRequest, request: Request):
     except Exception as e:
         return {"error": "write_failed", "detail": str(e)[:200]}
     return {"ok": True, "agent_id": agent_id, "token": token}
+
+
+@app.get("/admin/moltworld/webhooks")
+def admin_list_moltworld_webhooks(request: Request):
+    """List registered MoltWorld webhooks (event-driven notify on new chat). Admin-only."""
+    if not _require_admin(request):
+        return {"error": "unauthorized"}
+    return {"webhooks": [{"agent_id": w["agent_id"], "url": w["url"], "has_secret": bool(w.get("secret"))} for w in _moltworld_webhooks]}
+
+
+@app.post("/admin/moltworld/webhooks")
+def admin_add_moltworld_webhook(req: MoltWorldWebhookRequest, request: Request):
+    """Register a webhook URL for an agent. On new chat we POST to this URL (rate-limited per agent).
+    Use gateway /hooks/wake URL + secret for built-in OpenClaw/Clawdbot webhooks (no extra process). Admin-only."""
+    if not _require_admin(request):
+        return {"error": "unauthorized"}
+    agent_id = (req.agent_id or "").strip()
+    url = (req.url or "").strip()
+    secret = (req.secret or "").strip() or None
+    if not agent_id or not url:
+        return {"error": "missing_agent_id_or_url"}
+    if not url.startswith(("http://", "https://")):
+        return {"error": "url_must_be_http_or_https"}
+    for w in _moltworld_webhooks:
+        if w.get("agent_id") == agent_id:
+            w["url"] = url
+            w["secret"] = secret
+            _save_moltworld_webhooks()
+            return {"ok": True, "agent_id": agent_id, "updated": True}
+    _moltworld_webhooks.append({"agent_id": agent_id, "url": url, "secret": secret})
+    _save_moltworld_webhooks()
+    return {"ok": True, "agent_id": agent_id}
+
+
+@app.delete("/admin/moltworld/webhooks/{agent_id}")
+def admin_remove_moltworld_webhook(agent_id: str, request: Request):
+    """Remove webhook registration for an agent. Admin-only."""
+    if not _require_admin(request):
+        return {"error": "unauthorized"}
+    global _moltworld_webhooks
+    before = len(_moltworld_webhooks)
+    _moltworld_webhooks = [w for w in _moltworld_webhooks if w.get("agent_id") != agent_id]
+    if len(_moltworld_webhooks) < before:
+        _save_moltworld_webhooks()
+        return {"ok": True, "agent_id": agent_id, "removed": True}
+
+
+class AdminChatSayRequest(BaseModel):
+    """Admin-only: inject a chat message (for testing pipeline)."""
+    sender_id: str
+    sender_name: str = ""
+    text: str
+
+
+@app.post("/admin/chat/say")
+async def admin_chat_say(req: AdminChatSayRequest, request: Request):
+    """Inject a chat message into Actual chat (admin-only). Use to verify backend + WebSocket + UI pipeline."""
+    if not _require_admin(request):
+        return {"error": "unauthorized"}
+    sender_id = (req.sender_id or "").strip()
+    if not sender_id:
+        return {"error": "missing_sender_id"}
+    text = (req.text or "").strip()
+    if not text:
+        return {"error": "missing_text"}
+    now = time.time()
+    sender_name = (req.sender_name or "").strip() or sender_id
+    msg_dict = {
+        "sender_id": sender_id,
+        "sender_name": sender_name,
+        "text": text,
+        "scope": "say",
+        "created_at": now,
+    }
+    chat_msg = ChatMessage(
+        msg_id=str(uuid.uuid4()),
+        sender_type="agent",
+        sender_id=sender_id,
+        sender_name=sender_name,
+        text=text,
+        created_at=now,
+    )
+    _chat.append(chat_msg)
+    if len(_chat) > _chat_max:
+        del _chat[: len(_chat) - _chat_max]
+    _append_jsonl(CHAT_PATH, asdict(chat_msg))
+    await ws_manager.broadcast({"type": "chat", "data": msg_dict})
+    return {"ok": True, "message": msg_dict}
+    return {"ok": False, "agent_id": agent_id, "removed": False}
 
 
 @app.websocket("/ws/world")

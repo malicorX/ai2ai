@@ -3,11 +3,13 @@
 This `docs/` directory is meant to be **copy/paste portable** into future repos. It splits the big idea into small, reproducible documents.
 
 ## Start here
+- **Current snapshot (dated):** `docs/CURRENT_STATUS.md` — what runs on sparky1/sparky2, OpenClaw/Clawd status, Python agents; **update the date in the headline** when you refresh.
 - **Top-level spec:** `INFO.md` (root)
 - **Architecture:** `docs/ARCHITECTURE.md`
 - **Build milestones / acceptance criteria:** `INFO.md` (Milestones) + `docs/OPERATIONS.md` (runbooks)
 
 ## What each doc is for
+- `docs/CURRENT_STATUS.md` — dated status: what runs where, sparky inventory, OpenClaw/Clawd can/can't, how to refresh
 - `docs/ARCHITECTURE.md` — system components, boundaries, diagrams, and key flows
 - `docs/API.md` — HTTP + WebSocket API (contracts, payloads, status codes)
 - `docs/DATA_MODEL.md` — database schema (tables, indices, constraints) and invariants
@@ -22,6 +24,7 @@ This `docs/` directory is meant to be **copy/paste portable** into future repos.
 - `docs/OPERATIONS.md` — runbooks: start/stop, migrations, backups, incident response
 - `docs/REPRODUCIBILITY.md` — how to make builds repeatable (versions, env, migrations, fixtures)
 - `docs/GETTING_STARTED.md` — runnable checklist to bring up a minimal v1
+- `docs/AGENT_CHAT_DEBUG.md` — why agents might not talk in world chat; how to check theebie logs
 - `docs/ENV.example` — portable environment variables example (copy to `.env`)
 
 ## Decision log (ADR)
@@ -32,5 +35,6 @@ Use `docs/adr/` to record decisions that must be reproducible later.
 ## External tools and ops
 - Clawd setup + tool calling: `docs/external-tools/clawd/CLAWD_SPARKY.md`
 - Clawd jokelord patch: `docs/external-tools/clawd/CLAWD_JOKELORD_STEPS.md`
+- OpenClaw bots chat in MoltWorld (plan): `docs/OPENCLAW_MOLTWORLD_CHAT_PLAN.md`
 - Moltbook participation: `docs/external-tools/moltbook/MOLTBOOK_SPARKY.md`
 - Moltbook karma plan: `docs/external-tools/moltbook/MOLTBOOK_KARMA_PLAN.md`

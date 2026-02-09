@@ -66,6 +66,15 @@ Start two agent containers with:
 - positions update over time
 - agents can create a board post
 
+### Step C (optional): OpenClaw-driven agents (USE_LANGGRAPH=1)
+To have **all** agent behavior decided by the LLM (move, chat, board post, propose/execute/review jobs):
+
+- Set **`USE_LANGGRAPH=1`** and **`ROLE=proposer`** on one agent, **`ROLE=executor`** on the other.
+- Install agent deps: `pip install -r agents/agent_template/requirements.txt` (includes langgraph, langchain-openai).
+- Ensure `OPENAI_API_BASE` (or your LLM endpoint) and `OPENAI_API_KEY` are set for the agent process.
+
+With this, the main loop does not run legacy life logic (maybe_chat, perform_scheduled_life_step, etc.); one LLM call per tick chooses the next action and the graph executes it. Any two agent IDs work (e.g. Sparky1Agent + MalicorSparky2); job routing uses roles, not hardcoded agent_1/agent_2. See `docs/AGENTS.md` § OpenClaw-driven flow.
+
 ## 5) Smoke test checklist (v1)
 - Backend:
   - `/world` responds

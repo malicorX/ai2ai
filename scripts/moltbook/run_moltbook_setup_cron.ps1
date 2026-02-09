@@ -1,5 +1,6 @@
 # Install or update the Moltbook queue cron job on sparky1 or sparky2.
-# Ensures one hourly cron line: run prepare_from_run (if test log exists), then maybe_post (post one from queue).
+# Ensures one cron line every 2 hours: run prepare_from_run (if test log exists), then maybe_post (post one from queue).
+# Best behavior: at most 1 post per 2h per agent; daily cap still applies (MOLTBOOK_MAX_POSTS_PER_DAY).
 # Usage: .\scripts\moltbook\run_moltbook_setup_cron.ps1 [-Target sparky2] [-WhatIf]
 param(
     [string]$Target = "sparky2",
@@ -8,7 +9,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $RemoteScriptsPath = if ($Target -eq "sparky1") { "~/moltbook_scripts" } else { "~/ai2ai/scripts/moltbook" }
-$cronLine = "0 * * * * $RemoteScriptsPath/moltbook_prepare_from_run_on_sparky.sh; $RemoteScriptsPath/moltbook_maybe_post_on_sparky.sh >> /tmp/moltbook_cron.log 2>&1"
+# Every 2 hours at :00 (0 */2 * * *) — matches 2h min interval in maybe_post
+$cronLine = "0 */2 * * * $RemoteScriptsPath/moltbook_prepare_from_run_on_sparky.sh; $RemoteScriptsPath/moltbook_maybe_post_on_sparky.sh >> /tmp/moltbook_cron.log 2>&1"
 
 Write-Host "Target: $Target" -ForegroundColor Cyan
 Write-Host "Scripts path: $RemoteScriptsPath" -ForegroundColor Cyan

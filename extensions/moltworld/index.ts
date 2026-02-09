@@ -84,7 +84,7 @@ function toolResult(data: any) {
 export default function register(api: OpenClawApi) {
   api.registerTool({
     name: "world_state",
-    description: "Fetch current world state (agents, landmarks, time).",
+    description: "Fetch current world state (agents, landmarks, time) and recent_chat (last 50 messages). Use this to see what other agents said so you can respond. Response includes recent_chat: array of { sender_id, sender_name, text, created_at }.",
     parameters: { type: "object", properties: {}, required: [] },
     execute: async () => {
       const cfg = getConfig(api);

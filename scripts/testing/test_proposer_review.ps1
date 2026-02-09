@@ -3,8 +3,12 @@
 # Verifies: backend skips auto_verify (job stays submitted), then proposer review approves it.
 
 param(
-    [string]$BackendUrl = "http://sparky1:8000"
+    [string]$BackendUrl = "http://sparky1:8000",
+    [string]$BackendToken = ""
 )
+if (-not $BackendToken) { $BackendToken = $env:BACKEND_TOKEN }
+$script:BeHeaders = @{}
+if ($BackendToken) { $script:BeHeaders["Authorization"] = "Bearer $BackendToken" }
 
 $ErrorActionPreference = "Stop"
 
@@ -21,7 +25,8 @@ function Write-Section { param([string]$Title)
 
 # Backend ok?
 try {
-    $null = Invoke-RestMethod -Uri "$BackendUrl/world" -Method Get -TimeoutSec 5
+    $p = @{ Uri = "$BackendUrl/world"; Method = "Get"; TimeoutSec = 5 }; if ($script:BeHeaders.Count -gt 0) { $p.Headers = $script:BeHeaders }
+    $null = Invoke-RestMethod @p
 } catch {
     Write-Status "Backend not reachable at $BackendUrl" "Red"
     exit 1
@@ -30,7 +35,7 @@ Write-Status "Backend OK: $BackendUrl" "Green"
 
 # Run id for tagging
 $runId = ""
-try { $runId = (Invoke-RestMethod -Uri "$BackendUrl/run" -Method Get -TimeoutSec 5).run_id } catch {}
+try { $p = @{ Uri = "$BackendUrl/run"; Method = "Get"; TimeoutSec = 5 }; if ($script:BeHeaders.Count -gt 0) { $p.Headers = $script:BeHeaders }; $runId = (Invoke-RestMethod @p).run_id } catch {}
 $runTag = if ($runId) { "[run:$runId] " } else { "" }
 $guid = [System.Guid]::NewGuid().ToString().Substring(0,8)
 $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
@@ -52,7 +57,7 @@ Evidence required: short description + link or quote if applicable.
     reward = 5.0
     created_by = "agent_1"
 }
-$createResp = Invoke-RestMethod -Uri "$BackendUrl/jobs/create" -Method Post -Body ($jobPayload | ConvertTo-Json -Depth 6) -ContentType "application/json" -TimeoutSec 10
+$p = @{ Uri = "$BackendUrl/jobs/create"; Method = "Post"; Body = ($jobPayload | ConvertTo-Json -Depth 6); ContentType = "application/json"; TimeoutSec = 10 }; if ($script:BeHeaders.Count -gt 0) { $p.Headers = $script:BeHeaders }; $createResp = Invoke-RestMethod @p
 if (-not $createResp.ok -or -not $createResp.job) {
     Write-Status "Job create failed: $($createResp | ConvertTo-Json -Compress)" "Red"
     exit 1
@@ -62,7 +67,7 @@ Write-Status "Job created: $jobId" "Green"
 
 Write-Section "2. Claim as agent_2"
 try {
-    $claimResp = Invoke-RestMethod -Uri "$BackendUrl/jobs/$jobId/claim" -Method Post -Body '{"agent_id":"agent_2"}' -ContentType "application/json" -TimeoutSec 10
+    $p = @{ Uri = "$BackendUrl/jobs/$jobId/claim"; Method = "Post"; Body = '{"agent_id":"agent_2"}'; ContentType = "application/json"; TimeoutSec = 10 }; if ($script:BeHeaders.Count -gt 0) { $p.Headers = $script:BeHeaders }; $claimResp = Invoke-RestMethod @p
     if ($claimResp.ok) {
         Write-Status "Claimed by agent_2" "Green"
     } else {
@@ -83,7 +88,7 @@ Fiverr-style delivery for order $guid is complete.
 - Deliverable: 500-word blog post on time travel, delivered on time.
 "@
 $submitBody = @{ agent_id = "agent_2"; submission = $submission } | ConvertTo-Json
-$submitResp = Invoke-RestMethod -Uri "$BackendUrl/jobs/$jobId/submit" -Method Post -Body $submitBody -ContentType "application/json" -TimeoutSec 10
+$p = @{ Uri = "$BackendUrl/jobs/$jobId/submit"; Method = "Post"; Body = $submitBody; ContentType = "application/json"; TimeoutSec = 10 }; if ($script:BeHeaders.Count -gt 0) { $p.Headers = $script:BeHeaders }; $submitResp = Invoke-RestMethod @p
 if (-not $submitResp.ok) {
     Write-Status "Submit failed" "Red"
     exit 1
@@ -92,7 +97,7 @@ Write-Status "Submitted" "Green"
 
 Write-Section "4. Assert job stayed submitted (no auto_verify)"
 Start-Sleep -Seconds 1
-$j = Invoke-RestMethod -Uri "$BackendUrl/jobs/$jobId" -Method Get -TimeoutSec 5
+$p = @{ Uri = "$BackendUrl/jobs/$jobId"; Method = "Get"; TimeoutSec = 5 }; if ($script:BeHeaders.Count -gt 0) { $p.Headers = $script:BeHeaders }; $j = Invoke-RestMethod @p
 $j = $j.job
 if ($j.status -ne "submitted") {
     Write-Status "Expected status=submitted (proposer_review skips auto_verify), got: $($j.status)" "Red"
@@ -111,7 +116,7 @@ $reviewBody = @{
     payout = $null
     penalty = $null
 } | ConvertTo-Json
-$reviewResp = Invoke-RestMethod -Uri "$BackendUrl/jobs/$jobId/review" -Method Post -Body $reviewBody -ContentType "application/json" -TimeoutSec 10
+$p = @{ Uri = "$BackendUrl/jobs/$jobId/review"; Method = "Post"; Body = $reviewBody; ContentType = "application/json"; TimeoutSec = 10 }; if ($script:BeHeaders.Count -gt 0) { $p.Headers = $script:BeHeaders }; $reviewResp = Invoke-RestMethod @p
 if (-not $reviewResp.ok) {
     Write-Status "Review failed: $($reviewResp | ConvertTo-Json -Compress)" "Red"
     exit 1
@@ -120,7 +125,7 @@ Write-Status "Review accepted" "Green"
 
 Write-Section "6. Assert job is approved"
 Start-Sleep -Seconds 1
-$j2 = (Invoke-RestMethod -Uri "$BackendUrl/jobs/$jobId" -Method Get -TimeoutSec 5).job
+$p = @{ Uri = "$BackendUrl/jobs/$jobId"; Method = "Get"; TimeoutSec = 5 }; if ($script:BeHeaders.Count -gt 0) { $p.Headers = $script:BeHeaders }; $j2 = (Invoke-RestMethod @p).job
 if ($j2.status -ne "approved") {
     Write-Status "Expected status=approved, got: $($j2.status)" "Red"
     exit 1

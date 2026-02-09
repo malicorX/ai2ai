@@ -497,6 +497,38 @@ def _move_towards(world, tx: int, ty: int) -> None:
     _world_session.post(f"{WORLD_API}/agents/{AGENT_ID}/move", json={"dx": dx, "dy": dy}, timeout=10)
 
 
+def world_move(dx: int, dy: int) -> None:
+    """Execute a single move (dx, dy). Used by OpenClaw/LangGraph so the LLM decides direction."""
+    try:
+        _world_session.post(
+            f"{WORLD_API}/agents/{AGENT_ID}/move",
+            json={"dx": int(dx), "dy": int(dy)},
+            timeout=10,
+        )
+    except Exception as e:
+        trace_event("error", "world_move failed", {"error": str(e)[:200]})
+
+
+def board_post(title: str, body: str, audience: str = "humans", tags: list | None = None) -> dict:
+    """Create a bulletin board post. Used by OpenClaw/LangGraph so the LLM decides what to post."""
+    payload = {
+        "title": str(title or "")[:200],
+        "body": str(body or "")[:5000],
+        "audience": str(audience or "humans").strip(),
+        "author_type": "agent",
+        "author_id": AGENT_ID,
+        "tags": list(tags or [])[:10],
+    }
+    try:
+        r = _world_session.post(f"{WORLD_API}/board/posts", json=payload, timeout=10)
+        if r.status_code >= 400:
+            return {"ok": False, "error": (r.text or "")[:200]}
+        return r.json() or {"ok": True}
+    except Exception as e:
+        trace_event("error", "board_post failed", {"error": str(e)[:200]})
+        return {"ok": False, "error": str(e)[:200]}
+
+
 def trace_event(kind: str, summary: str, data=None) -> None:
     data = data or {}
     try:
@@ -513,6 +545,16 @@ def trace_event(kind: str, summary: str, data=None) -> None:
         )
     except Exception:
         return
+def _am_i_conversation_opener(world) -> bool:
+    """True if this agent should send the first message in a meetup (deterministic: smaller agent_id opens)."""
+    agents = world.get("agents", [])
+    other = next((a for a in agents if a.get("agent_id") != AGENT_ID), None)
+    if not other:
+        return True
+    other_id = str(other.get("agent_id") or "")
+    return (AGENT_ID or "") < other_id
+
+
 def _adjacent_to_other(world) -> bool:
     agents = world.get("agents", [])
     me = next((a for a in agents if a.get("agent_id") == AGENT_ID), None)
@@ -2244,6 +2286,9 @@ def maybe_langgraph_jobs(world) -> None:
         "jobs_review": jobs_review,
         "do_job": _do_job,
         "chat_send": _lg_chat_send,
+        "chat_recent": lambda limit=20: chat_recent(int(limit or 20)),
+        "world_move": world_move,
+        "board_post": lambda title, body, audience="humans", tags=None: board_post(str(title or ""), str(body or ""), audience=str(audience or "humans"), tags=tags or []),
         "trace_event": trace_event,
         "memory_retrieve": lambda q, k=8: memory_retrieve(q, k=int(k)),
         "memory_append": _lg_memory_append,
@@ -2348,10 +2393,12 @@ def maybe_trade(world) -> None:
     _last_trade_at = now
 
 
-def _is_my_turn(msgs) -> bool:
+def _is_my_turn(msgs, world=None) -> bool:
     # Turn-taking: only speak if the last chat message is NOT ours.
     if not msgs:
-        # deterministic: agent_1 starts conversations
+        # deterministic: opener (smaller agent_id) starts; if no world, fallback to legacy agent_1
+        if world is not None:
+            return _am_i_conversation_opener(world)
         return AGENT_ID.endswith("1")
     last = msgs[-1]
     return last.get("sender_id") != AGENT_ID
@@ -2885,7 +2932,7 @@ def maybe_set_topic(world) -> str:
         return ""
 
     msgs = chat_recent()
-    if not _is_my_turn(msgs):
+    if not _is_my_turn(msgs, world):
         return ""
 
     current = ""
@@ -2924,10 +2971,13 @@ def maybe_conversation_step(world) -> bool:
     """
     If a conversation is active, agents should prioritize staying in it:
     approach the partner and only do chat until the conversation ends.
+    When USE_LANGGRAPH=1, OpenClaw drives all behavior; skip this legacy step.
     """
     global _active_conv_id, _active_conv_other_id, _active_conv_last_total, _active_conv_turns
+    if USE_LANGGRAPH:
+        return False
     # Executor in LangGraph mode must not get "chat-locked" by sticky conversations; it should keep working jobs.
-    if USE_LANGGRAPH and ROLE == "executor":
+    if ROLE == "executor":
         if _active_conv_id:
             try:
                 trace_event("status", "executor ignored conversation (job priority)", {"conv": _active_conv_id})
@@ -3052,8 +3102,8 @@ def maybe_chat(world):
             s = by_mid.get(latest_mid) or set()
             if AGENT_ID not in s:
                 pending_mid = latest_mid
-            # If we already spoke but the other hasn't, keep the exchange alive (agent_1 waits/chases).
-            elif ("agent_1" in s) and ("agent_2" not in s) and AGENT_ID == "agent_1":
+            # If we already spoke but the other hasn't, keep the exchange alive (opener waits/chases).
+            elif AGENT_ID in s and len(s) == 1:
                 pending_mid = latest_mid
     except Exception:
         pending_mid = None
@@ -3092,13 +3142,13 @@ def maybe_chat(world):
                 conv_msgs.append(m)
         if conv_msgs:
             _active_conv_last_total = now_total
-            if not _is_my_turn(conv_msgs):
+            if not _is_my_turn(conv_msgs, world):
                 return
         else:
             # no messages yet with this conv id; allow normal turn rules below
             pass
     else:
-        if not _is_my_turn(msgs):
+        if not _is_my_turn(msgs, world):
             return
 
     p = min(1.0, CHAT_PROBABILITY * ADJACENT_CHAT_BOOST)
@@ -3120,10 +3170,10 @@ def maybe_chat(world):
             return
 
         other_sent = any((m.get("sender_id") != AGENT_ID) for m in window_msgs)
-        if not other_sent and AGENT_ID != "agent_1":
-            # wait for opener from agent_1
+        if not other_sent and not _am_i_conversation_opener(world):
+            # wait for opener from the agent with smaller agent_id
             return
-        # Otherwise proceed (agent_1 opener, or agent_2 reply)
+        # Otherwise proceed (opener sends first, then the other replies)
     else:
         if random.random() > p:
             return
@@ -3145,7 +3195,7 @@ def maybe_chat(world):
         lt = str(last_other.get("text") or "")
         if _is_goodbye(lt):
             # Only send the goodbye acknowledgement if it's our turn within the conversation.
-            if conv_msgs and _is_my_turn(conv_msgs):
+            if conv_msgs and _is_my_turn(conv_msgs, world):
                 bye = f"[conv:{_active_conv_id}] Goodbye. [bye]"
                 chat_send(bye[:600])
             trace_event("status", "conversation ended (other said goodbye)", {"conv": _active_conv_id})
@@ -3174,6 +3224,7 @@ def maybe_chat(world):
         cprefix = f"[conv:{_active_conv_id}] " if _active_conv_id else ""
         mprefix = f"[meetup:{mid}] " if (not in_conv) and period_active and (mid is not None) else ""
         tprefix = f"{cprefix}{mprefix}[topic: {topic}] " if topic else f"{cprefix}{mprefix}"
+        am_opener = _am_i_conversation_opener(world)
         reply = None
         if USE_LANGGRAPH:
             # LLM-driven: keep it grounded in tools and current system state.
@@ -3218,7 +3269,7 @@ def maybe_chat(world):
                 "4) One clarifying question.\n"
             )
             dbg = None
-            if AGENT_ID == "agent_2":
+            if not am_opener:
                 dbg = {
                     "period_active": period_active,
                     "meetup_window": meetup_mode,
@@ -3251,7 +3302,7 @@ def maybe_chat(world):
             say = _sanitize_say(say)
 
             # Convergence: proposer creates a real backend task (job) and ends the conversation.
-            if in_conv and (AGENT_ID == "agent_1") and (ROLE == "proposer") and (not _active_conv_job_id):
+            if in_conv and am_opener and (ROLE == "proposer") and (not _active_conv_job_id):
                 if isinstance(job_obj, dict):
                     jtitle = str(job_obj.get("title") or "").strip()[:120]
                     jbody = str(job_obj.get("body") or "").strip()[:2000]
@@ -3299,12 +3350,12 @@ def maybe_chat(world):
         if reply is None:
             reply = _style(f"{tprefix}{_compose_reply(other_name, other_text, topic)}")
         force_send = in_conv or period_active
-        if force_send:
-            # In conversations/meetups, always send (don't let similarity heuristics suppress it).
-            if AGENT_ID == "agent_2":
-                trace_event("action", "chat_send attempt", {"mid": mid, "mode": "reply"})
-            # Only agent_1 may proactively end; agent_2 should end only when agent_1 ends or when replying to a goodbye.
-            if (AGENT_ID == "agent_2") and end_flag and (not _is_goodbye(other_text if last_other else "")):
+            if force_send:
+                # In conversations/meetups, always send (don't let similarity heuristics suppress it).
+                if not am_opener:
+                    trace_event("action", "chat_send attempt", {"mid": mid, "mode": "reply"})
+            # Only opener may proactively end; replier should end only when opener ends or when replying to a goodbye.
+            if (not am_opener) and end_flag and (not _is_goodbye(other_text if last_other else "")):
                 end_flag = False
 
             if in_conv and (end_flag or (conv_max_turns > 0 and int(_active_conv_turns) >= max(0, conv_max_turns - 1))):
@@ -3397,9 +3448,11 @@ def maybe_chat(world):
         msg = (_style(tprefix + random.choice(openers)))[:600]
 
     if in_conv or period_active:
+        trace_event("action", "chat_send opener", {"conv": _active_conv_id, "len": len(msg)})
         chat_send(msg)
     else:
         if not _too_similar_to_recent(msg):
+            trace_event("action", "chat_send opener", {"len": len(msg)})
             chat_send(msg)
             _remember_sent(msg)
     _last_sent_at = now
@@ -3526,17 +3579,18 @@ def main():
             if maybe_attend_events(world):
                 time.sleep(SLEEP_SECONDS)
                 continue
-            # live in the world (schedule-following navigation/activity)
-            perform_scheduled_life_step(world)
-            maybe_social_events(world)
-            # Free movement is driven by the schedule; do not force-walk to computer every tick.
+            # Live in the world: movement, chat, trade.
+            # When USE_LANGGRAPH=1, OpenClaw (LLM) drives all behavior via the graph; do not run legacy life logic.
+            if not USE_LANGGRAPH:
+                perform_scheduled_life_step(world)
+                maybe_social_events(world)
             maybe_update_balance()
             if not USE_LANGGRAPH:
                 maybe_work_jobs()
-            if not (USE_LANGGRAPH and ROLE == "executor"):
+            if not USE_LANGGRAPH:
                 maybe_chat(world)
             maybe_write_memory(world)
-            if not (USE_LANGGRAPH and ROLE == "executor"):
+            if not USE_LANGGRAPH:
                 maybe_trade(world)
         except Exception as e:
             print(f"[{AGENT_ID}] error: {e}")

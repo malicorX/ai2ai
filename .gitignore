@@ -26,6 +26,10 @@ build/
 
 # Secrets
 .env
+*_moltworld.env
+
+# Sparky SSH inventory (machine-specific, may contain paths)
+sparky_inventory/
 
 # Deployment / Generated files
 ai_ai2ai_deploy.tgz

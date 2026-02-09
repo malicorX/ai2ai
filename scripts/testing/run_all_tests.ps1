@@ -4,14 +4,29 @@
 # All output is logged to scripts/testing/run_all_tests.<yyyyMMdd-HHmmss>.log
 
 param(
-    [string]$BackendUrl = "http://sparky1:8000",
+    [string]$BackendUrl = "https://www.theebie.de",
+    [string]$BackendToken = "",
     [switch]$SkipVerifierUnit,
-    [switch]$IncludeFiverr
+    [switch]$IncludeFiverr,
+    [switch]$ForceSubmit
 )
+if (-not $BackendToken) { $BackendToken = $env:BACKEND_TOKEN }
+# When using theebie and no token set, try to fetch one agent token from theebie (for jobs API)
+if (-not $BackendToken -and $BackendUrl -match "theebie") {
+    try {
+        $json = ssh root@84.38.65.246 "cat /opt/ai_ai2ai/backend_data/agent_tokens.json 2>/dev/null || echo '{}'"
+        $tokenMap = $json | ConvertFrom-Json
+        foreach ($p in $tokenMap.PSObject.Properties) {
+            $BackendToken = $p.Name
+            Write-Host "Using agent token from theebie for jobs API." -ForegroundColor Gray
+            break
+        }
+    } catch { }
+}
 
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$root = Split-Path -Parent $scriptDir
+$root = Split-Path -Parent (Split-Path -Parent $scriptDir)   # repo root (ai_ai2ai)
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $logPath = Join-Path $scriptDir "run_all_tests.$timestamp.log"
 Start-Transcript -Path $logPath -Append:$false | Out-Null
@@ -46,7 +61,9 @@ try {
 
     Write-Host ""
     Write-Host "--- 2/5 quick_test ---" -ForegroundColor Yellow
-    & "$scriptDir\quick_test.ps1" -BackendUrl $BackendUrl
+    $quickArgs = @{ BackendUrl = $BackendUrl }
+    if ($BackendToken) { $quickArgs.BackendToken = $BackendToken }
+    & "$scriptDir\quick_test.ps1" @quickArgs
     if ($LASTEXITCODE -ne 0) {
         Write-Host "quick_test.ps1 failed (exit $LASTEXITCODE)" -ForegroundColor Red
         exit $LASTEXITCODE
@@ -54,7 +71,8 @@ try {
 
     Write-Host ""
     Write-Host "--- 3/5 test_run (gig / Fiverr-style) ---" -ForegroundColor Yellow
-    & "$scriptDir\test_run.ps1" -BackendUrl $BackendUrl -TaskType gig
+    $testRunArgs = @{ BackendUrl = $BackendUrl; TaskType = "gig" }; if ($BackendToken) { $testRunArgs.BackendToken = $BackendToken }; if ($ForceSubmit) { $testRunArgs.ForceSubmit = $true; $testRunArgs.MaxWaitSubmitSeconds = 45 }
+    & "$scriptDir\test_run.ps1" @testRunArgs
     if ($LASTEXITCODE -ne 0) {
         Write-Host "test_run.ps1 -TaskType gig failed (exit $LASTEXITCODE)" -ForegroundColor Red
         exit $LASTEXITCODE
@@ -62,7 +80,8 @@ try {
 
     Write-Host ""
     Write-Host "--- 4/5 test_proposer_review ---" -ForegroundColor Yellow
-    & "$scriptDir\test_proposer_review.ps1" -BackendUrl $BackendUrl
+    $tprArgs = @{ BackendUrl = $BackendUrl }; if ($BackendToken) { $tprArgs.BackendToken = $BackendToken }
+    & "$scriptDir\test_proposer_review.ps1" @tprArgs
     if ($LASTEXITCODE -ne 0) {
         Write-Host "test_proposer_review.ps1 failed (exit $LASTEXITCODE)" -ForegroundColor Red
         exit $LASTEXITCODE
@@ -70,7 +89,8 @@ try {
 
     Write-Host ""
     Write-Host "--- 5/5 test_proposer_review_reject ---" -ForegroundColor Yellow
-    & "$scriptDir\test_proposer_review_reject.ps1" -BackendUrl $BackendUrl -PenaltyAmount 1.0
+    $tprrArgs = @{ BackendUrl = $BackendUrl; PenaltyAmount = 1.0 }; if ($BackendToken) { $tprrArgs.BackendToken = $BackendToken }
+    & "$scriptDir\test_proposer_review_reject.ps1" @tprrArgs
     if ($LASTEXITCODE -ne 0) {
         Write-Host "test_proposer_review_reject.ps1 failed (exit $LASTEXITCODE)" -ForegroundColor Red
         exit $LASTEXITCODE
@@ -79,7 +99,7 @@ try {
     if ($IncludeFiverr) {
         Write-Host ""
         Write-Host "--- 6/6 test_run (fiverr / real Fiverr from agent_1) ---" -ForegroundColor Yellow
-        & "$scriptDir\test_run.ps1" -BackendUrl $BackendUrl -TaskType fiverr
+        $testRunArgs = @{ BackendUrl = $BackendUrl; TaskType = "fiverr" }; if ($BackendToken) { $testRunArgs.BackendToken = $BackendToken }; & "$scriptDir\test_run.ps1" @testRunArgs
         if ($LASTEXITCODE -ne 0) {
             Write-Host "test_run.ps1 -TaskType fiverr failed (exit $LASTEXITCODE). Ensure agent_1 is running and WEB_SEARCH_ENABLED=1, SERPER_API_KEY set." -ForegroundColor Red
             exit $LASTEXITCODE

@@ -1,12 +1,12 @@
 #!/bin/bash
-# Post once to Moltbook. Enforces 1 post per 30 minutes (Moltbook rate limit).
+# Post once to Moltbook. Enforces min interval between posts (default 2h; set MOLTBOOK_MIN_INTERVAL to override).
 # Usage: ./moltbook_post_on_sparky.sh "Title" "Content" [submolt]
 #   submolt defaults to "general". Example: ./moltbook_post_on_sparky.sh "Hello" "First post from MalicorSparky2."
 set -e
 CREDS="$HOME/.config/moltbook/credentials.json"
 LAST_POST="$HOME/.config/moltbook/last_post_ts"
 POST_LOG="$HOME/.config/moltbook/post_log.json"
-MIN_INTERVAL=1800   # 30 minutes in seconds
+MIN_INTERVAL="${MOLTBOOK_MIN_INTERVAL:-7200}"   # default 2 hours (best behavior: quality over quantity)
 
 if [ -z "$1" ] || [ -z "$2" ]; then
   # Allow base64-encoded env inputs for safe remote posting
@@ -41,7 +41,7 @@ if [ -z "$api_key" ]; then
   exit 1
 fi
 
-# Rate limit: 1 post per 30 min
+# Rate limit: 1 post per MIN_INTERVAL (default 2h)
 mkdir -p "$(dirname "$LAST_POST")"
 now=$(date +%s)
 if [ -f "$LAST_POST" ]; then
@@ -49,7 +49,7 @@ if [ -f "$LAST_POST" ]; then
   elapsed=$((now - last))
   if [ "$elapsed" -lt "$MIN_INTERVAL" ]; then
     remaining=$((MIN_INTERVAL - elapsed))
-    echo "Rate limit: wait $((remaining / 60)) more minutes before posting again (1 post per 30 min)." >&2
+    echo "Rate limit: wait $((remaining / 60)) more minutes before posting again." >&2
     exit 1
   fi
 fi
@@ -78,6 +78,33 @@ rm -f "$TMP"
 if [ "$HTTP" = "200" ] || [ "$HTTP" = "201" ]; then
   echo "$now" > "$LAST_POST"
   echo "Posted to submolt '$SUBMOLT': $TITLE"
+  # If Moltbook requires verification, solve challenge and verify so the post gets published
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+  if command -v jq >/dev/null 2>&1; then
+    v_code=$(echo "$BODY" | jq -r '.verification.code // empty')
+    v_challenge=$(echo "$BODY" | jq -r '.verification.challenge // empty')
+  else
+    _btmp=$(mktemp); printf '%s' "$BODY" > "$_btmp"
+    v_code=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); v=d.get('verification',{}); print(v.get('code',''))" "$_btmp" 2>/dev/null || true)
+    v_challenge=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); v=d.get('verification',{}); print(v.get('challenge',''))" "$_btmp" 2>/dev/null || true)
+    rm -f "$_btmp"
+  fi
+  if [ -n "$v_code" ] && [ -n "$v_challenge" ] && [ -f "$SCRIPT_DIR/moltbook_solve_challenge.py" ]; then
+    answer=$(echo "$v_challenge" | python3 "$SCRIPT_DIR/moltbook_solve_challenge.py" 2>/dev/null || true)
+    if [ -n "$answer" ]; then
+      verify_tmp=$(mktemp)
+      curl -s -o "$verify_tmp" -X POST "https://www.moltbook.com/api/v1/verify" \
+        -H "Authorization: Bearer $api_key" \
+        -H "Content-Type: application/json" \
+        -d "$(python3 -c "import json,sys; print(json.dumps({'verification_code': sys.argv[1], 'answer': sys.argv[2]}))" "$v_code" "$answer")"
+      if grep -q '"success":\s*true' "$verify_tmp" 2>/dev/null; then
+        echo "Verification succeeded; post is published."
+      else
+        echo "Verification failed or skipped; post may be pending. Response: $(cat "$verify_tmp")"
+      fi
+      rm -f "$verify_tmp"
+    fi
+  fi
   # Append to local post log for later reply tracking
   MB_BODY="$BODY" MB_TITLE="$TITLE" MB_SUBMOLT="$SUBMOLT" MB_POST_LOG="$POST_LOG" python3 - <<'PY'
 import json, os, sys, time

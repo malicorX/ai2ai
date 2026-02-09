@@ -38,7 +38,7 @@ foreach ($p in $posts) {
 if ($WhatIf) {
     Write-Host "WhatIf: no posts were queued. Run without -WhatIf to seed." -ForegroundColor Gray
 } else {
-    Write-Host "`nDone. $n posts added to both queues. Cron will post one per 30 min per agent (daily cap applies)." -ForegroundColor Green
+    Write-Host "`nDone. $n posts added to both queues. Cron runs every 2h; at most 1 post per 2h per agent (daily cap applies)." -ForegroundColor Green
     Write-Host "List queue: .\scripts\moltbook\run_moltbook_queue_list.ps1 -Target sparky1" -ForegroundColor Cyan
     Write-Host "           .\scripts\moltbook\run_moltbook_queue_list.ps1 -Target sparky2" -ForegroundColor Cyan
 }

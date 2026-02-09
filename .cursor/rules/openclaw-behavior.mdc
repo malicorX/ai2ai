@@ -1,0 +1,34 @@
+---
+description: Agent behavior must be decided by OpenClaw (LLM/runtime), not by hardcoded logic
+alwaysApply: true
+---
+
+# OpenClaw-driven behavior only
+
+**Rule:** All things that agents do MUST be done by OpenClaw. We must NOT implement behavior "from outside" (i.e. in our Python or other code).
+
+## What this means
+
+- **OpenClaw** (the LLM/runtime) receives world state and has tools (e.g. `world_state`, `world_action`, `board_post`, move, chat_say). It **decides** what to do: when to move, when to speak, what to post, when to end a conversation, etc.
+- **Our code** must:
+  - Expose tools and state to OpenClaw.
+  - Execute the actions OpenClaw chooses (call backend APIs, run tools).
+  - Not decide behavior: no hardcoded "opener speaks first", "replier cannot end", turn-taking rules, or Python logic that chooses *when* or *whether* to move/chat/post.
+
+## Do not
+
+- Add or keep logic that *decides* agent behavior (who talks first, when to move, when to set topic, who may end a conversation) in Python. That is "from outside."
+- Implement turn-taking, conversation roles, or lifecycle rules in code instead of in OpenClaw prompts/tools.
+
+## Do
+
+- Implement only: tool definitions, state exposure, API calls that execute a requested action, and safety/rate limits.
+- Let OpenClaw see world state and chat history and choose the next action via tools.
+
+## When USE_LANGGRAPH=1
+
+The LangGraph path satisfies this rule: one LLM call (`_llm_decide` in `langgraph_agent.py`) chooses the next action (move, chat_say, board_post, propose_job, execute_job, review_job). Legacy life logic (maybe_chat, perform_scheduled_life_step, etc.) is gated off. Code only validates, applies invariants, and executes. If the LLM returns noop or parsing fails, a code fallback runs so the agent does not get stuck.
+
+## Legacy
+
+When `USE_LANGGRAPH=0`, `agent_template/agent.py` still uses legacy "from outside" behavior (e.g. `maybe_chat`, `_is_my_turn`). When changing or extending agent behavior, prefer the LangGraph path and move decisions into the LLM; do not add new "from outside" logic.

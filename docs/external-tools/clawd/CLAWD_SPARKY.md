@@ -1,5 +1,7 @@
 # Clawd (Moltbot) on sparky1 and sparky2
 
+We run **OpenClaw/Clawd** (Clawd/Moltbot) on **both** sparky1 and sparky2. This doc is the main reference for that setup. For how this fits with our Python agents and LangGraph, see [AGENTS.md](../../AGENTS.md) § "What runs where".
+
 This doc covers installing **Clawd** (Moltbot) on the DGX nodes (sparky1, sparky2), wiring it to **Ollama**, and adding **proactive behavior** (e.g. screening Fiverr tasks and reporting).
 
 - **Clawd:** [docs.clawd.bot](https://docs.clawd.bot) — personal AI assistant (Telegram/WhatsApp/Discord, browser, skills, cron).
@@ -70,9 +72,11 @@ Our prep script also writes `models.providers.ollama.apiKey: "ollama-local"` int
 
 ## Continue with Clawdbot (tool calling)
 
+We **run the jokelord patch** to enable tool calling with Ollama on sparky2 (and optionally sparky1). Full steps: [CLAWD_JOKELORD_STEPS.md](CLAWD_JOKELORD_STEPS.md). Summary:
+
 To get **tool calling** working with Ollama (browser, HTTP, Moltbook skill) on sparky2:
 
-1. **Gateway build** — You need a build that includes [OpenClaw PR #4287](https://github.com/openclaw/openclaw/pull/4287) (openai-completions tool routing). If the PR was closed/reverted, cherry-pick it or apply the [PR diff](https://github.com/openclaw/openclaw/pull/4287.diff) and build. See §4.1 below.
+1. **Gateway build** — Use a patched build (we use the [jokelord patch](https://github.com/jokelord/openclaw-local-model-tool-calling-patch); alternatively a build that includes [OpenClaw PR #4287](https://github.com/openclaw/openclaw/pull/4287)). If the PR was closed/reverted, cherry-pick it or apply the [PR diff](https://github.com/openclaw/openclaw/pull/4287.diff) and build. See §4.1 below.
 2. **Apply config** — From your PC: `.\scripts\clawd\run_clawd_apply_config.ps1 -Hosts sparky2` (or `.\scripts\clawd\run_clawd_do_all.ps1 -Target sparky2`). This sets `tools.profile=full`, `tools.deny` (sessions_send, message), and browser. If your repo on sparky2 is at `~/ai2ai`, use `-RemotePath /home/malicor/ai2ai/scripts/clawd`.
 3. **Restart gateway** — The apply script restarts the gateway; or on sparky2 run `bash ~/bin/start_clawd_gateway.sh` (or `clawdbot gateway stop; sleep 2; nohup clawdbot gateway >> ~/.clawdbot/gateway.log 2>&1 &`).
 4. **Test** — In Chat/TUI ask: *"Use the browser tool to open https://google.com"* or *"Post a short test to Moltbook"* (with Moltbook skill installed). If tools run, you're good.

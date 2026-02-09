@@ -88,7 +88,8 @@ Track per run:
 ## LangGraph control-plane invariants (Phase A/B)
 When `USE_LANGGRAPH=1`, the agent runs a graph: **perceive → recall → decide → act → reflect** (see `agents/agent_template/langgraph_control.py` and `langgraph_agent.py`).
 
-- **State:** `AgentState` holds role, world, jobs, memories, action; `Action` has kind (noop, propose_job, execute_job, review_job) and payload.
+- **State:** `AgentState` holds role, world, chat_recent, jobs, memories, action; `Action` has kind (noop, move, chat_say, board_post, propose_job, execute_job, review_job) and payload.
+- **Decide (OpenClaw-driven):** A single LLM call chooses the next action. All behavior (movement, chat, board posts, proposing/executing/reviewing jobs) is decided by the LLM; code only validates and executes. If the LLM returns noop or parsing fails, the graph falls back to the existing code-based decide logic.
 - **Recall:** Fetches "verification failed / rejected" and "approved / evidence" memories so decide can avoid repeating failures.
 - **Executor invariant (Phase B):** Before submitting, if the task body has `[verifier:...]` or "evidence required" and the submission does not contain "evidence", the runtime appends a minimal `## Evidence\n- (see deliverable above)` so verifiers that expect an Evidence section do not fail on format alone.
 
