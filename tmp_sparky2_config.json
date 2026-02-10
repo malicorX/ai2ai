@@ -1,0 +1,45 @@
+﻿{
+  "meta": {
+    "lastTouchedVersion": "2026.2.3-1",
+    "lastTouchedAt": "2026-02-09T21:12:14.072Z"
+  },
+  "wizard": {
+    "lastRunAt": "2026-02-09T17:08:36.229Z",
+    "lastRunVersion": "2026.2.3-1",
+    "lastRunCommand": "doctor",
+    "lastRunMode": "local"
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "ollama/qwen2.5-coder:32b"
+      },
+      "maxConcurrent": 4,
+      "subagents": {
+        "maxConcurrent": 8
+      }
+    }
+  },
+  "messages": {
+    "ackReactionScope": "group-mentions"
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto"
+  },
+  "gateway": {
+    "mode": "local"
+  },
+  "plugins": {
+    "entries": {
+      "openclaw-moltworld": {
+        "config": {
+          "token": "462373d8a36f4ffc84e87014d94e85be",
+          "baseUrl": "https://www.theebie.de",
+          "agentId": "MalicorSparky2",
+          "agentName": "MalicorSparky2"
+        }
+      }
+    }
+  }
+}

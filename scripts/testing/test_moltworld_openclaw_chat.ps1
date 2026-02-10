@@ -10,6 +10,7 @@
 #
 # Optional -SecondAgentHost (e.g. sparky2): SSH to that host and run one MoltWorld cron turn so the other
 # agent reads recent_chat and can reply (use when theebie cannot reach sparky1/sparky2 for webhooks).
+# -SecondAgentId: only count a reply from this agent (e.g. MalicorSparky2); avoids false pass from other senders.
 param(
     [string]$BaseUrl = "",
     [string]$AdminToken = "",
@@ -18,6 +19,7 @@ param(
     [switch]$OpenerFromOpenClaw = $false,
     [string]$ExpectedOpener = "Hi, how are you?",
     [string]$FirstAgentId = "Sparky1Agent",
+    [string]$SecondAgentId = "MalicorSparky2",
     [string]$SecondAgentHost = "",
     [string]$SecondAgentClaw = "openclaw"
 )
@@ -80,7 +82,7 @@ Write-Host "  recent_chat count: $beforeCount" -ForegroundColor Gray
 if ($OpenerFromOpenClaw) {
     Write-Host "  Opener will come from OpenClaw (triggered by wrapper). Waiting for first message in world..." -ForegroundColor Gray
     # Wrapper already triggered Sparky1's /hooks/wake; allow time for the turn to run and chat_say to hit backend
-    Start-Sleep -Seconds 15
+    Start-Sleep -Seconds 30
     $worldMid = Invoke-RestMethod -Uri "$base/world" -Method Get
     $recentMid = @(); if ($worldMid.recent_chat) { $recentMid = @($worldMid.recent_chat) }
     $openerSeen = $false
@@ -125,7 +127,10 @@ if ($SecondAgentHost) {
         $runOut = ssh $SecondAgentHost "CLAW=$SecondAgentClaw bash /tmp/run_moltworld_chat_once.sh" 2>&1
         Write-Host "  Turn run: $runOut" -ForegroundColor Gray
     }
-    $maxWaitSec = 70
+    # Isolated turn (world_state + LLM + chat_say) often takes 60-120s. Wait before polling.
+    Write-Host "  Waiting 75s for turn to complete (world_state + chat_say)..." -ForegroundColor Gray
+    Start-Sleep -Seconds 75
+    $maxWaitSec = 90
     $pollIntervalSec = 10
 } else {
     Write-Host "  Backend fires webhook -> other agent runs world_state + chat_say (if theebie can reach it). Waiting for reply..." -ForegroundColor Gray
@@ -133,20 +138,28 @@ if ($SecondAgentHost) {
     $pollIntervalSec = 10
 }
 
-function Find-ReplyInRecentChat($recentList, $firstSenderId) {
-    $openerSeen = $false
+# Find a reply from SecondAgentId that appears after the most recent opener from FirstAgentId (by created_at).
+function Find-ReplyInRecentChat($recentList, $firstSenderId, $secondAgentId) {
+    $openerTime = $null
     foreach ($m in $recentList) {
         $sender = $m.sender_id -as [string]
-        if (-not $sender) { continue }
+        $t = $m.created_at
         if ($sender -eq $firstSenderId) {
-            $openerSeen = $true
-            continue
-        }
-        if ($openerSeen -and $sender -ne $firstSenderId) {
-            return $m
+            if ($null -eq $t) { continue }
+            if ($null -eq $openerTime -or $t -gt $openerTime) { $openerTime = $t }
         }
     }
-    return $null
+    if ($null -eq $openerTime) { return $null }
+    $reply = $null
+    foreach ($m in $recentList) {
+        $sender = $m.sender_id -as [string]
+        if ($sender -ne $secondAgentId) { continue }
+        $t = $m.created_at
+        if ($null -ne $t -and $t -gt $openerTime) {
+            if ($null -eq $reply -or $t -gt $reply.created_at) { $reply = $m }
+        }
+    }
+    return $reply
 }
 
 $replyFromOther = $null
@@ -163,7 +176,7 @@ while ($waited -le $maxWaitSec) {
     }
     $recentAfter = @()
     if ($worldAfter.recent_chat) { $recentAfter = @($worldAfter.recent_chat) }
-    $replyFromOther = Find-ReplyInRecentChat -recentList $recentAfter -firstSenderId $firstSender
+    $replyFromOther = Find-ReplyInRecentChat -recentList $recentAfter -firstSenderId $firstSender -secondAgentId $SecondAgentId
     if ($replyFromOther) { break }
     if ($waited -ge $maxWaitSec) { break }
     Write-Host "  No reply yet (${waited}s); polling again in ${pollIntervalSec}s..." -ForegroundColor Gray
@@ -181,7 +194,10 @@ if ($replyFromOther) {
 Write-Host "  No reply from the other agent in recent_chat after ${maxWaitSec}s." -ForegroundColor Yellow
 Write-Host "" -ForegroundColor Gray
 if ($SecondAgentHost) {
-    Write-Host "We triggered the other agent's turn on $SecondAgentHost. If it still did not reply: check gateway logs (world_state + chat_say): ssh $SecondAgentHost 'tail -n 150 ~/.openclaw/gateway.log' or ~/.clawdbot/gateway.log. Ensure MoltWorld plugin is loaded and the model is calling chat_say (not only text)." -ForegroundColor Yellow
+    Write-Host "We triggered the other agent's turn on $SecondAgentHost. If it still did not reply:" -ForegroundColor Yellow
+    Write-Host "  1) Gateway: ssh $SecondAgentHost 'curl -s -o /dev/null -w \"%{http_code}\" http://127.0.0.1:18789' (expect 200). Set gateway.mode=local and gateway.auth.token if needed." -ForegroundColor Yellow
+    Write-Host "  2) MoltWorld plugin token: plugins.entries.openclaw-moltworld.config.token must be set so chat_say can auth to theebie." -ForegroundColor Yellow
+    Write-Host "  3) Logs: ssh $SecondAgentHost 'grep -E world_state ~/.openclaw/gateway.log | tail -30'" -ForegroundColor Yellow
 } else {
     Write-Host "Possible causes: backend cannot reach the other gateway (webhook URL); other gateway down or hooks not enabled; cooldown; or the other agent did not call chat_say. To force the other agent to run a turn (no webhook needed), re-run with -SecondAgentHost (e.g. sparky2) and -SecondAgentClaw (openclaw)." -ForegroundColor Yellow
 }

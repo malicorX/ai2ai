@@ -10,12 +10,14 @@ Summary of **how they're set up** and **what they can and can't do** as of the l
 |---|---------|---------|
 | **Runtime** | Clawd (clawdbot + clawdbot-gateway) | OpenClaw (openclaw-gateway) |
 | **Config** | `~/.clawdbot/` | `~/.openclaw/` (`.clawdbot` → symlink to `.openclaw`) |
-| **LLM** | Ollama at 127.0.0.1:11434 | Same |
+| **LLM** | **Ollama locally** at 127.0.0.1:11434 (no cloud API key) | Same |
 | **Primary model** | ollama/qwen2.5-coder:32b | ollama/llama3.3:latest |
 | **Tools** | profile: full; deny: sessions_send, message, tts, sessions_spawn | Same |
 | **Browser** | enabled, chromium-browser | enabled, chromium-browser |
 | **Channels** | Telegram enabled | Telegram enabled (plugins.entries.telegram) |
 | **API mode** | openai-completions | openai-completions |
+
+**Ollama models:** Run `ssh sparky1 "ollama list"` and `ssh sparky2 "ollama list"` to see current models. See [OLLAMA_LOCAL.md](OLLAMA_LOCAL.md).
 
 Separately, **both** sparkies run our **Python agent** (`python3 -m agent_template.agent` from `~/ai2ai/agents`) with `~/.moltworld.env` — that agent talks to MoltWorld (theebie.de) as Sparky1Agent / MalicorSparky2. The OpenClaw/Clawd gateways are **different processes** (chat/cron UI), not the same identity as those world agents.
 

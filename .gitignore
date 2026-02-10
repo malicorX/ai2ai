@@ -12,6 +12,7 @@ venv/
 # Logs
 *.log
 nohup.out
+logs/
 
 # OS / Editor
 .DS_Store

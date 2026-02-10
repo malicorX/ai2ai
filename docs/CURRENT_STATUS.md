@@ -1,4 +1,4 @@
-# Current status — 2026-02-08
+# Current status — 2026-02-09
 
 **When you update this doc, change the date in the headline above** so we keep track of progress (e.g. "Current status — 2026-03-15").
 
@@ -52,7 +52,7 @@ Full snapshot and how to re-run: [SPARKY_INVENTORY_FINDINGS.md](SPARKY_INVENTORY
 
 | Gap | Reason |
 |-----|--------|
-| **MoltWorld** (world_state, world_action, board_post) | **Done:** Plugin installed on both; “MoltWorld chat turn” cron added (staggered every 10 min). Sparky1 cron ok; sparky2 cron runs but may show error — check gateway logs. Verify: `.\scripts\clawd\verify_moltworld_cron.ps1`. See [OPENCLAW_MOLTWORLD_CHAT_PLAN.md](OPENCLAW_MOLTWORLD_CHAT_PLAN.md). |
+| **MoltWorld** (world_state, world_action, board_post) | **Done:** Plugin installed on both; “MoltWorld chat turn” cron added (staggered every 2 min). Verify: `.\scripts\clawd\verify_moltworld_cron.ps1` (gateway reachability, last chat). Restart: `.\scripts\clawd\run_restart_gateways_on_sparkies.ps1` verifies 18789 and nohup fallback. See [OPENCLAW_MOLTWORLD_CHAT_PLAN.md](OPENCLAW_MOLTWORLD_CHAT_PLAN.md). |
 | **Same identity as world agents** | Gateways use the same tokens (Sparky1Agent / MalicorSparky2) so they appear in the world as those names; Python agents are separate processes. |
 
 **Why the docs said “can’t” before:** Status was written from the SSH inventory (config, process list) and the upstream issue [clawdbot #1866] (gateway doesn’t send tool definitions to Ollama). There was no live test or user report that tools actually run on sparky2, so we documented the theoretical blocker. After you tested it (e.g. asking sparky2 what’s on spiegel.de), we had evidence that browser works. When in doubt, verify with a quick live test and update this section.
@@ -65,7 +65,7 @@ Full snapshot and how to re-run: [SPARKY_INVENTORY_FINDINGS.md](SPARKY_INVENTORY
 | Telegram | ✅ | ✅ |
 | Cron | ✅ | ✅ |
 | Tool execution (browser, web) | unconfirmed | ✅ observed (e.g. spiegel.de) |
-| MoltWorld (world/board) | ✅ plugin + cron | ✅ plugin + cron (cron sometimes error) |
+| MoltWorld (world/board) | ✅ plugin + cron | ✅ plugin + cron |
 | Python agent on same host | ✅ separate process | ✅ separate process |
 
 **Note on tool execution:** Upstream [clawdbot #1866](https://github.com/clawdbot/clawdbot/issues/1866) describes stock gateways that don’t send tool definitions to Ollama. **We run the jokelord patch** (patched build + `compat.supportedParameters`) so tools work on sparky2 (and optionally sparky1). Steps: [CLAWD_JOKELORD_STEPS.md](external-tools/clawd/CLAWD_JOKELORD_STEPS.md). If a node loses tool use after a reinstall, re-apply the patch and config; see [CLAWD_SPARKY.md](external-tools/clawd/CLAWD_SPARKY.md) for alternatives (PR #4287).

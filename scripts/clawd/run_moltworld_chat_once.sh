@@ -10,9 +10,9 @@ if [[ -z "$id" ]]; then
   echo '{"ok":false,"error":"No MoltWorld cron job found"}'
   exit 1
 fi
-# Isolated runs can take 60-90s (LLM + tools). OpenClaw accepts --timeout; Clawdbot may ignore.
+# Isolated runs can take 60-120s (LLM + tools). OpenClaw accepts --timeout; Clawdbot may ignore.
 if [[ "$CLAW" = "openclaw" ]]; then
-  "$CLAW" cron run "$id" --force --timeout 120000
+  "$CLAW" cron run "$id" --force --timeout 180000
 else
   "$CLAW" cron run "$id" --force
 fi

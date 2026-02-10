@@ -58,6 +58,7 @@ class AgentState(TypedDict, total=False):
     propose_failed_count: int
     max_redo_attempts_per_root: int
     __tools: dict
+    __wake_only: bool  # True when turn is MoltWorld wake with only recent_chat (skip jobs/memory for speed)
     action: Action
     acted: bool
 

@@ -42,8 +42,9 @@
 ### 1.4 Known issues (from docs)
 
 - **sparky1:** Had orphan gateway holding port 18789; restart loop. Fix: kill orphan, start gateway once (see OPENCLAW_CURRENT_STATUS_REPORT.md).
-- **sparky2:** Gateway was inactive; cron sometimes shows **error** (timeout or run failure). Fix: run_restart_gateways_on_sparkies.ps1; check gateway logs if Status stays error.
-- **Cron:** Uses **main** session + system event (not isolated) because isolated cron hits EISDIR on Clawd (#2096). Main session runs on next heartbeat; if main is busy, turn can wait.
+- **sparky2:** Gateway needs `gateway.mode=local` to start; run_restart_gateways_on_sparkies.ps1 sets it. Cron uses **isolated** session (no heartbeat dependency). If systemd does not start the gateway, nohup fallback runs it.
+- **sparky1 (Clawd) cron:** Uses **main** session + system event (not isolated) because isolated hits EISDIR (#2096). Main session runs on next heartbeat; if main is busy, turn can wait.
+- **Open issue:** MalicorSparky2 often replies "Hi" instead of answering a question in chat. See **AGENT_CHAT_DEBUG.md §6** (data path, logs, model compliance; no hardwiring from outside).
 - **Webhooks:** For event-driven reply, the **backend must reach the gateways** (POST to e.g. `http://sparky1:18789/hooks/wake`). If theebie and sparkies are on different networks (e.g. backend on internet, sparkies behind home routers), the backend cannot call them — then only **cron** drives conversation (or a custom webhook receiver on a host the backend can reach).
 
 ---
@@ -96,8 +97,8 @@
 ### Phase C — Stability and observability
 
 - **sparky2 cron errors:** If Status stays **error**, check gateway timeout in config; increase if the model often takes > default. Ensure only one gateway process per host (no orphans).
-- **Document network:** In CURRENT_STATUS or OPERATIONS, record whether theebie can reach sparky1/sparky2 (and how: hostnames, VPN, tunnel). That determines whether event-driven webhooks are viable or cron-only.
-- **Optional:** Add a small “last OpenClaw chat” check to verify_moltworld_cron.ps1 (e.g. GET /world or recent_chat from backend) to show last message time and sender.
+- **Done:** OPERATIONS.md § "MoltWorld / OpenClaw gateways" records where to document whether theebie can reach sparky1/sparky2 (hostnames, VPN, tunnel) for event-driven webhooks.
+- **Done:** verify_moltworld_cron.ps1 shows last 3 recent_chat messages (sender, text snippet, time) and gateway reachability.
 
 ---
 

@@ -1,7 +1,8 @@
 # Trigger one MoltWorld chat turn on both sparkies now (no wait for cron).
+# Uses gateway cron job: model is told to "call world_state then chat_say" (pull is up to the model).
+# For a solid pull (script fetches world and injects into the message), use run_moltworld_pull_and_wake_now.ps1 instead.
 # Usage: .\scripts\clawd\run_moltworld_chat_now.ps1
 # Requires: MoltWorld chat cron already added (add_moltworld_chat_cron.ps1); gateways running.
-# Uses run_moltworld_chat_once.sh (scp + ssh) to avoid PowerShell/SSH quoting issues.
 param()
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path

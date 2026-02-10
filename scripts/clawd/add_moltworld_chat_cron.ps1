@@ -9,8 +9,8 @@ param(
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $removeSh = Join-Path $scriptDir "run_moltworld_cron_remove.sh"
 
-# Instruction for the agent: call world_state then chat_say. Must use tools only (no plain-text reply).
-$baseEvent = 'You are {0} in MoltWorld. You MUST call the world_state tool now, then call the chat_say tool with one short message (e.g. "Hi" or a brief reply to recent_chat). Do not output any text or explanation; only invoke the tools. First: world_state. Second: chat_say with text.'
+# Pull model: agent pulls world_state then reacts. CRITICAL: answer questions with the answer only (e.g. number); never "Hi".
+$baseEvent = 'You are {0}. Call world_state first. Look at the LAST message in recent_chat. If it is a math question (e.g. "how much is 7+?" or "how much is 3 + 2?"), you MUST call chat_say with ONLY the numeric answer (e.g. "7" or "5")—never "Hi" or any greeting. Example: last message "how much is 3+2?" -> chat_say text "5". If the last message is NOT a question, call chat_say with one short greeting. Use only these tools; no plain-text output.'
 
 # Every 2 minutes each, staggered by 1 min so they can have real back-and-forth (reply within ~1-2 min).
 $hostConfig = @{

@@ -165,7 +165,30 @@ def _proposer_has_open_job(state: AgentState) -> bool:
 
 def node_perceive(state: AgentState, config: RunnableConfig | None = None) -> AgentState:
     tools = _get_tools(state, config)
-    # Expect world already in state; refresh open jobs and chat for LLM-driven behavior.
+    # Fast path: MoltWorld wake with world.recent_chat already set (e.g. pull-and-wake). Skip jobs and
+    # external chat fetch so we can reply in under ~1 minute; use world.recent_chat for decide.
+    w = state.get("world") or {}
+    recent_chat = w.get("recent_chat")
+    if isinstance(recent_chat, list) and len(recent_chat) > 0:
+        state["chat_recent"] = recent_chat
+        state["open_jobs"] = []
+        state["my_claimed_jobs"] = []
+        state["recent_jobs"] = []
+        state["rejected_jobs"] = []
+        state["my_submitted_jobs"] = []
+        state["__wake_only"] = True
+        state["last_job"] = {}
+        state["acted"] = False
+        # Minimal world_model so decide still has something
+        state["world_model"] = {
+            "day": 0,
+            "minute_of_day": 0,
+            "topic": "",
+            "self": {"x": 0, "y": 0, "place_id": ""},
+            "nearby_agents": [],
+        }
+        return state
+    # Normal path: refresh open jobs and chat for LLM-driven behavior.
     try:
         state["open_jobs"] = tools["jobs_list"](status="open", limit=50)
     except Exception:
@@ -265,6 +288,10 @@ def node_perceive(state: AgentState, config: RunnableConfig | None = None) -> Ag
 
 
 def node_recall(state: AgentState, config: RunnableConfig | None = None) -> AgentState:
+    # MoltWorld wake fast path: skip memory retrieval to keep reply under ~1 min.
+    if state.get("__wake_only"):
+        state["memories"] = []
+        return state
     tools = _get_tools(state, config)
     # Retrieve failure patterns and success patterns to guide decisions.
     # Priority: recent verification failures, rejection patterns, what worked.

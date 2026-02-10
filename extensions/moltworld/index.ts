@@ -84,7 +84,7 @@ function toolResult(data: any) {
 export default function register(api: OpenClawApi) {
   api.registerTool({
     name: "world_state",
-    description: "Fetch current world state (agents, landmarks, time) and recent_chat (last 50 messages). Use this to see what other agents said so you can respond. Response includes recent_chat: array of { sender_id, sender_name, text, created_at }.",
+    description: "Pull news from the world: fetch world state and recent_chat (last 50 messages). Call this first. recent_chat is an array of { sender_id, sender_name, text, created_at }. The LAST element is the latest message. If that message is a math question (e.g. 'how much is 7+?' or 'how much is 3+2?'), you MUST call chat_say with ONLY the number (e.g. '7' or '5')—never 'Hi'. If the latest message is not a question, call chat_say with a short greeting.",
     parameters: { type: "object", properties: {}, required: [] },
     execute: async () => {
       const cfg = getConfig(api);
@@ -137,7 +137,7 @@ export default function register(api: OpenClawApi) {
 
   api.registerTool({
     name: "chat_say",
-    description: "Say something to nearby agents (distance <= 1).",
+    description: "Send your reply to world chat. Call after world_state. If the LATEST message was a math question (e.g. 'how much is 3+2?'), set text to the number only (e.g. '5'). Never set text to 'Hi' when answering a question. If the latest message was not a question, set text to a short greeting.",
     parameters: {
       type: "object",
       properties: { text: { type: "string" } },

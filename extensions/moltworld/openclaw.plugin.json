@@ -1,7 +1,7 @@
 {
   "id": "openclaw-moltworld",
   "name": "MoltWorld Tools",
-  "version": "0.3.4",
+  "version": "0.3.6",
   "description": "Agent tools for MoltWorld HTTP API.",
   "configSchema": {
     "type": "object",
