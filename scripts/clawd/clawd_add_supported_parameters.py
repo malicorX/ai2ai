@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Add compat.supportedParameters: ["tools", "tool_choice"] to all Ollama models.
-Run on sparky2 AFTER installing the jokelord-patched Clawdbot build, so the gateway sends tools to Ollama.
+"""Add compat.supportsParameters: ["tools", "tool_choice"] to all Ollama models.
+Schema key is supportsParameters (zod). Run after installing the jokelord-patched build.
 Usage: python3 ~/ai2ai/scripts/clawd/clawd_add_supported_parameters.py
 """
 import json
@@ -31,11 +31,12 @@ for m in models:
         m["compat"] = {}
     if not isinstance(m["compat"], dict):
         m["compat"] = {}
-    m["compat"]["supportedParameters"] = ["tools", "tool_choice"]
+    m["compat"].pop("supportedParameters", None)  # old wrong key name
+    m["compat"]["supportsParameters"] = ["tools", "tool_choice"]
 
 with open(path, "w") as f:
     json.dump(d, f, indent=2)
 
-print("Added compat.supportedParameters to", len(models), "Ollama model(s).")
+print("Added compat.supportsParameters to", len(models), "Ollama model(s).")
 print("Config:", path)
 print("Restart gateway: clawdbot gateway stop; sleep 2; nohup clawdbot gateway >> ~/.openclaw/gateway.log 2>&1 &")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import math
@@ -53,6 +54,8 @@ STARTING_AIDOLLARS = float(os.getenv("STARTING_AIDOLLARS", "100"))
 TREASURY_ID = os.getenv("TREASURY_ID", "treasury")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 AGENT_TOKENS_PATH = os.getenv("AGENT_TOKENS_PATH", "").strip()
+
+_log = logging.getLogger(__name__)
 TASK_FAIL_PENALTY = float(os.getenv("TASK_FAIL_PENALTY", "1.0"))
 
 # MoltWorld event-driven webhooks: notify agents when new chat (hybrid + rate limit)
@@ -315,6 +318,7 @@ async def audit_middleware(request: Request, call_next):
         if not _is_public_route(request):
             auth = (request.headers.get("authorization") or "").strip()
             if not (ADMIN_TOKEN and auth == f"Bearer {ADMIN_TOKEN}"):
+                _log.warning("agent auth failed path=%s method=%s (missing or invalid token)", request.url.path, request.method)
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
     if agent_from_token and not _is_agent_route_allowed(request):
         return JSONResponse({"error": "forbidden", "path": str(request.url.path)}, status_code=403)
@@ -5034,7 +5038,10 @@ async def chat_send(req: ChatSendRequest):
 @app.post("/chat/say")
 async def chat_say(req: ChatBroadcastRequest):
     sender_id = (req.sender_id or "").strip()
+    text_preview = (req.text or "").strip()[:80]
+    _log.info("chat_say received sender_id=%s text_len=%s preview=%s", sender_id, len(req.text or ""), text_preview)
     if not sender_id:
+        _log.warning("chat_say rejected missing_sender_id")
         return {"error": "missing_sender_id"}
     sender = _agents.get(sender_id)
     if not sender:
@@ -5051,10 +5058,12 @@ async def chat_say(req: ChatBroadcastRequest):
         sender = _agents[sender_id]
     text = (req.text or "").strip()
     if not text:
+        _log.warning("chat_say rejected missing_text sender_id=%s", sender_id)
         return {"error": "missing_text"}
     now = time.time()
     rate_err = _check_chat_rate("say", sender_id, now)
     if rate_err:
+        _log.warning("chat_say rate limited sender_id=%s", sender_id)
         return rate_err
     recipients = []
     msg_dict = {
@@ -5085,6 +5094,7 @@ async def chat_say(req: ChatBroadcastRequest):
     _append_jsonl(CHAT_PATH, asdict(chat_msg))
     await ws_manager.broadcast({"type": "chat", "data": msg_dict})
     asyncio.create_task(_fire_moltworld_webhooks(sender_id, req.sender_name or sender_id, text, "say"))
+    _log.info("chat_say stored sender_id=%s recipients=%s", sender_id, len(recipients))
     return {"ok": True, "recipients": recipients}
 
 

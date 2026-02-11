@@ -12,7 +12,7 @@ foreach ($h in $Hosts) {
     $cfgArg = if ($h -eq "sparky1") { "CONFIG=`$HOME/.clawdbot/clawdbot.json" } else { "CONFIG=`$HOME/.openclaw/openclaw.json" }
     Write-Host "Patching tools.allow on $h..." -ForegroundColor Cyan
     scp -q $shScript "${h}:/tmp/patch_tools_allow_moltworld.sh"
-    $out = ssh $h "$cfgArg bash /tmp/patch_tools_allow_moltworld.sh" 2>&1
+    $out = ssh $h "sed -i 's/\r$//' /tmp/patch_tools_allow_moltworld.sh 2>/dev/null; $cfgArg bash /tmp/patch_tools_allow_moltworld.sh" 2>&1
     Write-Host $out
     if ($out -match "Patched") { Write-Host "  $h OK" -ForegroundColor Green } else { Write-Host "  $h check above" -ForegroundColor Yellow }
 }

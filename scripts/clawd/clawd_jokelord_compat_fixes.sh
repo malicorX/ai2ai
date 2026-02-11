@@ -30,6 +30,16 @@ if [[ -f "$ATTEMPT" ]]; then
   echo "  attempt.ts: renames + systemPrompt line removed"
 fi
 
+# 1b) abort.ts: jokelord attempt.ts imports isAbortError; upstream may not export it
+ABORT="$SRC/agents/pi-embedded-runner/abort.ts"
+if [[ -f "$ABORT" ]] && grep -q "isAbortError" "$ATTEMPT" 2>/dev/null && ! grep -q "export.*isAbortError" "$ABORT" 2>/dev/null; then
+  echo "" >> "$ABORT"
+  echo "export function isAbortError(e: unknown): boolean {" >> "$ABORT"
+  echo "  return e instanceof Error && e.name === 'AbortError';" >> "$ABORT"
+  echo "}" >> "$ABORT"
+  echo "  abort.ts: added isAbortError export"
+fi
+
 # 2) compact.ts: pass getter function instead of string to applySystemPromptOverrideToSession
 COMPACT="$SRC/agents/pi-embedded-runner/compact.ts"
 if [[ -f "$COMPACT" ]]; then
@@ -59,15 +69,20 @@ if "supportedParameters" not in text:
             text = text.replace(marker, "supportsParameters: z.array(z.string()).optional(),\n maxTokensField: z")
     path.write_text(text)
 PY
-  ORIG=$(git show HEAD:src/config/zod-schema.core.ts 2>/dev/null || true)
-  if [[ -n "$ORIG" ]]; then
-    # Append LinkModelSchema block (needed by ToolsLinksSchema)
-    echo "$ORIG" | sed -n '/^export const LinkModelSchema/,/^export const ToolsLinksSchema/p' | sed '$d' >> "$CORE"
-    # Append ToolsLinksSchema block (from that export to line before NativeCommandsSettingSchema)
-    echo "$ORIG" | sed -n '/^export const ToolsLinksSchema/,/^export const NativeCommandsSettingSchema/p' | sed '$d' >> "$CORE"
-    echo "  zod-schema.core.ts: LinkModelSchema + ToolsLinksSchema appended from upstream"
+  # Only append if upstream has them and current file does not (jokelord may have omitted them)
+  if grep -q "export const LinkModelSchema" "$CORE" && grep -q "export const ToolsLinksSchema" "$CORE"; then
+    echo "  zod-schema.core.ts: LinkModelSchema + ToolsLinksSchema already present, skip append"
   else
-    echo "  WARN: could not get upstream zod-schema.core.ts (git show); ToolsLinksSchema may be missing" >&2
+    ORIG=$(git show HEAD:src/config/zod-schema.core.ts 2>/dev/null || true)
+    if [[ -n "$ORIG" ]]; then
+      # Append LinkModelSchema block (needed by ToolsLinksSchema)
+      echo "$ORIG" | sed -n '/^export const LinkModelSchema/,/^export const ToolsLinksSchema/p' | sed '$d' >> "$CORE"
+      # Append ToolsLinksSchema block (from that export to line before NativeCommandsSettingSchema)
+      echo "$ORIG" | sed -n '/^export const ToolsLinksSchema/,/^export const NativeCommandsSettingSchema/p' | sed '$d' >> "$CORE"
+      echo "  zod-schema.core.ts: LinkModelSchema + ToolsLinksSchema appended from upstream"
+    else
+      echo "  WARN: could not get upstream zod-schema.core.ts (git show); ToolsLinksSchema may be missing" >&2
+    fi
   fi
 fi
 

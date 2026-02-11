@@ -87,12 +87,27 @@ clawdbot gateway stop; sleep 2; nohup clawdbot gateway >> ~/.clawdbot/gateway.lo
 
 ---
 
+## Both sparkies (Moltworld chat: Sparky1Agent ↔ MalicorSparky2)
+
+For **tool calling** and a meaningful conversation, the jokelord patch must be **built and installed on both sparky1 and sparky2**.
+
+1. **Apply patch + build** from PC (run twice): `.\scripts\clawd\run_clawd_apply_jokelord.ps1 -Target sparky1` then `-Target sparky2`.
+2. **Global install (interactive sudo on each host):** SSH to each sparky and run:  
+   `cd ~/clawdbot-jokelord-build/clawdbot && sudo npm install -g .`
+3. **Add compat and restart:** On each host run `python3 ~/ai2ai/scripts/clawd/clawd_add_supported_parameters.py`, then restart the gateway (sparky1: clawdbot, sparky2: openclaw). Or from PC: `.\scripts\clawd\run_restart_gateways_on_sparkies.ps1`
+4. **Test:** Narrator on sparky1, poll on sparky2; check Theebie for real replies.
+
+If the **stock** binary is running, it does not recognize `compat.supportedParameters` (config invalid). To bring gateways up without the patched binary, remove that key: `python3 ~/ai2ai/scripts/clawd/openclaw_remove_compat.py` on sparky2; edit `~/.clawdbot/clawdbot.json` on sparky1. After installing the jokelord binary, re-run `clawd_add_supported_parameters.py` and restart.
+
+---
+
 ## Summary
 
 | Step | Where | Command |
 |------|--------|---------|
-| 1. Apply patch + build | From PC | `.\scripts\clawd\run_clawd_apply_jokelord.ps1 -Target sparky2` |
+| 1. Apply patch + build | From PC | `.\scripts\clawd\run_clawd_apply_jokelord.ps1 -Target sparky2` (or sparky1) |
 | 1 alt | On sparky2 | `bash ~/ai2ai/scripts/clawd/clawd_apply_jokelord_on_sparky.sh` |
-| 2. Add config | On sparky2 | `python3 ~/ai2ai/scripts/clawd/clawd_add_supported_parameters.py` |
-| 3. Restart gateway | On sparky2 | `clawdbot gateway stop; sleep 2; nohup clawdbot gateway >> ~/.clawdbot/gateway.log 2>&1 &` |
-| 4. Test | Browser/TUI | New chat, ask for browser tool (e.g. Fiverr 5 gigs). |
+| 2. Global install | On each sparky (interactive) | `cd ~/clawdbot-jokelord-build/clawdbot && sudo npm install -g .` |
+| 3. Add config | On host | `python3 ~/ai2ai/scripts/clawd/clawd_add_supported_parameters.py` |
+| 4. Restart gateway | On host | `clawdbot gateway stop; sleep 2; nohup clawdbot gateway >> ~/.clawdbot/gateway.log 2>&1 &` (sparky1); same with `openclaw` and `~/.openclaw/gateway.log` (sparky2) |
+| 5. Test | Browser/TUI | New chat, ask for browser tool (e.g. Fiverr 5 gigs). |

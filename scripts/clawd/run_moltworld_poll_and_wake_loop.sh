@@ -4,7 +4,8 @@
 # Response time: ~5s to detect new message + ~60–90s for the turn (vs 2+ min with cron every 2 min).
 #
 # Usage: CLAW=openclaw bash run_moltworld_poll_and_wake_loop.sh
-#   Or:  POLL_INTERVAL_SEC=5 COOLDOWN_AFTER_WAKE_SEC=60 CLAW=openclaw bash run_moltworld_poll_and_wake_loop.sh
+#   Or:  POLL_INTERVAL_SEC=5 COOLDOWN_AFTER_WAKE_SEC=60 CLAW=openclaw bash ...
+#   Or:  POLL_INTERVAL_SEC=10 ...  (less load, still responsive)
 # Run in background: nohup bash run_moltworld_poll_and_wake_loop.sh >> ~/.moltworld_poll.log 2>&1 &
 # Requires: same as run_moltworld_pull_and_wake.sh (~/.moltworld.env, gateway, hooks). Script dir must contain run_moltworld_pull_and_wake.sh.
 set -e

@@ -84,7 +84,7 @@ function toolResult(data: any) {
 export default function register(api: OpenClawApi) {
   api.registerTool({
     name: "world_state",
-    description: "Pull news from the world: fetch world state and recent_chat (last 50 messages). Call this first. recent_chat is an array of { sender_id, sender_name, text, created_at }. The LAST element is the latest message. If that message is a math question (e.g. 'how much is 7+?' or 'how much is 3+2?'), you MUST call chat_say with ONLY the number (e.g. '7' or '5')—never 'Hi'. If the latest message is not a question, call chat_say with a short greeting.",
+    description: "Pull news from the world: fetch world state and recent_chat (last 50 messages). Call this first. The response includes: recent_chat (array of { sender_id, sender_name, text, created_at }; LAST element is the latest message), day (sim day number), minute_of_day (0–1439: 0=midnight, 720=noon, 1080=18:00). Use minute_of_day to answer 'what time is it' / 'is it dark' (e.g. after 1080 it is evening). If the latest message is a math question, call chat_say with ONLY the number. If it asks the time or whether it's dark, call chat_say with a short answer using minute_of_day. If you cannot answer (e.g. you don't have the information or it's outside what your tools provide), still call chat_say with a short honest reply (e.g. 'I'm not sure how to answer that' or 'I don't have that information'). Otherwise answer or greet briefly with chat_say.",
     parameters: { type: "object", properties: {}, required: [] },
     execute: async () => {
       const cfg = getConfig(api);
@@ -137,7 +137,7 @@ export default function register(api: OpenClawApi) {
 
   api.registerTool({
     name: "chat_say",
-    description: "Send your reply to world chat. Call after world_state. If the LATEST message was a math question (e.g. 'how much is 3+2?'), set text to the number only (e.g. '5'). Never set text to 'Hi' when answering a question. If the latest message was not a question, set text to a short greeting.",
+    description: "Send your reply to world chat. Call after world_state. If the LATEST message was a math question, set text to the number only. Never set text to 'Hi' when answering a question. If you don't know how to answer, set text to a short honest reply (e.g. 'I'm not sure how to answer that' or 'I don't have that information'). Otherwise use a short greeting or answer.",
     parameters: {
       type: "object",
       properties: { text: { type: "string" } },
@@ -151,6 +151,13 @@ export default function register(api: OpenClawApi) {
         body: JSON.stringify(body),
       });
       const data = await safeJson(res);
+      const status = res.status;
+      const preview = typeof data?.text === "string" ? "" : JSON.stringify(data).slice(0, 200);
+      if (status >= 200 && status < 300) {
+        api.logger.info(`[moltworld] chat_say OK ${status} -> theebie`);
+      } else {
+        api.logger.warn(`[moltworld] chat_say FAILED ${status} ${preview}`);
+      }
       return toolResult(data);
     },
   });
@@ -172,6 +179,54 @@ export default function register(api: OpenClawApi) {
       });
       const data = await safeJson(res);
       return toolResult(data);
+    },
+  });
+
+  api.registerTool({
+    name: "fetch_url",
+    description:
+      "Fetch the content of a public URL (e.g. a news or blog page). Use when the user asks what is on a webpage or to summarize a site. Returns text extracted from the page (HTML stripped). Call this then use chat_say to reply with a short summary.",
+    parameters: {
+      type: "object",
+      properties: { url: { type: "string", description: "Full URL (e.g. https://www.spiegel.de)" } },
+      required: ["url"],
+    },
+    execute: async (_id, params) => {
+      const url = typeof params?.url === "string" ? params.url.trim() : "";
+      if (!url) return toolResult({ error: "url required" });
+      if (!url.startsWith("http://") && !url.startsWith("https://")) {
+        return toolResult({ error: "url must be http or https" });
+      }
+      const maxChars = 12000;
+      const timeoutMs = 15000;
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), timeoutMs);
+        const res = await fetch(url, {
+          method: "GET",
+          signal: ctrl.signal,
+          headers: { "User-Agent": "MoltWorld-OpenClaw/1.0 (fetch)" },
+        });
+        clearTimeout(t);
+        if (!res.ok) return toolResult({ error: `http ${res.status}`, url });
+        const html = await res.text();
+        const text = html
+          .replace(/<script[\s\S]*?<\/script>/gi, " ")
+          .replace(/<style[\s\S]*?<\/style>/gi, " ")
+          .replace(/<[^>]+>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+        const out = text.slice(0, maxChars);
+        return toolResult({
+          url,
+          content: out,
+          truncated: text.length > maxChars,
+          length: out.length,
+        });
+      } catch (e: any) {
+        const msg = e?.message || String(e);
+        return toolResult({ error: msg.includes("abort") ? "timeout" : msg, url });
+      }
     },
   });
 

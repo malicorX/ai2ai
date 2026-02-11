@@ -11,6 +11,9 @@
 #
 # Optional: MOLTWORLD_SKIP_IF_UNCHANGED=1 — do a cheap GET /chat/recent?limit=1 first; if the last message
 #           matches the previous run (stored in ~/.moltworld_last_chat), skip full pull and wake (saves compute).
+# Optional: MOLTWORLD_FALLBACK_REPLY=1 (default) — if the agent did not post a reply within the wait window,
+#           POST a fallback message to theebie: "I don't know how to answer this, sorry." Set to 0 to disable.
+# Optional: MOLTWORLD_FALLBACK_REPLY_AFTER_SEC=95 — seconds to wait after wake before checking and maybe sending fallback.
 set -e
 
 _ts() { date +%H:%M:%S 2>/dev/null || echo "??:??:??"; }
@@ -81,10 +84,18 @@ except Exception:
   fi
 fi
 
-# 1) Pull: fetch world from MoltWorld backend
+# 1) Pull: fetch world from MoltWorld backend (or use test payload for MOLTWORLD_TEST_SPIEGEL=1)
 _trace "pull_start"
-WORLD_JSON=$(curl -s -S -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" "$BASE_URL/world" 2>/dev/null) || true
-_trace "pull_done"
+if [[ -n "${MOLTWORLD_TEST_SPIEGEL:-}" ]]; then
+  WORLD_JSON=$(python3 -c '
+import json
+print(json.dumps({"recent_chat": [{"sender_id": "TestBot", "sender_name": "TestBot", "text": "what is on the frontpage of www.spiegel.de?", "created_at": 0}]}))
+')
+  _trace "pull_done (test_spiegel)"
+else
+  WORLD_JSON=$(curl -s -S -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" "$BASE_URL/world" 2>/dev/null) || true
+  _trace "pull_done"
+fi
 if [[ -z "$WORLD_JSON" || "$WORLD_JSON" =~ ^\{\} ]]; then
   echo "ERROR: Failed to fetch $BASE_URL/world (check token and network)." >&2
   exit 1
@@ -94,28 +105,63 @@ fi
 TMP_WORLD=$(mktemp)
 TMP_PAYLOAD=$(mktemp)
 TMP_V1=$(mktemp)
-trap 'rm -f "$TMP_WORLD" "$TMP_PAYLOAD" "$TMP_V1"' EXIT
+TMP_WAKE=$(mktemp)
+trap 'rm -f "$TMP_WORLD" "$TMP_PAYLOAD" "$TMP_V1" "$TMP_WAKE"' EXIT
 echo "$WORLD_JSON" > "$TMP_WORLD"
 
-python3 - "$TMP_WORLD" "$AGENT_NAME" "$TMP_PAYLOAD" "$TMP_V1" << 'PY'
-import json, sys, os
-world_path, agent_name, out_path, v1_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+python3 - "$TMP_WORLD" "$AGENT_NAME" "$TMP_PAYLOAD" "$TMP_V1" "$TMP_WAKE" << 'PY'
+import json, sys
+world_path, agent_name, out_path, v1_path, wake_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 with open(world_path, "r", encoding="utf-8") as f:
     world = json.load(f)
 chat = world.get("recent_chat") or []
 last = chat[-5:]
-lines = [
-    f"You are {agent_name}. MoltWorld recent_chat (latest message last):",
-    ""
-]
+# If last message is a math question, put the task first so the model sees it before other instructions.
+last_text = (last[-1].get("text") or "").strip() if last else ""
+is_math_question = last_text and ("how much is" in last_text.lower() or ("what is" in last_text.lower() and "+" in last_text) or "plus" in last_text.lower())
+if is_math_question:
+    lines = [
+        "TASK: The last message is a math question. You MUST call chat_say with ONLY the numeric answer (e.g. for 'how much is 1 + 3 ?' call chat_say with text '4'). Do not say 'I don't know' or any other text—just the number.",
+        "",
+        f"You are {agent_name}. MoltWorld recent_chat (latest message last):",
+        ""
+    ]
+else:
+    lines = [
+        "You MUST use tools this turn. Do not reply with plain text only.",
+        f"You are {agent_name}. MoltWorld recent_chat (latest message last):",
+        ""
+    ]
 for m in last:
     sender = m.get("sender_name") or m.get("sender_id") or "?"
     text = (m.get("text") or "").strip()
     lines.append(f"  {sender}: {text}")
-lines.extend([
-    "",
-    "Read the last message above. If it is a question (to you or to the room), understand it, solve or reason as needed, then reply with chat_say. If it is not a question, you may greet briefly or stay silent. Use the chat_say tool for any reply; do not reply with plain text only."
-])
+
+# If the last message is the fallback phrase from the other bot, tell the model to reply with something else.
+if last:
+    last_text = (last[-1].get("text") or "").strip()
+    if last_text == "I don't know how to answer this, sorry." and (last[-1].get("sender_id") or "").strip() in ("Sparky1Agent", "MalicorSparky2"):
+        lines.append("")
+        lines.append("(The last message above is the other bot's generic fallback. Reply with a short friendly line to keep the conversation going, e.g. a greeting or a new topic. Do not repeat that phrase.)")
+    # Math question already handled at top of prompt (TASK first).
+
+# Narrator (sparky1): open or continue conversations; search the web when chat is quiet.
+is_narrator = "Sparky1" in agent_name or agent_name == "Sparky1Agent"
+if is_narrator:
+    lines.extend([
+        "",
+        "You are the narrator. Call world_state first, then either web_fetch (or fetch_url) then chat_say, or chat_say directly.",
+        "If chat is empty or stale: use web_fetch with a real URL (e.g. https://www.spiegel.de or a news site), then call chat_say with a 1–2 sentence summary or question.",
+        "If the last message is from MalicorSparky2 or another bot: reply briefly with chat_say to keep the conversation going (e.g. a follow-up question or short comment). Do not say 'I don't know how to answer this' to the other bot.",
+        "Always call chat_say with your reply. Use only tools; no plain-text-only output."
+    ])
+else:
+    lines.extend([
+        "",
+        "Call world_state first. Then: if the last message asks about a webpage or URL, call web_fetch (or fetch_url) with that URL and then call chat_say with a short summary.",
+        "If it is a normal question (math, time, etc.), answer in chat_say. If the last message is from Sparky1Agent (e.g. a greeting or topic), reply with chat_say to continue the conversation—do not say 'I don't know how to answer this' to the other bot.",
+        "Only if a human asked something you cannot answer, call chat_say with: I don't know how to answer this, sorry. Use only tools; no plain-text-only output."
+    ])
 text = "\n".join(lines)
 # Payload for /hooks/agent (isolated turn)
 payload = {"message": text, "wakeMode": "now", "name": "MoltWorld", "model": "ollama/llama3.3:latest", "deliver": False, "timeoutSeconds": 120}
@@ -125,6 +171,10 @@ with open(out_path, "w", encoding="utf-8") as f:
 v1_payload = {"model": "openclaw:main", "input": text}
 with open(v1_path, "w", encoding="utf-8") as f:
     json.dump(v1_payload, f, ensure_ascii=False)
+# Payload for /hooks/wake (clawdbot: gateway expects "text" and "mode")
+wake_payload = {"text": text, "mode": "now"}
+with open(wake_path, "w", encoding="utf-8") as f:
+    json.dump(wake_payload, f, ensure_ascii=False)
 PY
 
 _trace "build_payload_done"
@@ -196,6 +246,16 @@ if [[ -n "$GW_TOKEN" ]]; then
       --data-binary "@$TMP_PAYLOAD" \
       -o /dev/null -w "%{http_code}" 2>/dev/null) || code="000"
     _trace "post_hooks_agent_done code=$code"
+    # Clawdbot: if still not 200/201 (e.g. 202 from v1), try /hooks/wake with {text, mode} — gateway runs one turn
+    if [[ "$CLAW" = "clawdbot" && "$code" != "200" && "$code" != "201" && -n "$WAKE_TOKEN" ]]; then
+      _trace "post_hooks_wake_start (clawdbot)"
+      code=$(curl -s -S -X POST http://127.0.0.1:18789/hooks/wake \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $WAKE_TOKEN" \
+        --data-binary "@$TMP_WAKE" \
+        -o /dev/null -w "%{http_code}" 2>/dev/null) || code="000"
+      _trace "post_hooks_wake_done code=$code"
+    fi
   fi
 else
   _trace "post_hooks_agent_start (no GW_TOKEN)"
@@ -204,10 +264,76 @@ else
     --data-binary "@$TMP_PAYLOAD" \
     -o /dev/null -w "%{http_code}" 2>/dev/null) || code="000"
   _trace "post_hooks_agent_done code=$code"
+  if [[ "$CLAW" = "clawdbot" && "$code" != "200" && "$code" != "201" && -n "$WAKE_TOKEN" ]]; then
+    _trace "post_hooks_wake_start (clawdbot)"
+    code=$(curl -s -S -X POST http://127.0.0.1:18789/hooks/wake \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer $WAKE_TOKEN" \
+      --data-binary "@$TMP_WAKE" \
+      -o /dev/null -w "%{http_code}" 2>/dev/null) || code="000"
+    _trace "post_hooks_wake_done code=$code"
+  fi
 fi
 _trace "script_end"
 echo "${code}"
 echo '{"ok":true,"pull":"world","wake":"sent"}'
+
+# 5) Fallback: if agent did not reply within the window, POST "I don't know how to answer this, sorry." to theebie
+#    Only when the last message was from a human/TestBot — never when it was from our bots (stops fallback ping-pong).
+#    When the other bot asked, we rely entirely on the agent (OpenClaw) to reply via chat_say; no scripted reply from here.
+FALLBACK_ENABLED="${MOLTWORLD_FALLBACK_REPLY:-1}"
+FALLBACK_WAIT="${MOLTWORLD_FALLBACK_REPLY_AFTER_SEC:-95}"
+LAST_SENDER_IS_OUR_BOT=$(python3 -c "
+import json, sys
+try:
+    world = json.loads(sys.argv[1])
+    chat = world.get('recent_chat') or []
+    if not chat:
+        sys.exit(0)
+    sid = (chat[-1].get('sender_id') or '').strip()
+    if sid in ('Sparky1Agent', 'MalicorSparky2'):
+        print('1')
+except Exception:
+    pass
+" "$WORLD_JSON" 2>/dev/null) || true
+if [[ "$FALLBACK_ENABLED" != "0" && ("$code" = "200" || "$code" = "201") && -n "$WORLD_JSON" && -n "$TOKEN" && -n "$AGENT_ID" && "$LAST_SENDER_IS_OUR_BOT" != "1" ]]; then
+  QUESTION_TS=$(python3 -c "
+import json, sys
+try:
+    world = json.loads(sys.argv[1])
+    chat = world.get('recent_chat') or []
+    if not chat:
+        sys.exit(0)
+    print(float(chat[-1].get('created_at') or 0))
+except Exception:
+    pass
+" "$WORLD_JSON" 2>/dev/null) || true
+  if [[ -n "$QUESTION_TS" ]]; then
+    sleep "$FALLBACK_WAIT"
+    RECENT_AFTER=$(curl -s -S -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" "$BASE_URL/chat/recent?limit=25" 2>/dev/null) || true
+    AGENT_REPLIED=$(python3 -c "
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+    threshold = float(sys.argv[2])
+    our_id = (sys.argv[3] or '').strip()
+    for m in (data.get('messages') or [])[-25:]:
+        if (m.get('sender_id') or '').strip() == our_id and float(m.get('created_at') or 0) > threshold:
+            print('1')
+            break
+except Exception:
+    pass
+" "$RECENT_AFTER" "$QUESTION_TS" "$AGENT_ID" 2>/dev/null) || true
+    if [[ "$AGENT_REPLIED" != "1" ]]; then
+      FALLBACK_TEXT="I don't know how to answer this, sorry."
+      curl -s -S -X POST "$BASE_URL/chat/say" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"sender_id\":\"$AGENT_ID\",\"sender_name\":\"$AGENT_NAME\",\"text\":\"$FALLBACK_TEXT\"}" \
+        -o /dev/null -w "%{http_code}" 2>/dev/null || true
+    fi
+  fi
+fi
 
 # Always remember last message (for cron skip-if-unchanged and for poll loop)
 if [[ -n "$WORLD_JSON" ]]; then

@@ -5,6 +5,6 @@ CONFIG="${CONFIG:-$HOME/.openclaw/openclaw.json}"
 [[ -f "$CONFIG" ]] || CONFIG="$HOME/.clawdbot/clawdbot.json"
 [[ -f "$CONFIG" ]] || { echo "No config at $CONFIG"; exit 1; }
 tmp=$(mktemp)
-jq '.tools.allow = ((.tools.allow // [] | if type == "string" then [.] else . end) + ["world_state","world_action","chat_say","openclaw-moltworld"] | unique)' "$CONFIG" > "$tmp"
+jq '.tools.allow = ((.tools.allow // [] | if type == "string" then [.] else . end) + ["world_state","world_action","chat_say","web_fetch","fetch_url","openclaw-moltworld"] | unique)' "$CONFIG" > "$tmp"
 mv "$tmp" "$CONFIG"
 echo "Patched tools.allow in $CONFIG"

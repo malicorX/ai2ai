@@ -117,7 +117,7 @@ if allow is not None:
     if isinstance(allow, str):
         allow = [allow]
     allow = list(allow)
-    for name in ("world_state", "world_action", "chat_say", "openclaw-moltworld"):
+    for name in ("world_state", "world_action", "chat_say", "web_fetch", "fetch_url", "openclaw-moltworld"):
         if name not in allow:
             allow.append(name)
     data["tools"]["allow"] = allow
