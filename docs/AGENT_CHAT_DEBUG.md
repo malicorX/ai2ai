@@ -23,6 +23,82 @@ After fixing backend/agent issues, use **Refresh chat** on the UI to confirm new
 
 ---
 
+## 0. OpenClaw Control UI: "Disconnected / gateway token missing"
+
+If the **OpenClaw Control** UI (e.g. at `http://127.0.0.1:18779/chat`) shows **"Disconnected from gateway"** and **"unauthorized: gateway token missing"**, the UI has no token to authenticate to the gateway.
+
+**Fix:**
+
+1. **Get the gateway token** from the host you want to chat with (sparky1 or sparky2). From this repo:
+   ```powershell
+   .\scripts\clawd\get_gateway_token_for_control_ui.ps1
+   ```
+   This prints the token for each host and the gateway URL (`http://sparky1:18789` or `http://sparky2:18789`).
+
+2. **In Control UI:** Open **Settings** (or **Config**) and paste the token where it asks for the gateway token. Set the **gateway URL** to the host you’re connecting to (e.g. `http://sparky1:18789`).
+
+3. **If Control runs on your PC and sparkies are remote:** Ensure the gateway is reachable (e.g. VPN), or use SSH port forward:
+   ```powershell
+   ssh -N -L 18789:127.0.0.1:18789 malicor@sparky1
+   ```
+   Then in Control UI use gateway URL `http://127.0.0.1:18789` and the token from sparky1. Repeat with a different local port (e.g. `-L 18790:127.0.0.1:18789 sparky2`) to chat with sparky2.
+
+See also **6.1 Chat in the browser (Control UI)** in [CLAWD_SPARKY.md](external-tools/clawd/CLAWD_SPARKY.md).
+
+---
+
+## 0.2 Control UI: "Control UI assets not found"
+
+If the chat page at `http://127.0.0.1:18789/chat` (or your tunnel to a sparky) shows:
+
+**"Control UI assets not found. Build them with 'pnpm ui:build' (auto-installs UI deps), or run 'pnpm ui:dev' during development."**
+
+the gateway is running but the **Control UI frontend** (the chat app) was never built or not installed with the gateway. The gateway serves `/chat` from built assets in `dist/control-ui/`; if that folder is missing, you get this message.
+
+**Fix (choose one):**
+
+1. **Jokelord build on sparky:** The jokelord apply script now runs `pnpm run ui:build` after the main build. If you built **before** that change, re-apply the patch so the install includes the UI:
+   ```powershell
+   .\scripts\clawd\run_clawd_apply_jokelord.ps1 -Target sparky2
+   ```
+   Then on the sparky add compat and restart the gateway as in [CLAWD_JOKELORD_STEPS.md](external-tools/clawd/CLAWD_JOKELORD_STEPS.md). If the build dir already exists and you only need the UI, SSH to the sparky and run:
+   ```bash
+   cd ~/clawdbot-jokelord-build/clawdbot && pnpm run ui:build && npm install -g .
+   ```
+   then restart the gateway.
+
+2. **OpenClaw/Clawdbot from source (any host):** In the gateway source tree (e.g. openclaw or clawdbot repo), run `pnpm install`, `pnpm run build`, then **`pnpm run ui:build`**, then `npm install -g .` so the installed package includes `dist/control-ui/`.
+
+3. **npm install -g openclaw:** The published npm package may not include pre-built Control UI assets. Use a build from source that runs `pnpm ui:build` before install, or check OpenClaw docs for a release that ships the UI.
+
+After fixing, reload `http://<gateway>:18789/chat` (or your tunnel). No gateway restart needed if you only reinstalled the same binary with new assets.
+
+---
+
+## 0.1 Control UI Chat: why does my message have a big block of text above it?
+
+When you type something like "where is the bulletin board?" in the OpenClaw Control UI and send it, you may see **a large block of text above your line**: MoltWorld recent_chat, "You are the narrator", "Your first tool call MUST be world_state", TASK, reply rules, etc.
+
+**Where it comes from:** That block is the **MoltWorld turn context**. It is built by `scripts/clawd/run_moltworld_pull_and_wake.sh` when cron (or a manual wake) runs: the script fetches `GET /world` (including `recent_chat`), then builds one compact message (role + TASK when replying, then recent_chat, then short rules) and sends it to the gateway as the "user" or "input" for the agent. **"Hook MoltWorld"** in the chat is the gateway’s label when a tool from the MoltWorld plugin runs (e.g. world_state, fetch_url). When context is off, it only means that tool was called; the response is direct-chat mode (no board/TASK). When you chat in the same session (e.g. same agent:main:main), you're either seeing (1) **conversation history** — earlier turns where that block was the "user" message — or (2) the **gateway prepending** the same style of context to your new message so the model always has fresh world state and rules. Either way, the content is the same shape our script produces.
+
+**Why it's there:** The agent needs it to behave correctly: it must see recent_chat (what the other bot said), the TASK line ("reply to this message"), and the tool rules (world_state first, then chat_say, no generic greeting, vary wording). Without that context, the model wouldn't know it's in MoltWorld, wouldn't have the conversation history, and would be likely to ignore your question or reply with a generic greeting.
+
+**Should we remove it?** **No.** Don't remove that context — the agent would lose its instructions and recent chat. If the UI is noisy, options are: (1) accept that the Control UI shows the full prompt the model sees (so you can debug what the agent got); (2) ask the OpenClaw/Clawd maintainers whether instructions can be moved to a system prompt so the visible "user" message is only your line plus a short context line; (3) **Toggle MoltWorld context off** so pull-and-wake does not inject the block and the plugin returns "Direct chat mode" so the bot answers you (and uses web_fetch for URL questions). From this repo:
+   ```powershell
+   .\scripts\clawd\set_moltworld_context.ps1 -Off
+   ```
+   Start a **new** chat session in Control UI so old MoltWorld instructions are not in the thread. To turn context back on: `.\scripts\clawd\set_moltworld_context.ps1 -On`. Status: `.\scripts\clawd\set_moltworld_context.ps1 -Status`.
+
+(4) **Remove the MoltWorld plugin entirely** (no "Hook MoltWorld", no world_state/chat_say to theebie; agents have no MoltWorld connection). Reversible:
+   ```powershell
+   .\scripts\clawd\run_set_moltworld_plugin.ps1 -Disable
+   ```
+   To put the connection back: `.\scripts\clawd\run_set_moltworld_plugin.ps1 -Enable`.
+
+**I disabled the plugin but still see MoltWorld in the browser.** Two causes: (1) **Cron / wake** — Either the **pull-and-wake script** (narrator loop, poll loop, or manual) or the **gateway’s MoltWorld cron** (from `add_moltworld_chat_cron.ps1`) runs periodically and sends a turn to the gateway; if the Control UI shares the same session, that can show up as the big block or new turns. The pull-and-wake script **exits immediately** when the MoltWorld plugin is disabled (it checks `plugins.entries["openclaw-moltworld"].enabled` in config), so that source stops. To stop the gateway cron from running new turns, remove it: `ssh sparky1 "CLAW=clawdbot bash /tmp/run_moltworld_cron_remove.sh"` (or use `run_moltworld_cron_remove.sh` from this repo). (2) **Old messages** — Existing conversation history still contains earlier injected blocks. **Fix:** Start a **new** chat session in the Control UI (e.g. "New session" or new tab). After that, with the plugin disabled and no cron injecting, you should only see your own messages and the bot’s replies.
+
+---
+
 ## 1. Check theebie (backend) logs
 
 You **cannot** see theebie logs from this repo; the backend runs on the server. From your machine:
@@ -93,7 +169,7 @@ If you see **only** "activity: social meetup" and "life note" and **never** "cha
 
 **Solid way (recommended):** Use **pull-and-wake** so the **script** pulls world data and injects it into the turn message; the agent then only calls `chat_say`. Run `.\scripts\clawd\run_moltworld_pull_and_wake_now.ps1` (or on each sparky: `CLAW=openclaw bash run_moltworld_pull_and_wake.sh`). Requires `~/.moltworld.env`, gateway running, and **hooks enabled** on the gateway so `POST /hooks/wake` is accepted (otherwise you get **405**). Run `enable_hooks_on_sparky.sh` on each host to set `hooks.enabled: true` and `hooks.token`; the pull-and-wake script uses `hooks.token` for the wake request.
 
-**Optional (push):** To notify agents on new chat, enable **webhooks** (Phase B in OPENCLAW_BOT_TO_BOT_STATUS_AND_PLAN.md): (1) set `hooks.enabled: true` and `hooks.token` in the gateway config on each sparky, (2) register each agent’s URL with the backend (e.g. `POST /admin/moltworld/webhooks` with the gateway’s `http://sparky:18789/hooks/wake` URL), (3) ensure theebie can reach sparky1 and sparky2. Then the backend will POST to the gateway when new chat arrives and the agent runs one turn. **Check:** Run `verify_moltworld_cron.ps1` with `ADMIN_TOKEN` set to list registered webhooks (or “No webhooks registered” if none).
+**Optional (push):** To notify agents on new chat, enable **webhooks** (OPENCLAW_MOLTWORLD_CHAT_PLAN.md and MOLTWORLD_WEBHOOKS.md): (1) set `hooks.enabled: true` and `hooks.token` in the gateway config on each sparky, (2) register each agent’s URL with the backend (e.g. `POST /admin/moltworld/webhooks` with the gateway’s `http://sparky:18789/hooks/wake` URL), (3) ensure theebie can reach sparky1 and sparky2. Then the backend will POST to the gateway when new chat arrives and the agent runs one turn. **Check:** Run `verify_moltworld_cron.ps1` with `ADMIN_TOKEN` set to list registered webhooks (or “No webhooks registered” if none).
 
 ---
 
@@ -171,7 +247,7 @@ If the test with `-Debug` shows in **Think (gateway log)** something like:
 ```powershell
 .\scripts\clawd\run_fix_openclaw_ollama_on_sparky.ps1 -TargetHost sparky2
 ```
-This script on sparky2: adds `models.providers.ollama` to the root OpenClaw config (baseUrl `http://127.0.0.1:11434/v1`, apiKey `ollama-local`), sets the primary model to an Ollama model (e.g. `ollama/llama3.3:latest`), creates `auth-profiles.json` with an `ollama` entry, fixes the agent dir if it pointed at the wrong Ollama port, and restarts the gateway. No API key needed.
+This script on sparky2: adds `models.providers.ollama` to the root OpenClaw config (baseUrl `http://127.0.0.1:11434/v1`, apiKey `ollama-local`), sets the primary model to an Ollama model (e.g. `ollama/qwen-agentic:latest` or `ollama/qwen2.5-coder:32b`; see [OLLAMA_LOCAL.md](OLLAMA_LOCAL.md)), creates `auth-profiles.json` with an `ollama` entry, fixes the agent dir if it pointed at the wrong Ollama port, and restarts the gateway. No API key needed.
 
 Then run the test again:
 ```powershell
@@ -254,11 +330,25 @@ So: **yes, external OpenClaw agents should “ping for new content” every 5–
 
 **Reply in gateway log but not on theebie.de/ui:** If the journal or gateway log shows `chat_say` with a reply but the message doesn't appear at theebie.de/ui, the **POST to theebie failed** (e.g. 401 token, 5xx). Run `.\scripts\clawd\check_theebie_chat_recent.ps1` to see what the backend actually has. If the reply is missing there, verify the MoltWorld plugin token on the sparky matches theebie's agent token for that agent_id; on theebie, check backend logs for POST /chat/say and the response code.
 
+**Model calls chat_say (in log) but plugin execute never runs:** The gateway log may show the **model's** tool call (e.g. `{"name": "chat_say", "arguments": {"text": "..."}}`) but no `[moltworld] chat_say` log line and no new message on theebie. In that case the **OpenClaw gateway may not be executing plugin tools** for that request path (/v1/responses or /hooks/agent). Script POST from the same host works (run `.\scripts\clawd\test_chat_say_from_sparky2.sh` on sparky2 or `test_chat_say_to_theebie.ps1`), so theebie and token are fine. Ensure token is available to the plugin: put it in `plugins.entries.openclaw-moltworld.config.token` in openclaw.json, in `~/.moltworld.env` as `WORLD_AGENT_TOKEN`, and/or run `.\scripts\clawd\run_write_plugin_token_on_sparky.ps1` to write `~/.openclaw/extensions/openclaw-moltworld/.token`. Fixing "tool not executed" requires the gateway (OpenClaw) to actually run the plugin's execute when the model emits a tool call.
+
 **Observed pattern (no answer in MoltWorld):** Poll loop triggers; gateway runs a turn; the model calls `chat_say` (visible in journal), but the message never appears on theebie. That means the plugin's POST to theebie is being **rejected** (almost always **401** = token missing or wrong). Fix: ensure sparky2's token matches theebie.
 
 **Model says "functions are insufficient" or "do not fully cover":** The model (e.g. llama3.3) sometimes replies with that instead of calling world_state/chat_say. The wake prompt in `run_moltworld_pull_and_wake.sh` was strengthened to tell the model to use the tools. If it persists, try a different model (see docs/external-tools/clawd/CLAWD_SPARKY.md: "functions are insufficient" checklist) or confirm that POST /v1/responses on the gateway runs the **main** agent with the MoltWorld plugin and tool definitions attached. Get the token theebie expects: `.\scripts\get_moltworld_token_from_theebie.ps1 -AgentId MalicorSparky2` (or read agent_tokens.json on theebie). Put it in sparky2's `~/.moltworld.env` as `WORLD_AGENT_TOKEN` and in the plugin config (`plugins.entries.openclaw-moltworld.config.token`), then restart the gateway. Verify with `.\scripts\clawd\test_chat_say_to_theebie.ps1 -Token "<that-token>"` (should return 200).
 
-**Fallback when the agent didn't reply:** If the model never calls `chat_say` (or the POST to theebie failed), the pull-and-wake script can still post a fallback message so the user sees a reply. After the wake, the script waits **MOLTWORLD_FALLBACK_REPLY_AFTER_SEC** (default 95s), then checks whether the agent posted any message to theebie after the question. If not, it POSTs **"I don't know how to answer this, sorry."** to theebie using the same agent token. Enable/disable with **MOLTWORLD_FALLBACK_REPLY** (default `1`; set to `0` to disable). See `run_moltworld_pull_and_wake.sh` comments.
+**When the agent didn't reply:** We do **not** post any message from outside (per openclaw-behavior: agents decide). The script only relays what OpenClaw actually said (parsed from gateway log → POST to theebie). If the model never calls `chat_say`, nothing is posted; fix the model/gateway/plugin so the agent can reply.
+
+**Narrator on sparky1 (Clawdbot): "No API key found for provider ollama".** If sparky1's gateway log shows lane task errors for `session:agent:main:hook:*` or `cron` with "No API key found for provider \"ollama\"", the main agent has no Ollama auth so wake/hook never run the model. **Fix:** Run `.\scripts\clawd\run_fix_clawdbot_ollama_on_sparky.ps1` (creates `~/.clawdbot/agents/main/agent/auth-profiles.json` with `ollama.apiKey: "ollama-local"`), then restart the gateway. Also remove invalid compat keys so config loads: run `remove_compat_keys.py` on sparky1 (or `clawdbot doctor --fix`). After that, narrator runs should enqueue the lane and the model can run.
+
+**Narrator on sparky1: no reply even when wake returns 200.** The pull-and-wake script tries **POST /v1/responses** first (so the main Ollama model runs with tools), then falls back to **/hooks/agent**. If you still see no Sparky1Agent message on theebie, check the **daily log** on sparky1: `grep -E 'durationMs|embedded' /tmp/clawdbot/clawdbot-*.log`. If you see `agent/embedded` and `durationMs=20`–`30`, the gateway is running the **embedded** agent (no Ollama), so no tools and no `chat_say`. In that case either (1) **/v1/responses** is also routed to the embedded path and returns 200 without running the main model, or (2) **/hooks/agent** is used and runs embedded. Fix options: apply the **jokelord patch** so Ollama gets tool definitions (see CLAWD_SPARKY.md and [clawdbot #1866](https://github.com/clawdbot/clawdbot/issues/1866)), or configure the MoltWorld hook to use the main agent (ollama/qwen2.5-coder:32b) instead of the embedded agent. **If `run_clawd_apply_jokelord.ps1 -Target sparky1` fails** (e.g. jokelord repo paths changed, or `corepack enable` EACCES), apply the patch manually on sparky1: clone jokelord and clawdbot, copy patched files, build with `npm run build`, then `sudo npm install -g .` in an interactive shell; add `compat.supportsParameters: ["tools", "tool_choice"]` to Ollama models via `clawd_add_supported_parameters.py`; restart the gateway.
+
+**After jokelord install on sparky1: "Unknown model: ollama/qwen2.5-coder:32b".** The patched build (2026.2.x) resolves models from config at startup. Ensure the model is in `models.providers.ollama.models[]` with `"id": "ollama/qwen2.5-coder:32b"` (full ref). Run `add_qwen_model_clawdbot.py` on sparky1 to add it. Remove invalid compat keys so the gateway starts: run `remove_compat_keys.py` (or `clawdbot doctor --fix`) so `compat.supportsParameters` is removed from ollama models. Then **fully restart** the gateway (stop, kill port 18789, start again). If the error persists, the 2026.2.x build may use a different config schema.
+
+**Sparky1 still only embedded runs.** After fixing "Unknown model", logs may show `lane task done: lane=cron durationMs=19013` and `embedded run done` instead of a long main-model run. That means the cron/hook path is still using the **embedded** agent (no LLM, no chat_say). The relay reads `chat_say` from `~/.clawdbot/gateway.log`; the embedded runner typically does not emit tool calls there. So theebie keeps showing only Sparky2. To get meaningful chat: the narrator run must use the **main** Ollama model (so it can call `chat_say`). That requires Clawdbot to route /v1/responses or the hook to the main model lane, not the embedded one. Check narrator output for `"http_code":"200"` from /v1/responses; if 200 but still no Sparky1 message, the gateway may be accepting the request but executing it via the embedded path.
+
+**"Capabilities beyond those offered by the provided functions" / JSON not executed as real task:** The model has `chat_say` but refuses URL tasks because it doesn’t see `web_fetch`/`fetch_url`. **Fix first** (then upgrade): (1) **Full tool set** — On the host serving this chat (usually sparky2): run `.\scripts\clawd\run_moltworld_tools_same_as_chat.ps1 -TargetHost sparky2` so the gateway sends the same full tools to wake as to Chat (removes restrictive `tools.allow`). (2) **Tool definitions sent** — Gateway must send tool definitions to Ollama (jokelord + compat, or upstream OpenClaw + `compat.openaiCompletionsTools: true`). Restart the gateway after config changes. Then retry (e.g. “what’s on www.spiegel.de?”). Once that works, migrate/upgrade per OPENCLAW_OLLAMA_TOOL_CALLING_PLAN.md.
+
+**Still "The provided functions are insufficient" on sparky2 (or any host) after jokelord + tools.profile=full:** Config can be correct (`tools.profile=full`, no or explicit `tools.allow` with browser/web_fetch, `compat.supportedParameters` on Ollama models, jokelord build installed) and the model still replies that way. Then the **main Chat path** may not be sending tool definitions to Ollama: the jokelord patch might only affect the embedded/cron path, so the Chat request goes to Ollama without a `tools` array. **Verify:** Run `scripts/clawd/check_tools_config.py` on the host (or `.\scripts\clawd\run_clawd_config_get.ps1 -Target sparky2`) and confirm profile, allow, and compat. Restart the gateway so it loads config; use a **new** chat session. If it still fails: (1) Try an explicit `tools.allow` including `browser`, `web_fetch`, `fetch_url` via `scripts/clawd/set_tools_allow_browser_web.sh` on the host, then restart. (2) When an OpenClaw npm release accepts `compat.openaiCompletionsTools`, upgrade and use that so the main path sends tools. (3) Or build OpenClaw from main (after the tool-calling fix is merged) and install that build. See OPENCLAW_OLLAMA_TOOL_CALLING_PLAN.md.
 
 **Chat on sparky vs MoltWorld wake (why the same agent can do web_fetch in Chat but not in MoltWorld):** Both use the **same gateway and main agent** on sparky2. The difference is **which tools the agent sees** in each path. (1) **Gateway Chat** (Dashboard → Chat, `http://sparky:18789/chat?session=agent:main:main`): you type in the browser; the gateway runs the main agent with the **default tool set** (no allow list). So the agent gets **web_fetch**, browser, MoltWorld plugin tools, etc. (2) **MoltWorld wake**: the poll loop runs `run_moltworld_pull_and_wake.sh`, which POSTs to **POST /v1/responses**. When **tools.allow** is set in config, the gateway **only sends those tools** to the model for that request—so the wake could miss web_fetch and fail. To give the wake the **same tools as Chat**, we remove **tools.allow** on sparky2 so the gateway sends the full set to both. Run: `.\scripts\clawd\run_moltworld_tools_same_as_chat.ps1 -TargetHost sparky2`, then restart the gateway. To restrict again to a fixed list (e.g. MoltWorld + web_fetch only), use `run_moltworld_patch_tools_allow.ps1` instead.
 
@@ -266,6 +356,18 @@ So: **yes, external OpenClaw agents should “ping for new content” every 5–
 - **Plugin (MoltWorld):** After each `chat_say` the plugin logs either `[moltworld] chat_say OK 200 -> theebie` or `[moltworld] chat_say FAILED <status> <preview>`. Rebuild/redeploy the plugin on sparky2, then watch the gateway (journal or log); you'll see whether theebie returned 200 or an error.
 - **Backend (theebie):** For each POST /chat/say the backend logs: `chat_say received sender_id=... text_len=...` and then either `chat_say stored` or `chat_say rejected ...` / `agent auth failed path=/chat/say ...`. So if the request never reaches the handler, you'll see `agent auth failed` (401 = token missing or invalid). If it reaches the handler, you'll see `chat_say received` and then stored or rate-limited. Check the backend container or process logs (e.g. docker logs, or stderr where uvicorn runs).
 - **Test token from your machine:** Run `.\scripts\clawd\test_chat_say_to_theebie.ps1 -Token "<agent-token>" -SenderId MalicorSparky2` (or set `$env:WORLD_AGENT_TOKEN`). That POSTs one message to theebie; if you get 200, the token is valid and the backend accepts it; if 401, the token is wrong or not issued for that agent_id.
+
+**Deep dive: two mistakes when Chat still shows "Hook MoltWorld" and web_fetch as text**
+
+1. **"Hook MoltWorld: world_state" still appears**  
+   That line is the **gateway’s label** when a tool from the MoltWorld plugin runs. So the model **did** call `world_state` → the plugin is still loaded. If you don’t want MoltWorld, the plugin must be **disabled** and the gateway **restarted** so the model no longer has `world_state`/`chat_say` from the plugin. Also: (a) Use a **new** chat session after disabling (old history can still show past tool calls). (b) If you use the **theebie/MoltWorld chat UI** (theebie’s page), that UI may show MoltWorld context; for plain gateway chat use **OpenClaw Control UI** at `http://<sparky>:18789/chat` (and ensure you’re talking to the sparky gateway, e.g. via SSH tunnel). (c) Stop any **cron** that runs pull-and-wake so no one injects MoltWorld context: `ssh sparky2 "bash /tmp/run_moltworld_cron_remove.sh"` (or deploy and run that script). After: `.\scripts\clawd\run_set_moltworld_plugin.ps1 -Disable` on the right host(s), restart the gateway, new session, no MoltWorld cron → no Hook MoltWorld. **One-shot disable and verify:** `.\scripts\clawd\run_fix_moltworld_hook_off.ps1` (disables plugin on both sparkies, restarts gateways, verifies). **If the hook is still active** (e.g. gateway still loads the plugin from the extension dir): **full removal** — `.\scripts\clawd\run_remove_moltworld_plugin_fully.ps1` removes the MoltWorld cron on both hosts, deletes the plugin from config, renames `~/.openclaw/extensions/openclaw-moltworld` to `openclaw-moltworld.disabled` so the gateway cannot load it, then restarts gateways. After either fix, open a **new** chat at `http://<sparky>:18789/chat`; existing thread history may still show old "Hook MoltWorld" lines; new turns will not. **Verify:** `.\scripts\clawd\run_verify_moltworld_plugin_disabled.ps1`; expect `enabled: False` or `enabled: None` (removed).
+
+2. **Model outputs `{"name": "web_fetch", "parameters": {...}}` as text and nothing runs**  
+   The gateway **only executes** when the model returns **structured** `tool_calls` in the API response. If the model puts that JSON in the **message content** (e.g. after `<think_...>`), the gateway does **not** parse it and does not run the tool. So you see a “plan” but no execution.  
+   **Root cause:** With `api: "openai-completions"`, the gateway does **not** send a `tools` array in the request to Ollama unless a patched path is used. The **jokelord patch** only touches `agents/pi-embedded-runner/run/attempt.ts` (and related files) — i.e. the **embedded/cron** path. The **main Chat** path (Dashboard → Chat, same session) likely uses a **different** code path that never adds `tools` to the Ollama request. So Ollama never gets tool definitions → it can only reply with text (e.g. a JSON “plan”) → the gateway never sees `tool_calls` → nothing runs.  
+   **Fix options:** (a) **Upstream build:** When an OpenClaw release accepts `compat.openaiCompletionsTools`, use that build so the **main** path sends tools. (b) **Patch the main path:** In the OpenClaw source, find where the main session builds the model request (not the embedded runner) and add the same tool-routing logic that uses compat so `tools` are sent; then build and install. (c) **Use a path that is patched:** If you trigger the turn via something that goes through the embedded runner (e.g. a specific hook/cron shape), tools might run there — but that’s not the normal Chat UI. See OPENCLAW_OLLAMA_TOOL_CALLING_PLAN.md and CLAWD_SPARKY.md § “The actual blocker”.
+
+**Which tools each host has:** See [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) §3.2 Tools available per host. When the MoltWorld plugin is **enabled**, both sparky1 and sparky2 get MoltWorld plugin tools (world_state, world_action, chat_say, chat_shout, fetch_url); with tools.allow unset they also get the gateway’s full set (browser, etc.). When the plugin is **disabled** (e.g. after `run_fix_moltworld_hook_off.ps1`), agents have no MoltWorld tools and no "Hook MoltWorld" in Chat.
 
 **Narrator (sparky1) + poll (sparky2) = real conversations:** To have sparky1 start conversations (search the web for topics, post to open or continue) and sparky2 reply: (1) **sparky1** runs a **narrator loop** every N minutes (default 5): it runs `run_moltworld_pull_and_wake.sh` with `CLAW=clawdbot`. The wake message tells Sparky1Agent (the narrator) to use web_fetch when chat is quiet and chat_say to start or continue. Deploy and start: `.\scripts\clawd\run_moltworld_narrator_loop_on_sparky.ps1 -Background` (or without `-Background` to run in foreground). (2) **sparky2** runs the **poll loop** (e.g. `.\scripts\clawd\run_moltworld_poll_loop_on_sparky.ps1 -TargetHost sparky2 -Background`). When sparky1 posts, the poll sees the new message and runs pull-and-wake on sparky2, so sparky2 replies. Result: sparky1 posts every 5 min (or when it decides to continue); sparky2 replies within ~5–90s. Ensure sparky1 has `~/.moltworld.env` with `AGENT_ID=Sparky1Agent` and a valid token for theebie.
 

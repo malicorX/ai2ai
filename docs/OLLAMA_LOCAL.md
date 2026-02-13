@@ -1,36 +1,43 @@
 # We use Ollama locally on both sparkies
 
-**No cloud API key (no Anthropic, no OpenAI) is required** for the MoltWorld math-reply test or for the OpenClaw/Clawd gateways on sparky1 and sparky2. The gateways call **Ollama** at `http://127.0.0.1:11434` on each host.
+**No cloud API key (no Anthropic, no OpenAI) is required** for the MoltWorld math-reply test or for the OpenClaw/Clawd gateways on sparky1 and sparky2. **Both gateways use local Ollama only**: each host runs Ollama at `http://127.0.0.1:11434` and the gateway on that host talks to localhost.
 
 ---
 
 ## Current Ollama models (run `ollama list` on each host)
 
-**sparky1** (as of last check):
+**sparky1:**
 ```
 NAME                       ID              SIZE      MODIFIED
-qwen2.5-coder:32b          b92d6a0bd47e    19 GB     ...
-nomic-embed-text:latest    0a109f422b47    274 MB    ...
-llama3.1:70b               711a9e8463af    42 GB     ...
-llama3.1:8b                46e0c10c039e    4.9 GB    ...
+qwen2.5-coder:32b          b92d6a0bd47e    19 GB     5 days ago
+nomic-embed-text:latest    0a109f422b47    274 MB    2 weeks ago
+llama3.1:70b               711a9e8463af    42 GB     2 months ago
+llama3.1:8b                46e0c10c039e    4.9 GB    2 months ago
 ```
 
-**sparky2** (as of last check):
+**sparky2:**
 ```
 NAME                   ID              SIZE      MODIFIED
-qwen-agentic:latest    eff468c03838    19 GB     ...
-qwen2.5-coder:32b      b92d6a0bd47e    19 GB     ...
-llama3.3:latest        a6eb4748fd29    42 GB     ...
-llava:13b              0d0eb4d7f485    8.0 GB    ...
-llama3.1:70b           711a9e8463af    42 GB     ...
-llama3.1:8b            46e0c10c039e    4.9 GB    ...
+qwen2.5-coder:32b      b92d6a0bd47e    19 GB     9 days ago
+qwen-agentic:latest    eff468c03838    19 GB     9 days ago
+llama3.3:latest        a6eb4748fd29    42 GB     12 days ago
+llama3.1:70b           711a9e8463af    42 GB     2 months ago
+llama3.1:8b            46e0c10c039e    4.9 GB    2 months ago
+llava:13b              0d0eb4d7f485    8.0 GB    2 months ago
 ```
 
-**To refresh this list:** Run on your machine:
-- `ssh sparky1 "ollama list"`
-- `ssh sparky2 "ollama list"`
+**To refresh:** `ssh sparky1 "ollama list"` and `ssh sparky2 "ollama list"`.
 
-Primary model for the replier (sparky2) is typically `ollama/llama3.3:latest` or `ollama/qwen2.5-coder:32b` (set in OpenClaw config).
+---
+
+## Primary model per host (gateway config)
+
+| Host    | Primary model (config)       | Why |
+|---------|------------------------------|-----|
+| **sparky1** | `ollama/qwen2.5-coder:32b`   | Set in `~/.openclaw/openclaw.json`. Good tool/code support, 19 GB; llama3.3 not installed on sparky1. |
+| **sparky2** | `ollama/qwen-agentic:latest` | Set in `~/.openclaw/openclaw.json`. Custom model (Modelfile from qwen2.5-coder:32b) for more tool-friendly behavior; only on sparky2. |
+
+So **we run with local Ollama only**: no cloud provider; each gateway uses the model configured as primary on that host.
 
 ---
 

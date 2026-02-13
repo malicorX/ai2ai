@@ -4,13 +4,40 @@ This doc gives the exact steps to get **tool calling** working with Clawd + Olla
 
 ---
 
+## Where and how to run `npm install -g .`
+
+**Where:** On the sparky machine (sparky1 or sparky2), **inside the Clawdbot build directory** created by the apply script. Default path:
+
+- **`~/clawdbot-jokelord-build/clawdbot`**
+
+(or whatever `$CLAWDBOT_BUILD_DIR` was when you ran the script; the script prints "Build dir: ..." at the start).
+
+**How:**
+
+1. SSH to the sparky:  
+   `ssh sparky1` or `ssh sparky2`
+2. Load Node if you use nvm:  
+   `source ~/.nvm/nvm.sh && nvm use 22` (or `nvm use default`)
+3. Go to the build dir and install globally:  
+   `cd ~/clawdbot-jokelord-build/clawdbot && npm install -g .`
+4. If you get **EACCES** (permission denied), use sudo:  
+   `cd ~/clawdbot-jokelord-build/clawdbot && sudo npm install -g .`
+
+The apply script (`clawd_apply_jokelord_on_sparky.sh`) runs steps 3–4 for you at the end: it tries `npm install -g .` first (user global), then `sudo npm install -g .` only if you're in an **interactive** terminal. If you ran the script over SSH non-interactively, it may skip sudo and instead print:  
+`Run manually: cd "~/clawdbot-jokelord-build/clawdbot" && npm install -g .`  
+In that case, SSH in interactively and run the `cd ... && npm install -g .` (or with `sudo`) on that host.
+
+**After install:** The `clawdbot` (or `openclaw`) binary in your PATH will be the patched one. Restart the gateway so it uses the new binary; add model config (e.g. `add_qwen_model_clawdbot.py`, `remove_compat_keys.py`) as in AGENT_CHAT_DEBUG.md if you see "Unknown model" or invalid config.
+
+---
+
 ## What gets done
 
-1. **Build:** Clone Clawdbot source, copy jokelord’s patched files (4 files), build, install globally on sparky2.
+1. **Build:** Clone Clawdbot source, copy jokelord’s patched files (4 files), build, run **`pnpm run ui:build`** (Control UI for `/chat`), install globally on sparky2.
 2. **Config:** Add `compat.supportedParameters: ["tools", "tool_choice"]` to every Ollama model in `~/.clawdbot/clawdbot.json`.
 3. **Restart:** Restart the gateway so it loads the new binary and config.
 
-After that, the gateway will send tools to Ollama and run tool calls (browser, exec, etc.).
+After that, the gateway will send tools to Ollama and run tool calls (browser, exec, etc.). The Control UI at `http://<sparky>:18789/chat` will load (no "Control UI assets not found") because the build includes `dist/control-ui/`. If you see that error on an older build, see AGENT_CHAT_DEBUG.md § 0.2.
 
 ---
 
@@ -80,7 +107,7 @@ clawdbot gateway stop; sleep 2; nohup clawdbot gateway >> ~/.clawdbot/gateway.lo
 - **Wrong tag:** Set the Clawdbot tag before running the apply script, e.g.  
   `export CLAWDBOT_TAG=main`  
   then run `bash clawd_apply_jokelord_on_sparky.sh` again (or clone from a tag that exists in the repo).
-- **Missing patched file:** Check that jokelord’s repo has `openclawd-2026.1.24/src/config/zod-schema.core.ts` (and the other 3 files). If paths changed, copy the patched files from [jokelord/openclaw-local-model-tool-calling-patch](https://github.com/jokelord/openclaw-local-model-tool-calling-patch) into your Clawdbot `src/` by hand and run `npm run build` and `sudo npm install -g .` in the Clawdbot clone.
+- **Missing patched file:** Check that jokelord’s repo has `openclawd-2026.2.3/src/config/zod-schema.core.ts` (and the other 3 files). If paths changed, copy the patched files from [jokelord/openclaw-local-model-tool-calling-patch](https://github.com/jokelord/openclaw-local-model-tool-calling-patch) into your Clawdbot `src/` by hand and run `npm run build` and `sudo npm install -g .` in the Clawdbot clone.
 - **Node/npm:** Ensure Node 22+ and npm are installed on sparky2 (`node -v`, `npm -v`).
 - **`pnpm: not found`:** The script installs pnpm automatically (via corepack or `npm install -g pnpm`). If it still fails, install manually: `npm install -g pnpm` (or enable corepack: `corepack enable` then `corepack prepare pnpm@latest --activate`).
 - **TS errors (resolveClawdbotAgentDir, ToolsLinksSchema, systemPrompt, etc.):** The apply script runs `clawd_jokelord_compat_fixes.sh` after copying the 4 jokelord files. That script aligns the patch with current Clawdbot (OpenClaw naming, `ToolsLinksSchema` in zod-schema.core, compact.ts getter, and removes unsupported `systemPrompt` from session options). Ensure both `clawd_apply_jokelord_on_sparky.sh` and `clawd_jokelord_compat_fixes.sh` are present in `~/ai2ai/scripts/clawd` and re-run.

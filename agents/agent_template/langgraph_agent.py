@@ -275,6 +275,15 @@ def node_perceive(state: AgentState, config: RunnableConfig | None = None) -> Ag
         "self": {"x": int(me.get("x", 0)) if me else 0, "y": int(me.get("y", 0)) if me else 0, "place_id": place_id},
         "nearby_agents": nearby_agents,
     }
+    # Goal continuity: clear short_term when we have arrived at its target (see WORLD_MODEL § Goal tiers).
+    cur_goals = state.get("current_goals") or {}
+    st = cur_goals.get("short_term")
+    if isinstance(st, dict) and (str(st.get("type") or "") == "move_to"):
+        target = str(st.get("target") or "").strip()
+        if target and place_id == target:
+            state["current_goals"] = {k: v for k, v in (cur_goals or {}).items() if k != "short_term"}
+            if not state["current_goals"]:
+                state["current_goals"] = {}
 
     # Fetch last job status if available (supports verify/learn loop).
     last_id = str(state.get("last_job_id") or "").strip()
@@ -464,31 +473,61 @@ def _count_rejections_for_root(rejected_jobs: List[dict], root_id: str) -> int:
     return n
 
 
-def _llm_decide(state: AgentState, tools: Tools) -> Optional[dict]:
+def _llm_decide(state: AgentState, tools: Tools) -> tuple[Optional[dict], Optional[dict]]:
     """
     Ask the LLM (OpenClaw-style) to choose exactly one action. All agent behavior must be done by the LLM.
-    Returns an action dict, or None if noop or parse failure (fallback to code logic).
+    Returns (action_dict, goals_update). action_dict is None if noop or parse failure (fallback to code logic).
+    goals_update is optional dict (short_term, medium_term, long_term) to merge into state["current_goals"].
     Actions: noop | move | chat_say | board_post | propose_job | execute_job | review_job.
     """
     world = state.get("world") or {}
     agents = world.get("agents") or []
+    landmarks = world.get("landmarks") or []
     chat_msgs = state.get("chat_recent") or []
     balance = _safe_float(state.get("balance"), 0.0)
     agent_id = str(state.get("agent_id") or "")
-    persona = str(state.get("persona") or "")[:400]
+    persona = str(state.get("persona") or "")[:3200]
     role = str(state.get("role") or "executor")
     run_tag = _run_tag(state.get("run_id") or "")
+    world_model = state.get("world_model") or {}
+    self_pos = world_model.get("self") or {}
+    my_x, my_y = int(self_pos.get("x", 0)), int(self_pos.get("y", 0))
+    current_place = str(self_pos.get("place_id") or "").strip()
+    goals = state.get("current_goals") or {}
 
     agents_line = "; ".join(
         f"{a.get('agent_id', '?')} at ({a.get('x', 0)},{a.get('y', 0)})"
         for a in agents[:5]
     ) or "none"
+    landmarks_line = "; ".join(
+        f"{lm.get('id', '?')} at ({lm.get('x', 0)},{lm.get('y', 0)})"
+        for lm in landmarks[:12]
+    ) or "none"
+    goals_line = "none"
+    if goals:
+        parts = []
+        for tier in ("short_term", "medium_term", "long_term"):
+            v = goals.get(tier)
+            if v is None:
+                continue
+            if isinstance(v, dict):
+                parts.append(f"{tier}: {v.get('type', '?')} target={v.get('target', '')} reason={str(v.get('reason', ''))[:80]}")
+            else:
+                parts.append(f"{tier}: {v!s}")
+        goals_line = "; ".join(parts) if parts else "none"
+
     chat_lines = []
+    last_sender = None
     for m in chat_msgs[-8:]:
         sid = m.get("sender_id") or "?"
+        last_sender = sid
         text = (m.get("text") or "")[:150]
         chat_lines.append(f"  {sid}: {text}")
     chat_block = "\n".join(chat_lines) if chat_lines else "  (no recent messages)"
+    # Remind to reply meaningfully when the other agent just spoke
+    reply_reminder = ""
+    if chat_lines and last_sender is not None and str(last_sender).strip() != str(agent_id).strip():
+        reply_reminder = "Last message in chat is from another agent; if you use chat_say, reference what they said or answer their question. Give a concrete answer or one specific follow-up, not a generic greeting.\n"
 
     open_jobs = state.get("open_jobs") or []
     my_claimed = state.get("my_claimed_jobs") or []
@@ -510,11 +549,25 @@ def _llm_decide(state: AgentState, tools: Tools) -> Optional[dict]:
     has_submitted = bool(my_submitted)
 
     sys_decide = (
-        "You are an agent in a 2D world. You have a role (proposer or executor), see other agents, chat, and jobs.\n"
+        "You are an agent in a 2D world. You have a role (proposer, executor, or explorer), see other agents, chat, and jobs.\n"
         "Choose exactly ONE action per turn. Reply with JSON only.\n"
+        "Meaningful conversation: When the last chat message is from another agent, your chat_say must reference what they "
+        "said—answer their question, comment on their suggestion, or give one concrete next step (topic, place, or action). "
+        "Avoid generic greetings when they already said something specific. Discovery: Use web_search to find topics or jobs "
+        "to discuss; move toward board/cafe to see what's there; after finding something, use board_post or propose_job when "
+        "appropriate. Do not only chat—mix in move, web_search, board_post, propose_job, or execute_job so you discover and "
+        "do new things.\n"
+        "Do over discuss: Prefer doing one concrete action over only talking about plans. Do not reply with only a plan "
+        "or a promise to do something later; do one thing now (move, go_to, propose_job, execute_job, review_job, or board_post) "
+        "when possible. When the conversation has agreed to go somewhere (e.g. board, cafe, rules), use go_to with that target—do not only say \"let's go\"; actually move.\n"
+        "Use chat_say for short coordination or a direct reply when needed, not for lengthy planning.\n"
+        "Role rules: Proposer — if you have submitted jobs awaiting review, do review_job first; if you have no open job "
+        "and none awaiting review, prefer propose_job. Executor — if there are open or claimed jobs, prefer execute_job "
+        "over chat_say. Explorer — you do not propose, execute, or review jobs; use only move, go_to, chat_say, board_post, and web_search to explore the world and discover things.\n"
         "Actions and required keys:\n"
         "- noop: {\"kind\": \"noop\"}\n"
         "- move: {\"kind\": \"move\", \"dx\": -1|0|1, \"dy\": -1|0|1}\n"
+        "- go_to: {\"kind\": \"go_to\", \"target\": \"board\"} — take one step toward the landmark (target = board, cafe, rules, market, computer, home_1, home_2). Use this when you or the other agent said you're going somewhere; do not only say it—go_to actually moves you.\n"
         "- chat_say: {\"kind\": \"chat_say\", \"text\": \"...\"}\n"
         "- board_post: {\"kind\": \"board_post\", \"title\": \"...\", \"body\": \"...\"}\n"
         "- propose_job: {\"kind\": \"propose_job\", \"job\": {\"title\": \"...\", \"body\": \"...\", \"reward\": 0.01}}\n"
@@ -523,77 +576,173 @@ def _llm_decide(state: AgentState, tools: Tools) -> Optional[dict]:
         "  (executor only; job_id must be from open/claimed jobs list)\n"
         "- review_job: {\"kind\": \"review_job\", \"job_id\": \"<uuid>\", \"approved\": true|false, \"note\": \"...\"}\n"
         "  (proposer only; job_id must be from AWAITING_REVIEW list)\n"
+        "- web_search: {\"kind\": \"web_search\", \"query\": \"search phrase\", \"num\": 5}\n"
+        "  Use to research before proposing a job or to answer a question. Next turn you will see the results; then propose_job, chat_say, or board_post using them.\n"
+        "Goal continuity: You have short/medium/long-term goals. If you have a short-term goal (e.g. move_to cafe), "
+        "do NOT switch to something else until you arrive or explicitly abandon it. Prefer a move (dx,dy) that steps "
+        "toward your short_term target. You may optionally output \"goals\": {\"short_term\": {\"type\": \"move_to\", \"target\": \"cafe\", \"reason\": \"...\"}, ...} "
+        "to set or clear goals (use null to clear a tier). When you arrive at the target place, clear short_term or set the next goal.\n"
         "Rules: proposer must review submitted jobs before proposing new ones. Executor should execute when jobs available."
     )
+    # Nudge: if last 2+ actions were only chat or noop, suggest a concrete action this turn
+    last_kinds = list(state.get("last_action_kinds") or [])
+    all_chat_or_noop = len(last_kinds) >= 2 and all(k in ("chat_say", "noop") for k in last_kinds)
+    nudge_line = ""
+    if all_chat_or_noop:
+        nudge_line = (
+            f"Your last {len(last_kinds)} actions were: {', '.join(last_kinds)}. "
+            "Prefer a concrete action this turn (move, go_to, propose_job, execute_job, review_job, board_post, or web_search) unless you must reply to a direct question.\n"
+        )
+    # Nudge: if recent chat mentioned going to board/cafe/rules, use go_to—do not only say it
+    go_there_nudge = ""
+    recent_text = " ".join((m.get("text") or "").lower() for m in chat_msgs[-4:])
+    for landmark in ("board", "cafe", "rules", "market"):
+        if landmark in recent_text and any(
+            phrase in recent_text for phrase in ("go to", "head to", "move to", "toward", "towards", "let's go", "let us go")
+        ):
+            go_there_nudge = (
+                f"Recent chat agreed to go to the {landmark} (or similar). Use go_to with target \"{landmark}\" this turn to actually move—do not only chat_say.\n"
+            )
+            break
+    if go_there_nudge:
+        nudge_line = go_there_nudge + (nudge_line or "")
+    # Nudge: if not at rules and no short-term goal (or last actions were chat/noop), suggest visiting rules room
+    if current_place != "rules" and (not goals.get("short_term") or all_chat_or_noop):
+        rules_nudge = "If you have no other goal this turn, prefer go_to target=rules to read the ai$ rules (landmark at (12,10)).\n"
+        nudge_line = rules_nudge + (nudge_line or "")
+    # Last web_search result (so LLM can use it to propose a job or reply)
+    last_search = state.get("last_web_search_result") or {}
+    search_block = ""
+    if last_search:
+        q = last_search.get("query") or "?"
+        res = last_search.get("results") or []
+        parts = [f"Query: {q}"]
+        for i, r in enumerate(res[:8]):
+            if isinstance(r, dict):
+                title = (r.get("title") or "")[:80]
+                snippet = (r.get("snippet") or r.get("description") or "")[:120]
+                url = (r.get("url") or "")[:60]
+                parts.append(f"  {i+1}. {title} | {snippet} | {url}")
+            else:
+                parts.append(f"  {i+1}. {str(r)[:150]}")
+        search_block = (
+            "Last web_search result (use it this turn—propose_job, chat_say, or board_post with a specific finding):\n"
+            + "\n".join(parts)
+            + "\n"
+        )
+    recent_earnings = state.get("recent_earnings") or []
+    earn_how = str(state.get("earn_how") or "").strip()
+    earnings_block = ""
+    if recent_earnings:
+        lines = [f"  {e.get('amount', 0)} ai$: {e.get('reason', '?')}" for e in recent_earnings[:5]]
+        earnings_block = "Recent earnings (learn what works):\n" + "\n".join(lines) + "\n"
+    if earn_how:
+        earnings_block = earnings_block + "How to earn ai$: " + earn_how[:400] + "\n"
     user_decide = (
         f"Role: {role}\nAgent: {agent_id}\nPersona: {persona}\n"
         f"Balance: {balance} ai$\n"
+        f"{earnings_block}"
+        f"{reply_reminder}"
+        f"{nudge_line}"
+        f"{search_block}"
+        f"You are at ({my_x},{my_y}), current place_id: {current_place or 'none'}\n"
+        f"Landmarks (id at (x,y)): {landmarks_line}\n"
+        f"Current goals: {goals_line}\n"
         f"Agents: {agents_line}\n"
         f"Recent chat:\n{chat_block}\n"
         f"Jobs (open/claimed/submitted):\n{jobs_block}\n"
         f"Proposer has open job: {has_open}\nProposer has submitted jobs awaiting review: {has_submitted}\n"
-        "Output one JSON object now."
+        "Output one JSON object (optional \"goals\" key to update goals)."
     )
     try:
-        raw = llm_chat(sys_decide, user_decide, max_tokens=600)
+        raw = llm_chat(sys_decide, user_decide, max_tokens=700)
         obj = _extract_json_obj(raw) or {}
+        goals_update = None
+        if "goals" in obj and isinstance(obj.get("goals"), dict):
+            g = obj["goals"]
+            goals_update = {}
+            for tier in ("short_term", "medium_term", "long_term"):
+                if tier in g:
+                    v = g[tier]
+                    if v is None:
+                        goals_update[tier] = None
+                    elif isinstance(v, dict):
+                        goals_update[tier] = {k: v.get(k) for k in ("type", "target", "reason") if k in v}
+                        if not goals_update[tier]:
+                            goals_update[tier] = v
+            if not goals_update:
+                goals_update = None
+
         kind = str(obj.get("kind") or "noop").strip().lower()
         if kind == "noop":
-            return None
+            return (None, goals_update)
 
         if kind == "move":
             dx = max(-1, min(1, int(obj.get("dx", 0))))
             dy = max(-1, min(1, int(obj.get("dy", 0))))
-            return {"kind": "move", "dx": dx, "dy": dy, "note": "llm_decide"}
+            return ({"kind": "move", "dx": dx, "dy": dy, "note": "llm_decide"}, goals_update)
+
+        if kind == "go_to":
+            target = str(obj.get("target") or "").strip().lower()
+            if target:
+                return ({"kind": "go_to", "target": target, "note": "llm_decide"}, goals_update)
+            return (None, goals_update)
 
         if kind == "chat_say":
             text = str(obj.get("text") or "").strip()[:500]
             if text:
-                return {"kind": "chat_say", "text": text, "note": "llm_decide"}
-            return None
+                return ({"kind": "chat_say", "text": text, "note": "llm_decide"}, goals_update)
+            return (None, goals_update)
 
         if kind == "board_post":
             title = str(obj.get("title") or "").strip()[:200]
             body = str(obj.get("body") or "").strip()[:2000]
             if title or body:
-                return {"kind": "board_post", "title": title or "(no title)", "body": body or "", "note": "llm_decide"}
-            return None
+                return ({"kind": "board_post", "title": title or "(no title)", "body": body or "", "note": "llm_decide"}, goals_update)
+            return (None, goals_update)
 
         if kind == "propose_job":
             if role != "proposer" or has_submitted or has_open:
-                return None
+                return (None, goals_update)
             job = obj.get("job") or {}
             title = str(job.get("title") or "").strip()[:200]
             body = str(job.get("body") or "").strip()[:4000]
             reward = max(0.01, min(0.5, _safe_float(job.get("reward"), 0.01)))
             if not title or not body:
-                return None
+                return (None, goals_update)
             if run_tag and run_tag not in title:
                 title = f"{run_tag} {title}".strip()
-            return {"kind": "propose_job", "job": {"title": title, "body": body, "reward": reward}, "note": "llm_decide"}
+            return ({"kind": "propose_job", "job": {"title": title, "body": body, "reward": reward}, "note": "llm_decide"}, goals_update)
 
         if kind == "execute_job":
             if role != "executor":
-                return None
+                return (None, goals_update)
             jid = str(obj.get("job_id") or "").strip()
             if jid not in valid_job_ids:
-                return None
+                return (None, goals_update)
             job = next((j for j in (my_claimed + open_jobs) if str(j.get("job_id") or "") == jid), None)
-            return {"kind": "execute_job", "job_id": jid, "job_obj": job or {}, "note": "llm_decide"}
+            return ({"kind": "execute_job", "job_id": jid, "job_obj": job or {}, "note": "llm_decide"}, goals_update)
 
         if kind == "review_job":
             if role != "proposer" or not my_submitted:
-                return None
+                return (None, goals_update)
             jid = str(obj.get("job_id") or "").strip()
             sub_job = next((j for j in my_submitted if str(j.get("job_id") or "") == jid), None)
             if not sub_job:
-                return None
+                return (None, goals_update)
             approved = bool(obj.get("approved", False))
             note = str(obj.get("note") or "")[:500]
-            return {"kind": "review_job", "job_id": jid, "job_obj": sub_job, "approved": approved, "note": note, "note_extra": "llm_decide"}
+            return ({"kind": "review_job", "job_id": jid, "job_obj": sub_job, "approved": approved, "note": note, "note_extra": "llm_decide"}, goals_update)
+
+        if kind == "web_search":
+            query = str(obj.get("query") or "").strip()[:400]
+            num = max(1, min(10, int(obj.get("num", 5))))
+            if query:
+                return ({"kind": "web_search", "query": query, "num": num, "note": "llm_decide"}, goals_update)
+            return (None, goals_update)
     except Exception:
         pass
-    return None
+    return (None, None)
 
 
 def node_decide(state: AgentState, config: RunnableConfig | None = None) -> AgentState:
@@ -602,9 +751,17 @@ def node_decide(state: AgentState, config: RunnableConfig | None = None) -> Agen
     run_tag = _run_tag(state.get("run_id", ""))
 
     # OpenClaw-driven: LLM chooses all actions (move, chat_say, board_post, propose_job, execute_job, review_job).
-    llm_action = _llm_decide(state, tools)
+    llm_action, goals_update = _llm_decide(state, tools)
     if llm_action is not None:
         state["action"] = llm_action
+        if goals_update is not None:
+            cur = dict(state.get("current_goals") or {})
+            for k, v in goals_update.items():
+                if v is None:
+                    cur.pop(k, None)
+                else:
+                    cur[k] = v
+            state["current_goals"] = cur
         return state
 
     # Fallback when LLM returns noop or parse fails: use code-based decide so the agent does not get stuck.
@@ -1360,6 +1517,9 @@ def node_act(state: AgentState, config: RunnableConfig | None = None) -> AgentSt
     tools = _get_tools(state, config)
     act = state.get("action") or {"kind": "noop"}
     kind = act.get("kind", "noop")
+    # Record this action for next turn (nudge: prefer concrete action after repeated chat/noop)
+    prev = list(state.get("last_action_kinds") or [])
+    state["last_action_kinds"] = (prev + [kind])[-3:]
 
     if kind == "move":
         dx = int(act.get("dx", 0))
@@ -1374,6 +1534,32 @@ def node_act(state: AgentState, config: RunnableConfig | None = None) -> AgentSt
                     pass
             except Exception:
                 pass
+        return state
+
+    if kind == "go_to":
+        target = str(act.get("target") or "").strip().lower()
+        if target and tools.get("world_move"):
+            world = state.get("world") or {}
+            world_model = state.get("world_model") or {}
+            self_pos = world_model.get("self") or {}
+            my_x = int(self_pos.get("x", 0))
+            my_y = int(self_pos.get("y", 0))
+            landmarks = world.get("landmarks") or []
+            lm = next((m for m in landmarks if str(m.get("id") or "").strip().lower() == target), None)
+            if lm is not None:
+                lm_x = int(lm.get("x", 0))
+                lm_y = int(lm.get("y", 0))
+                dx = 0 if lm_x == my_x else (1 if lm_x > my_x else -1)
+                dy = 0 if lm_y == my_y else (1 if lm_y > my_y else -1)
+                try:
+                    tools["world_move"](dx, dy)
+                    state["acted"] = True
+                    try:
+                        tools["trace_event"]("action", "go_to", {"target": target, "dx": dx, "dy": dy})
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
         return state
 
     if kind == "chat_say":
@@ -1404,6 +1590,27 @@ def node_act(state: AgentState, config: RunnableConfig | None = None) -> AgentSt
                         pass
             except Exception:
                 pass
+        return state
+
+    if kind == "web_search":
+        query = str(act.get("query") or "").strip()[:400]
+        num = max(1, min(10, int(act.get("num", 5))))
+        if query and tools.get("web_search"):
+            try:
+                out = tools["web_search"](query, num)
+                results = out.get("results") or []
+                state["last_web_search_result"] = {"query": query, "results": results}
+                state["acted"] = True
+                try:
+                    tools["trace_event"]("action", "web_search", {"query": query[:200], "count": len(results)})
+                except Exception:
+                    pass
+            except Exception as e:
+                state["last_web_search_result"] = {"query": query, "results": [], "error": str(e)[:200]}
+                try:
+                    tools["trace_event"]("status", "web_search failed", {"query": query[:200], "error": str(e)[:150]})
+                except Exception:
+                    pass
         return state
 
     if kind == "propose_job":

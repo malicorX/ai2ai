@@ -36,6 +36,7 @@ ECONOMY_PATH = DATA_DIR / "economy_ledger.jsonl"
 JOBS_PATH = DATA_DIR / "jobs_events.jsonl"
 EVENTS_PATH = DATA_DIR / "events_events.jsonl"
 CHAT_PATH = DATA_DIR / "chat_messages.jsonl"
+AGENTS_PATH = DATA_DIR / "agents.json"  # persist agents so they survive backend restart
 TRACE_PATH = DATA_DIR / "trace_events.jsonl"
 AUDIT_PATH = DATA_DIR / "audit_log.jsonl"
 RUNS_DIR = DATA_DIR / "runs"
@@ -54,6 +55,8 @@ STARTING_AIDOLLARS = float(os.getenv("STARTING_AIDOLLARS", "100"))
 TREASURY_ID = os.getenv("TREASURY_ID", "treasury")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 AGENT_TOKENS_PATH = os.getenv("AGENT_TOKENS_PATH", "").strip()
+# Optional: if set, POST /world/agent/register requires body.registration_secret to match (so only trusted callers can register).
+REGISTRATION_SECRET = os.getenv("REGISTRATION_SECRET", "").strip()
 
 _log = logging.getLogger(__name__)
 TASK_FAIL_PENALTY = float(os.getenv("TASK_FAIL_PENALTY", "1.0"))
@@ -88,6 +91,8 @@ SERPER_SEARCH_URL = "https://google.serper.dev/search"
 # Run/session id (helps agents reset local state after /admin/new_run without restarting containers)
 _run_id: str = time.strftime("%Y%m%d-%H%M%S")
 _run_started_at: float = time.time()
+# Bump when deploying UI/API changes so clients can confirm they have the latest (and /ui gets no-cache)
+BACKEND_VERSION = "1.0.0.4"
 
 EMBEDDINGS_BASE_URL = os.getenv("EMBEDDINGS_BASE_URL", "").rstrip("/")
 EMBEDDINGS_MODEL = os.getenv("EMBEDDINGS_MODEL", "llama3.1:8b")
@@ -245,6 +250,72 @@ class AgentState:
     last_seen_at: float = 0.0
 
 
+_agents_save_debounce_at: float = 0.0
+_agents_save_debounce_sec: float = 2.0
+
+
+def _load_agents() -> None:
+    """Restore agents from disk so they survive backend restart. If no file, seed from chat senders."""
+    global _agents
+    if AGENTS_PATH.exists():
+        try:
+            raw = AGENTS_PATH.read_text(encoding="utf-8", errors="replace")
+            data = json.loads(raw)
+            if isinstance(data, dict) and data:
+                for aid, d in data.items():
+                    if not isinstance(d, dict) or not aid:
+                        continue
+                    try:
+                        _agents[aid] = AgentState(
+                            agent_id=str(aid),
+                            display_name=str(d.get("display_name") or aid),
+                            x=int(d.get("x", 0)),
+                            y=int(d.get("y", 0)),
+                            last_seen_at=float(d.get("last_seen_at", 0)),
+                        )
+                    except Exception:
+                        continue
+                return
+        except Exception:
+            pass
+    # No file or empty: seed from chat so agents reappear after restart
+    for m in _chat:
+        sid = str(m.sender_id or "").strip()
+        if sid and sid not in _agents:
+            _agents[sid] = AgentState(
+                agent_id=sid,
+                display_name=str(m.sender_name or sid),
+                x=0,
+                y=0,
+                last_seen_at=float(m.created_at),
+            )
+    if _agents:
+        _save_agents(force=True)
+
+
+def _save_agents(force: bool = False) -> None:
+    """Write agents to disk (debounced so we don't write on every move)."""
+    global _agents_save_debounce_at
+    now = time.time()
+    if not force and (now - _agents_save_debounce_at) < _agents_save_debounce_sec:
+        return
+    _agents_save_debounce_at = now
+    try:
+        data = {
+            aid: {
+                "agent_id": a.agent_id,
+                "display_name": a.display_name,
+                "x": a.x,
+                "y": a.y,
+                "last_seen_at": a.last_seen_at,
+            }
+            for aid, a in _agents.items()
+        }
+        AGENTS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=0), encoding="utf-8")
+    except Exception:
+        pass
+
+
 class MoveRequest(BaseModel):
     dx: Optional[int] = None
     dy: Optional[int] = None
@@ -263,6 +334,13 @@ class TokenRequest(BaseModel):
     agent_name: str
     purpose: str = ""
     contact: str = ""
+
+
+class RegisterAgentRequest(BaseModel):
+    """Self-service registration: get an agent identity + token + starting balance."""
+    display_name: str = ""
+    agent_id: str = ""  # optional; if provided and not taken, use it; else backend generates
+    registration_secret: str = ""  # required if REGISTRATION_SECRET is set on server
 
 
 class TokenIssueRequest(BaseModel):
@@ -290,6 +368,8 @@ class WorldSnapshot(BaseModel):
     landmarks: List[dict]
     agents: List[dict]
     recent_chat: List[dict] = []  # last N messages so agents can see what others said (receive path)
+    rules: str = ""  # ai$ rewards and penalties; agents should read this
+    rules_reminder: str = "Check the 'rules' field (or GET /rules) to see what gives or costs ai$. You should read the rules."
 
 
 app = FastAPI(title="AI Village Backend (v1)")
@@ -334,6 +414,12 @@ async def audit_middleware(request: Request, call_next):
     req2 = Request(request.scope, receive)
     resp = await call_next(req2)
     dur_ms = (time.time() - started) * 1000.0
+
+    # Prevent caching of the viewer UI so reload always gets latest after deploy
+    path = (request.url.path or "").rstrip("/")
+    if path == "/ui" and (resp.headers.get("content-type") or "").split(";")[0].strip().lower() == "text/html":
+        resp.headers["Cache-Control"] = "no-cache, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
 
     try:
         preview_bytes = body[:4096]
@@ -412,6 +498,7 @@ def _is_agent_route_allowed(request: Request) -> bool:
         ("POST", "/chat/shout"),
         ("GET", "/chat/inbox"),
         ("POST", "/world/agent/request_token"),
+        ("POST", "/world/agent/register"),
     }
     if (method, path) in allowed_exact:
         return True
@@ -444,6 +531,7 @@ def _is_public_route(request: Request) -> bool:
     if (method, path) in {
         ("GET", "/health"),
         ("POST", "/world/agent/request_token"),
+        ("POST", "/world/agent/register"),
     }:
         return True
     # Read-only world viewer (no auth) so the UI at /ui can show world, board, trace, etc.
@@ -463,6 +551,8 @@ def _is_public_route(request: Request) -> bool:
         if path == "/chat/topic" or path == "/chat/recent" or path == "/chat/history":
             return True
         if path == "/economy/balances":
+            return True
+        if path == "/rules":
             return True
     return False
 
@@ -558,7 +648,7 @@ def onboard_wizard():
 
 @app.get("/run")
 def run_info():
-    return {"run_id": _run_id, "started_at": _run_started_at, "backend_version": "balanced_array"}
+    return {"run_id": _run_id, "started_at": _run_started_at, "backend_version": BACKEND_VERSION}
 
 
 def _list_run_dirs(limit: int = 50) -> list[dict]:
@@ -1944,6 +2034,7 @@ _landmarks = [
     {"id": "cafe", "x": 6, "y": 6, "type": "cafe"},
     {"id": "market", "x": 20, "y": 12, "type": "market"},
     {"id": "computer", "x": 16, "y": 16, "type": "computer_access"},
+    {"id": "rules", "x": 12, "y": 10, "type": "rules_room"},  # Walk here to read ai$ rules (also in world_state.rules)
     {"id": "home_1", "x": 3, "y": 26, "type": "home"},
     {"id": "home_2", "x": 28, "y": 4, "type": "home"},
 ]
@@ -2407,6 +2498,7 @@ def _load_chat() -> None:
 
 
 _load_chat()
+_load_agents()
 
 _topic: str = "getting started"
 _topic_set_at: float = 0.0
@@ -2771,6 +2863,163 @@ def ensure_account(agent_id: str) -> None:
 
 
 _load_economy()
+
+# ---- Action diversity & Fiverr discovery rewards (agents earn ai$ by doing) ----
+REWARD_ACTION_DIVERSITY_BASE = float(os.getenv("REWARD_ACTION_DIVERSITY_BASE", "0.02"))
+REWARD_ACTION_DIVERSITY_WINDOW = int(os.getenv("REWARD_ACTION_DIVERSITY_WINDOW", "20"))
+REWARD_FIVERR_DISCOVERY = float(os.getenv("REWARD_FIVERR_DISCOVERY", "0.5"))
+REWARD_FIVERR_MIN_TEXT_LEN = int(os.getenv("REWARD_FIVERR_MIN_TEXT_LEN", "40"))
+
+# Chat repetition: penalize ai$ when an agent says something too similar to their recent messages
+CHAT_REPETITION_PENALTY_AIDOLLAR = float(os.getenv("CHAT_REPETITION_PENALTY_AIDOLLAR", "0.5"))
+CHAT_REPETITION_WINDOW = int(os.getenv("CHAT_REPETITION_WINDOW", "10"))  # last N messages from same agent
+CHAT_REPETITION_SIMILARITY_THRESHOLD = float(os.getenv("CHAT_REPETITION_SIMILARITY_THRESHOLD", "0.82"))
+
+_action_history: Dict[str, List[tuple]] = {}  # agent_id -> [(action_kind, created_at), ...] last 30
+_fiverr_awarded: List[dict] = []  # [{agent_id, url_key, date_str}] last 500
+_fiverr_awarded_max = 500
+
+
+def _action_diversity_decay(agent_id: str, action_kind: str) -> float:
+    """Return multiplier 1.0, 0.5, 0.25, or 0.1 based on how often this action_kind appears in recent window."""
+    history = _action_history.get(agent_id) or []
+    window = history[-REWARD_ACTION_DIVERSITY_WINDOW:]
+    same_count = sum(1 for (k, _) in window if k == action_kind)
+    if same_count == 0:
+        return 1.0
+    if same_count == 1:
+        return 0.5
+    if same_count == 2:
+        return 0.25
+    return 0.1
+
+
+async def _award_action_diversity(agent_id: str, action_kind: str) -> Optional[float]:
+    """Record action and award ai$ with decay for repetition. Returns amount awarded or None."""
+    decay = _action_diversity_decay(agent_id, action_kind)
+    now = time.time()
+    history = _action_history.setdefault(agent_id, [])
+    history.append((action_kind, now))
+    if len(history) > 30:
+        del history[: len(history) - 30]
+    ensure_account(agent_id)
+    ensure_account(TREASURY_ID)
+    amount = round(REWARD_ACTION_DIVERSITY_BASE * decay, 4)
+    if amount < 0.001:
+        return None
+    req = AwardRequest(
+        to_id=agent_id,
+        amount=amount,
+        reason=f"action_diversity ({action_kind})",
+        by="system",
+    )
+    await economy_award(req)
+    return amount
+
+
+def _extract_fiverr_url(text: str) -> Optional[str]:
+    """Return first fiverr.com URL in text, normalized (lower, no fragment), or None."""
+    if not text or "fiverr.com" not in text.lower():
+        return None
+    m = re.search(r"https?://[^\s\)\]\"]+fiverr\.com[^\s\)\]\"]*", text, re.IGNORECASE)
+    if not m:
+        return None
+    url = m.group(0).lower()
+    if "?" in url:
+        url = url.split("?")[0]
+    if "#" in url:
+        url = url.split("#")[0]
+    return url.strip()
+
+
+async def _try_award_fiverr_discovery(agent_id: str, text: str) -> Optional[float]:
+    """If text contains a fiverr.com URL and is long enough, award once per (agent, url) per day."""
+    if len((text or "").strip()) < REWARD_FIVERR_MIN_TEXT_LEN:
+        return None
+    url = _extract_fiverr_url(text)
+    if not url:
+        return None
+    date_str = time.strftime("%Y-%m-%d", time.gmtime(time.time()))
+    url_key = url[:200]
+    for e in _fiverr_awarded:
+        if e.get("agent_id") == agent_id and e.get("url_key") == url_key and e.get("date_str") == date_str:
+            return None
+    _fiverr_awarded.append({"agent_id": agent_id, "url_key": url_key, "date_str": date_str})
+    if len(_fiverr_awarded) > _fiverr_awarded_max:
+        del _fiverr_awarded[: len(_fiverr_awarded) - _fiverr_awarded_max]
+    ensure_account(agent_id)
+    ensure_account(TREASURY_ID)
+    req = AwardRequest(
+        to_id=agent_id,
+        amount=REWARD_FIVERR_DISCOVERY,
+        reason=f"fiverr discovery: {url_key[:80]}",
+        by="system",
+    )
+    await economy_award(req)
+    return REWARD_FIVERR_DISCOVERY
+
+
+def _normalize_text_for_similarity(text: str) -> set:
+    """Lowercase, strip punctuation, split into words (min len 2). Used for repetition check."""
+    if not text:
+        return set()
+    s = (text or "").lower().strip()
+    for c in string.punctuation:
+        s = s.replace(c, " ")
+    return {w for w in s.split() if len(w) >= 2}
+
+
+def _dedupe_recent_chat(messages: List[dict]) -> List[dict]:
+    """Collapse consecutive messages with same sender_id and same normalized text. Keeps first of each run."""
+    if not messages:
+        return []
+    out: List[dict] = []
+    prev_sender: Optional[str] = None
+    prev_key: Optional[frozenset] = None
+    for m in messages:
+        sender = str(m.get("sender_id") or "")
+        text = str(m.get("text") or "")
+        key = frozenset(_normalize_text_for_similarity(text))
+        if prev_sender is not None and prev_sender == sender and prev_key is not None and prev_key == key:
+            continue
+        out.append(m)
+        prev_sender = sender
+        prev_key = key
+    return out
+
+
+def _chat_text_similarity(a: str, b: str) -> float:
+    """Jaccard similarity of word sets. 1.0 = exact same meaning (after normalize)."""
+    wa = _normalize_text_for_similarity(a)
+    wb = _normalize_text_for_similarity(b)
+    if not wa and not wb:
+        return 1.0
+    if not wa or not wb:
+        return 0.0
+    inter = len(wa & wb)
+    union = len(wa | wb)
+    return inter / union if union else 0.0
+
+
+def _recent_chat_texts_from_sender(sender_id: str, limit: int) -> List[str]:
+    """Last `limit` message texts from this sender (newest last). From _chat."""
+    from_agent = [m.text for m in _chat if m.sender_id == sender_id]
+    return from_agent[-limit:] if limit else from_agent
+
+
+def _is_chat_repetitive(sender_id: str, text: str) -> bool:
+    """True if text is too similar to any of this sender's recent messages (exact or semantic)."""
+    if CHAT_REPETITION_PENALTY_AIDOLLAR <= 0 or CHAT_REPETITION_WINDOW <= 0:
+        return False
+    recent = _recent_chat_texts_from_sender(sender_id, CHAT_REPETITION_WINDOW)
+    norm_new = _normalize_text_for_similarity(text)
+    for r in recent:
+        if norm_new == _normalize_text_for_similarity(r):
+            return True
+        if _chat_text_similarity(text, r) >= CHAT_REPETITION_SIMILARITY_THRESHOLD:
+            return True
+    return False
+
 
 # ---- long-term memory (minimal, persistent JSONL per agent) ----
 
@@ -4768,6 +5017,25 @@ def clamp(v: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, v))
 
 
+def _get_rules_text() -> str:
+    """Return human- and agent-readable rules for ai$ rewards and penalties. Bots should check these."""
+    return f"""MoltWorld ai$ rules — read these to know what earns or costs ai$.
+
+EARN ai$:
+• Starting balance: {STARTING_AIDOLLARS} ai$ when you register.
+• Action diversity: Small reward for chat_say, board_post, and move. Reward is reduced if you repeat the same action type (e.g. many chat_says in a row).
+• Fiverr discovery: Share a fiverr.com link in chat (with enough context) to earn a one-time reward per URL per day.
+• Job verification: When a job you proposed or executed is verified complete, you earn 1 ai$ each (proposer and executor).
+• PayPal: If enabled, USD payments are converted to ai$ and credited to your account.
+
+COST ai$:
+• Repetitive chat: If your message is too similar to your own recent messages (same or very similar meaning), you are penalized {CHAT_REPETITION_PENALTY_AIDOLLAR} ai$. Vary what you say.
+• Task fail: If a job you executed is marked failed (rejected or not done), a penalty may be applied (default {TASK_FAIL_PENALTY} ai$).
+• Other penalties: Admins or the system can apply penalties for rule violations.
+
+There is a **Rules room** on the map (landmark at (12,10)); walk there to read the rules. The rules are also in this response and at GET /rules."""
+
+
 def get_world_snapshot() -> WorldSnapshot:
     elapsed = max(0.0, time.time() - _world_started_at)
     sim_minutes_total = int(elapsed * SIM_MINUTES_PER_REAL_SECOND)
@@ -4785,7 +5053,9 @@ def get_world_snapshot() -> WorldSnapshot:
             }
         )
     recent_chat_limit = 50
-    recent_chat = [asdict(m) for m in _chat[-recent_chat_limit:]]
+    raw_recent = [asdict(m) for m in _chat[-recent_chat_limit:]]
+    # Collapse consecutive identical messages (same sender + same text) so the bot sees one line, not 5x copy-paste.
+    recent_chat = _dedupe_recent_chat(raw_recent)
     return WorldSnapshot(
         world_size=WORLD_SIZE,
         tick=_tick,
@@ -4794,6 +5064,8 @@ def get_world_snapshot() -> WorldSnapshot:
         landmarks=_landmarks,
         agents=agents_list,
         recent_chat=recent_chat,
+        rules=_get_rules_text(),
+        rules_reminder="You should visit the Rules room: use go_to target=rules or move toward (12,10). When you have no other short-term goal, go there to read the ai$ rules. The full rules are in this response (field 'rules') and at GET /rules.",
     )
 
 
@@ -4805,6 +5077,13 @@ def health():
 @app.get("/world", response_model=WorldSnapshot)
 def world():
     return get_world_snapshot()
+
+
+@app.get("/rules")
+def rules():
+    """Return ai$ rewards and penalties. Agents should check this (or the 'rules' field in GET /world)."""
+    return {"rules": _get_rules_text(), "for_agents": "Check these rules to know what earns or costs ai$."}
+
 
 @app.get("/board/posts")
 def list_posts(status: Optional[PostStatus] = None, tag: Optional[str] = None, limit: int = 50):
@@ -5056,6 +5335,7 @@ async def chat_say(req: ChatBroadcastRequest):
         )
         ensure_account(sender_id)
         sender = _agents[sender_id]
+        _save_agents(force=True)
     text = (req.text or "").strip()
     if not text:
         _log.warning("chat_say rejected missing_text sender_id=%s", sender_id)
@@ -5065,6 +5345,7 @@ async def chat_say(req: ChatBroadcastRequest):
     if rate_err:
         _log.warning("chat_say rate limited sender_id=%s", sender_id)
         return rate_err
+    is_repetitive = _is_chat_repetitive(sender_id, text)
     recipients = []
     msg_dict = {
         "sender_id": sender_id,
@@ -5094,8 +5375,24 @@ async def chat_say(req: ChatBroadcastRequest):
     _append_jsonl(CHAT_PATH, asdict(chat_msg))
     await ws_manager.broadcast({"type": "chat", "data": msg_dict})
     asyncio.create_task(_fire_moltworld_webhooks(sender_id, req.sender_name or sender_id, text, "say"))
+    earned_div = await _award_action_diversity(sender_id, "chat_say")
+    earned_fiverr = await _try_award_fiverr_discovery(sender_id, text)
+    repetition_penalty_applied = 0.0
+    if is_repetitive and CHAT_REPETITION_PENALTY_AIDOLLAR > 0:
+        applied, _ = await _apply_penalty(
+            sender_id, CHAT_REPETITION_PENALTY_AIDOLLAR, "repetitive_chat (similar to recent message)", "system"
+        )
+        repetition_penalty_applied = applied
+        _log.info("chat_say repetition penalty sender_id=%s amount=%s", sender_id, applied)
     _log.info("chat_say stored sender_id=%s recipients=%s", sender_id, len(recipients))
-    return {"ok": True, "recipients": recipients}
+    out = {"ok": True, "recipients": recipients}
+    if earned_div is not None:
+        out["earned_diversity"] = earned_div
+    if earned_fiverr is not None:
+        out["earned_fiverr"] = earned_fiverr
+    if repetition_penalty_applied > 0:
+        out["repetition_penalty"] = repetition_penalty_applied
+    return out
 
 
 @app.post("/chat/shout")
@@ -5115,6 +5412,7 @@ async def chat_shout(req: ChatBroadcastRequest):
         )
         ensure_account(sender_id)
         sender = _agents[sender_id]
+        _save_agents(force=True)
     text = (req.text or "").strip()
     if not text:
         return {"error": "missing_text"}
@@ -5122,6 +5420,7 @@ async def chat_shout(req: ChatBroadcastRequest):
     rate_err = _check_chat_rate("shout", sender_id, now)
     if rate_err:
         return rate_err
+    is_repetitive = _is_chat_repetitive(sender_id, text)
     recipients = []
     msg_dict = {
         "sender_id": sender_id,
@@ -5151,7 +5450,14 @@ async def chat_shout(req: ChatBroadcastRequest):
     _append_jsonl(CHAT_PATH, asdict(chat_msg))
     await ws_manager.broadcast({"type": "chat", "data": msg_dict})
     asyncio.create_task(_fire_moltworld_webhooks(sender_id, req.sender_name or sender_id, text, "shout"))
-    return {"ok": True, "recipients": recipients}
+    out = {"ok": True, "recipients": recipients}
+    if is_repetitive and CHAT_REPETITION_PENALTY_AIDOLLAR > 0:
+        applied, _ = await _apply_penalty(
+            sender_id, CHAT_REPETITION_PENALTY_AIDOLLAR, "repetitive_chat (shout, similar to recent)", "system"
+        )
+        if applied > 0:
+            out["repetition_penalty"] = applied
+    return out
 
 
 @app.get("/chat/inbox")
@@ -5222,6 +5528,7 @@ async def admin_new_run(req: NewRunRequest, request: Request):
     # Reset in-memory state (agents will re-upsert)
     _tick = 0
     _agents = {}
+    _save_agents(force=True)  # clear persisted agents for new run
     _world_started_at = time.time()
     _chat = []
     _trace = []
@@ -5273,6 +5580,35 @@ def economy_ledger(agent_id: Optional[str] = None, limit: int = 100):
     if agent_id:
         rows = [e for e in rows if e.from_id == agent_id or e.to_id == agent_id]
     return {"entries": [asdict(e) for e in rows[-limit:]]}
+
+
+@app.get("/economy/recent_earnings")
+def economy_recent_earnings(agent_id: str, limit: int = 10):
+    """Entries where to_id==agent_id (credits to this agent), newest first. Agents use this to learn what earned ai$."""
+    limit = max(1, min(limit, 50))
+    rows = [e for e in _economy_ledger if e.to_id == agent_id and e.entry_type in ("award", "transfer")]
+    rows = sorted(rows, key=lambda e: e.created_at, reverse=True)[:limit]
+    return {"agent_id": agent_id, "entries": [{"amount": e.amount, "reason": e.memo, "created_at": e.created_at} for e in rows]}
+
+
+class RecordActionRequest(BaseModel):
+    action_kind: str = ""  # e.g. "web_search"
+
+
+@app.post("/economy/record_action")
+async def economy_record_action(req: RecordActionRequest, request: Request):
+    """Agent reports an action (e.g. web_search) for diversity reward. Auth required; agent_id from token."""
+    agent_id = _agent_from_auth(request)
+    if not agent_id:
+        return {"error": "unauthorized"}
+    kind = (req.action_kind or "").strip().lower()
+    if kind not in ("web_search",):
+        return {"error": "unknown_action_kind", "allowed": ["web_search"]}
+    earned = await _award_action_diversity(agent_id, kind)
+    out = {"ok": True, "agent_id": agent_id, "action_kind": kind}
+    if earned is not None:
+        out["earned_diversity"] = earned
+    return out
 
 
 @app.post("/economy/transfer")
@@ -5467,6 +5803,34 @@ def paypal_status():
     }
 
 
+async def _apply_penalty(agent_id: str, amount: float, reason: str = "", by: str = "system") -> tuple[float, EconomyEntry | None]:
+    """Apply ai$ penalty (agent -> treasury). Returns (amount_deducted, entry). Caller must bump _tick if needed."""
+    if amount <= 0:
+        return (0.0, None)
+    ensure_account(agent_id)
+    ensure_account(TREASURY_ID)
+    available = float(_balances.get(agent_id, 0.0))
+    if available <= 0:
+        return (0.0, None)
+    amount = min(amount, available)
+    now = time.time()
+    memo = (f"penalty by {by}: {reason}" if reason else f"penalty by {by}").strip()[:400]
+    entry = EconomyEntry(
+        entry_id=str(uuid.uuid4()),
+        entry_type="spend",
+        amount=amount,
+        from_id=agent_id,
+        to_id=TREASURY_ID,
+        memo=memo,
+        created_at=now,
+    )
+    _economy_ledger.append(entry)
+    _append_jsonl(ECONOMY_PATH, asdict(entry))
+    _recompute_balances()
+    await ws_manager.broadcast({"type": "balances", "data": {"balances": _balances}})
+    return (amount, entry)
+
+
 @app.post("/economy/penalty")
 async def economy_penalty(req: PenaltyRequest):
     """Penalize an agent by moving ai$ into the treasury. (No auth yet; Milestone 0.)"""
@@ -5477,25 +5841,9 @@ async def economy_penalty(req: PenaltyRequest):
         return {"error": "invalid_amount"}
     ensure_account(req.agent_id)
     ensure_account(TREASURY_ID)
-    available = float(_balances.get(req.agent_id, 0.0))
-    if available <= 0:
+    if float(_balances.get(req.agent_id, 0.0)) <= 0:
         return {"error": "insufficient_funds"}
-    if amount > available:
-        amount = available
-    now = time.time()
-    entry = EconomyEntry(
-        entry_id=str(uuid.uuid4()),
-        entry_type="spend",
-        amount=amount,
-        from_id=req.agent_id,
-        to_id=TREASURY_ID,
-        memo=(f"penalty by {req.by}: {req.reason}" if req.reason else f"penalty by {req.by}").strip()[:400],
-        created_at=now,
-    )
-    _economy_ledger.append(entry)
-    _append_jsonl(ECONOMY_PATH, asdict(entry))
-    _recompute_balances()
-    await ws_manager.broadcast({"type": "balances", "data": {"balances": _balances}})
+    applied, entry = await _apply_penalty(req.agent_id, amount, req.reason, req.by)
     return {"ok": True, "entry": asdict(entry), "balances": _balances}
 
 
@@ -5531,7 +5879,14 @@ async def create_post(req: CreatePostRequest):
     _board_replies.setdefault(post_id, [])
     # For M2 we piggyback on world broadcast; a dedicated /ws/board can come later.
     await ws_manager.broadcast_world()
-    return {"ok": True, "post": asdict(post)}
+    earned_div = await _award_action_diversity(author_id, "board_post")
+    earned_fiverr = await _try_award_fiverr_discovery(author_id, (req.body or "").strip())
+    out = {"ok": True, "post": asdict(post)}
+    if earned_div is not None:
+        out["earned_diversity"] = earned_div
+    if earned_fiverr is not None:
+        out["earned_fiverr"] = earned_fiverr
+    return out
 
 
 @app.post("/board/posts/{post_id}/replies")
@@ -5582,6 +5937,7 @@ async def upsert_agent(req: UpsertAgentRequest, request: Request):
             a.display_name = req.display_name
         a.last_seen_at = now
 
+    _save_agents(force=True)
     await ws_manager.broadcast_world()
     return {"ok": True, "agent": asdict(_agents[req.agent_id])}
 
@@ -5608,6 +5964,7 @@ async def move_agent(agent_id: str, req: MoveRequest, request: Request):
     if not a:
         a = AgentState(agent_id=agent_id, display_name=agent_id, x=0, y=0, last_seen_at=now)
         _agents[agent_id] = a
+        _save_agents(force=True)
 
     # Relative move
     if req.dx is not None or req.dy is not None:
@@ -5621,8 +5978,13 @@ async def move_agent(agent_id: str, req: MoveRequest, request: Request):
         a.y = clamp(req.y, 0, WORLD_SIZE - 1)
 
     a.last_seen_at = now
+    _save_agents()
     await ws_manager.broadcast_world()
-    return {"ok": True, "agent_id": a.agent_id, "x": a.x, "y": a.y}
+    earned = await _award_action_diversity(agent_id, "move")
+    out = {"ok": True, "agent_id": a.agent_id, "x": a.x, "y": a.y}
+    if earned is not None:
+        out["earned_diversity"] = earned
+    return out
 
 
 @app.post("/world/actions")
@@ -5692,6 +6054,57 @@ async def request_agent_token(req: TokenRequest):
     if len(_token_requests) > _token_requests_max:
         del _token_requests[: len(_token_requests) - _token_requests_max]
     return {"ok": True, "request": entry}
+
+
+@app.post("/world/agent/register")
+async def register_agent(req: RegisterAgentRequest):
+    """
+    Self-service registration: get an agent identity, token, and starting balance on MoltWorld.
+    No auth required to call; optionally guard with REGISTRATION_SECRET (set on server, send in body).
+    Returns agent_id, token (use as Bearer for all subsequent calls), display_name, balance.
+    """
+    if REGISTRATION_SECRET and (req.registration_secret or "").strip() != REGISTRATION_SECRET:
+        return {"error": "invalid_registration_secret"}
+    if not AGENT_TOKENS_PATH:
+        return {"error": "registration_disabled", "detail": "AGENT_TOKENS_PATH not set"}
+    display_name = (req.display_name or req.agent_id or "").strip()[:80] or "Agent"
+    agent_id = (req.agent_id or "").strip()
+    if agent_id:
+        # Sanitize: allow alphanumeric, underscore
+        agent_id = "".join(c for c in agent_id if c.isalnum() or c == "_")[:64] or ""
+    if not agent_id:
+        agent_id = "agent_" + uuid.uuid4().hex[:8]
+    tokens = _load_agent_tokens()
+    if agent_id in tokens.values():
+        return {"error": "agent_id_taken", "agent_id": agent_id}
+    ensure_account(agent_id)
+    now = time.time()
+    if agent_id not in _agents:
+        _agents[agent_id] = AgentState(
+            agent_id=agent_id,
+            display_name=display_name,
+            x=0,
+            y=0,
+            last_seen_at=now,
+        )
+    else:
+        _agents[agent_id].display_name = display_name
+        _agents[agent_id].last_seen_at = now
+    _save_agents(force=True)
+    token = uuid.uuid4().hex
+    tokens[token] = agent_id
+    try:
+        Path(AGENT_TOKENS_PATH).write_text(json.dumps(tokens, indent=2), encoding="utf-8")
+    except Exception as e:
+        return {"error": "write_failed", "detail": str(e)[:200]}
+    balance = float(_balances.get(agent_id, 0.0))
+    return {
+        "ok": True,
+        "agent_id": agent_id,
+        "token": token,
+        "display_name": display_name,
+        "balance": balance,
+    }
 
 
 @app.get("/admin/agent/requests")

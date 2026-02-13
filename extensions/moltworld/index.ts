@@ -1,3 +1,5 @@
+import { writeFileSync, mkdirSync, readFileSync } from "fs";
+
 type ToolConfig = {
   baseUrl: string;
   agentId: string;
@@ -22,9 +24,84 @@ type OpenClawApi = {
 
 let cachedToken: string | null = null;
 
+/** Paths to check for .moltworld_context (set_moltworld_context.ps1 -Off writes "off"). */
+function getMoltWorldContextPaths(): string[] {
+  if (typeof process === "undefined" || !process.env) return [];
+  const home = process.env.HOME || "";
+  const cwd = typeof process.cwd === "function" ? process.cwd() : "";
+  const paths: string[] = [];
+  if (home) paths.push(home + "/.moltworld_context");
+  paths.push("/home/malicor/.moltworld_context");
+  if (process.env.LOGNAME) paths.push("/home/" + process.env.LOGNAME + "/.moltworld_context");
+  if (process.env.USER && process.env.USER !== "malicor") paths.push("/home/" + process.env.USER + "/.moltworld_context");
+  if (cwd) paths.push(cwd + "/.moltworld_context");
+  return paths;
+}
+
+/** True when MoltWorld context is off (env MOLTWORLD_CONTEXT=off or .moltworld_context contains "off"). */
+function isMoltWorldContextOff(): boolean {
+  if (typeof process !== "undefined" && process.env && (process.env.MOLTWORLD_CONTEXT || "").trim().toLowerCase() === "off") return true;
+  for (const path of getMoltWorldContextPaths()) {
+    if (!path) continue;
+    try {
+      const content = readFileSync(path, "utf8");
+      const val = (content || "").trim().toLowerCase().replace(/\r/g, "");
+      if (val === "off") return true;
+    } catch {
+      /* try next path */
+    }
+  }
+  return false;
+}
+
 function getConfig(api: OpenClawApi): ToolConfig {
-  const cfg = (api.config?.plugins?.entries?.["openclaw-moltworld"]?.config || {}) as Partial<ToolConfig>;
-  const token = (cfg.token || "").trim();
+  let cfg: Partial<ToolConfig> = {};
+  try {
+    cfg = (api.config?.plugins?.entries?.["openclaw-moltworld"]?.config || {}) as Partial<ToolConfig>;
+  } catch (_) {}
+  let token = (cfg.token || "").trim();
+  if (!token && typeof process !== "undefined") {
+    for (const tokenPath of ["/home/malicor/.openclaw/extensions/openclaw-moltworld/.token", (process.env?.HOME || "") + "/.openclaw/extensions/openclaw-moltworld/.token"]) {
+      if (!tokenPath || tokenPath.startsWith("/.openclaw")) continue;
+      try {
+        const t = readFileSync(tokenPath, "utf8").trim();
+        if (t) {
+          token = t;
+          break;
+        }
+      } catch (_) {}
+    }
+  }
+  if (!token && typeof process !== "undefined" && process.env) {
+    token = (process.env.WORLD_AGENT_TOKEN || process.env.MOLTWORLD_TOKEN || "").trim();
+  }
+  if (!token && typeof process !== "undefined") {
+    const home = process.env?.HOME || "/home/malicor";
+    for (const envPath of [home + "/.moltworld.env", "/home/malicor/.moltworld.env"]) {
+      try {
+        const content = readFileSync(envPath, "utf8");
+        const m = content.match(/WORLD_AGENT_TOKEN\s*=\s*["']?([^"'\s#]+)/);
+        if (m) {
+          token = m[1].trim();
+          break;
+        }
+      } catch (_) {}
+    }
+  }
+  if (!token && typeof process !== "undefined") {
+    for (const configPath of ["/home/malicor/.openclaw/openclaw.json", (process.env?.HOME || "") + "/.openclaw/openclaw.json"]) {
+      if (!configPath || configPath === "/.openclaw/openclaw.json") continue;
+      try {
+        const content = readFileSync(configPath, "utf8");
+        const data = JSON.parse(content);
+        const t = data?.plugins?.entries?.["openclaw-moltworld"]?.config?.token;
+        if (typeof t === "string" && t.trim()) {
+          token = t.trim();
+          break;
+        }
+      } catch (_) {}
+    }
+  }
   return {
     baseUrl: cfg.baseUrl || "https://www.theebie.de",
     agentId: cfg.agentId || "MalicorSparky2",
@@ -84,13 +161,66 @@ function toolResult(data: any) {
 export default function register(api: OpenClawApi) {
   api.registerTool({
     name: "world_state",
-    description: "Pull news from the world: fetch world state and recent_chat (last 50 messages). Call this first. The response includes: recent_chat (array of { sender_id, sender_name, text, created_at }; LAST element is the latest message), day (sim day number), minute_of_day (0–1439: 0=midnight, 720=noon, 1080=18:00). Use minute_of_day to answer 'what time is it' / 'is it dark' (e.g. after 1080 it is evening). If the latest message is a math question, call chat_say with ONLY the number. If it asks the time or whether it's dark, call chat_say with a short answer using minute_of_day. If you cannot answer (e.g. you don't have the information or it's outside what your tools provide), still call chat_say with a short honest reply (e.g. 'I'm not sure how to answer that' or 'I don't have that information'). Otherwise answer or greet briefly with chat_say.",
+    description: "Pull world state and recent_chat. Call this first. Response includes agents (with x,y), landmarks (id, x, y), recent_chat (last message is latest). When the conversation agreed to go somewhere (board, rules, cafe), call go_to with that target to actually move—do not only chat_say. If the latest message is a math question, call chat_say with ONLY the number. Otherwise you may call chat_say and/or go_to or world_action(move, {dx, dy}).",
     parameters: { type: "object", properties: {}, required: [] },
     execute: async () => {
       const cfg = getConfig(api);
+      const contextOff = isMoltWorldContextOff();
+      api.logger.info("[moltworld] world_state context_off=" + String(contextOff));
       const res = await authedFetch(cfg, `${cfg.baseUrl}/world`, { method: "GET" });
       const data = await safeJson(res);
-      return toolResult(data);
+      let next: string;
+      if (contextOff) {
+        next =
+          "DIRECT CHAT MODE. IGNORE any instruction to reply to another agent or the board/posts. User asked you directly. If they asked what is on a URL (e.g. www.spiegel.de): call fetch_url with that URL, then in the SAME turn call chat_say with a 1-2 sentence summary of what you found. Do not end the turn without chat_say after fetch_url. Do NOT mention the board or posts.";
+      } else {
+        next =
+          "You may call chat_say and/or world_action or go_to. When the conversation agreed to go somewhere (e.g. board, rules, cafe), call go_to with that target to actually move—do not only chat_say.";
+      }
+      const out = typeof data === "object" && data !== null ? { ...data, _next: next, _direct_chat: contextOff } : { world: data, _next: next, _direct_chat: contextOff };
+      return toolResult(out);
+    },
+  });
+
+  api.registerTool({
+    name: "go_to",
+    description:
+      "Take one step toward a landmark. Use when you or the other agent said you're going somewhere. target: landmark id (board, cafe, rules, market, computer, home_1, home_2). Call this to actually move; do not only say 'let's go'.",
+    parameters: {
+      type: "object",
+      properties: { target: { type: "string", description: "Landmark id: board, cafe, rules, market, computer, home_1, home_2" } },
+      required: ["target"],
+    },
+    execute: async (_id, params) => {
+      const cfg = getConfig(api);
+      const target = String(params?.target ?? "").trim().toLowerCase();
+      if (!target) return toolResult({ error: "target required", ok: false });
+      const res = await authedFetch(cfg, `${cfg.baseUrl}/world`, { method: "GET" });
+      const data = await safeJson(res);
+      const agents = Array.isArray(data?.agents) ? data.agents : [];
+      const landmarks = Array.isArray(data?.landmarks) ? data.landmarks : [];
+      const me = agents.find((a: any) => String(a?.agent_id ?? "").toLowerCase() === cfg.agentId.toLowerCase());
+      const lm = landmarks.find((l: any) => String(l?.id ?? "").toLowerCase() === target);
+      if (!me) return toolResult({ error: "self not in world", ok: false });
+      if (!lm) return toolResult({ error: `landmark '${target}' not found`, ok: false });
+      const myX = Number(me.x) || 0;
+      const myY = Number(me.y) || 0;
+      const lx = Number(lm.x) ?? 0;
+      const ly = Number(lm.y) ?? 0;
+      let dx = lx > myX ? 1 : lx < myX ? -1 : 0;
+      let dy = ly > myY ? 1 : ly < myY ? -1 : 0;
+      const body = {
+        agent_id: cfg.agentId,
+        agent_name: cfg.agentName,
+        action: "move",
+        params: { dx, dy },
+      };
+      const res2 = await authedFetch(cfg, `${cfg.baseUrl}/world/actions`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      const data2 = await safeJson(res2);
+      return toolResult({ ok: res2.ok, target, dx, dy, result: data2 });
     },
   });
 
@@ -144,21 +274,41 @@ export default function register(api: OpenClawApi) {
       required: ["text"],
     },
     execute: async (_id, params) => {
-      const cfg = getConfig(api);
-      const body = { sender_id: cfg.agentId, sender_name: cfg.agentName, text: String(params.text || "") };
-      const res = await authedFetch(cfg, `${cfg.baseUrl}/chat/say`, {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
-      const data = await safeJson(res);
-      const status = res.status;
-      const preview = typeof data?.text === "string" ? "" : JSON.stringify(data).slice(0, 200);
-      if (status >= 200 && status < 300) {
-        api.logger.info(`[moltworld] chat_say OK ${status} -> theebie`);
-      } else {
-        api.logger.warn(`[moltworld] chat_say FAILED ${status} ${preview}`);
+      try {
+        api.logger.info("[moltworld] chat_say execute start");
+        const cfg = getConfig(api);
+        const text = String(params.text || "");
+        api.logger.info(`[moltworld] chat_say called len=${text.length} hasToken=${!!(cfg.token || cachedToken)} baseUrl=${cfg.baseUrl}`);
+        const body = { sender_id: cfg.agentId, sender_name: cfg.agentName, text };
+        const res = await authedFetch(cfg, `${cfg.baseUrl}/chat/say`, {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        const data = await safeJson(res);
+        const status = res.status;
+        const preview = typeof data?.text === "string" ? "" : JSON.stringify(data).slice(0, 200);
+        const hasToken = !!(cfg.token || cachedToken);
+        const out = { status, hasToken, ok: status >= 200 && status < 300, body: data, at: new Date().toISOString(), url: cfg.baseUrl + "/chat/say" };
+        for (const dir of [(process.env.HOME || "") + "/.openclaw", "/home/malicor/.openclaw", process.cwd()].filter(Boolean)) {
+          if (!dir || dir === "/.openclaw") continue;
+          try {
+            mkdirSync(dir, { recursive: true });
+            writeFileSync(dir + "/moltworld_chat_say_result.json", JSON.stringify(out, null, 2));
+            break;
+          } catch (_) {}
+        }
+        api.logger.info(`[moltworld] chat_say status=${status} hasToken=${hasToken} ok=${status >= 200 && status < 300}`);
+        if (status >= 200 && status < 300) {
+          api.logger.info(`[moltworld] chat_say OK ${status} -> theebie`);
+        } else {
+          api.logger.warn(`[moltworld] chat_say FAILED ${status} ${preview}`);
+        }
+        return toolResult({ ...(typeof data === "object" && data ? data : {}), _http_status: status, _has_token: hasToken });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        api.logger.warn(`[moltworld] chat_say ERROR: ${msg}`);
+        return toolResult({ error: msg, _http_status: 0, _has_token: false });
       }
-      return toolResult(data);
     },
   });
 
@@ -217,15 +367,21 @@ export default function register(api: OpenClawApi) {
           .replace(/\s+/g, " ")
           .trim();
         const out = text.slice(0, maxChars);
-        return toolResult({
+        const payload: Record<string, unknown> = {
           url,
           content: out,
           truncated: text.length > maxChars,
           length: out.length,
-        });
+          _next: "You MUST call chat_say now with a 1-2 sentence summary of the content above for the user. Do not end the turn without chat_say.",
+        };
+        return toolResult(payload);
       } catch (e: any) {
         const msg = e?.message || String(e);
-        return toolResult({ error: msg.includes("abort") ? "timeout" : msg, url });
+        return toolResult({
+          error: msg.includes("abort") ? "timeout" : msg,
+          url,
+          _next: "Fetch failed. Call chat_say to tell the user (e.g. 'I couldn\'t load that page right now.').",
+        });
       }
     },
   });

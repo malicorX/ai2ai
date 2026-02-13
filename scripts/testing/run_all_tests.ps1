@@ -1,5 +1,6 @@
 # Run full test suite: backend verifier (local) -> health -> single-job lifecycle (gig) -> proposer-review (approve + reject).
 # Optional: -IncludeFiverr adds test_run (fiverr) — wait for agent_1 to create a real Fiverr job (requires WEB_SEARCH_ENABLED, agent_1 running).
+# Optional: -IncludeMoltworldRelate adds test_moltworld_bots_relate (check-only) — verifies Sparky1Agent and MalicorSparky2 relate in theebie chat (at least one reply references/answers the previous message). No SSH; uses current chat.
 # Exits on first failure. Use from repo root: .\scripts\testing\run_all_tests.ps1 -BackendUrl http://sparky1:8000
 # All output is logged to scripts/testing/run_all_tests.<yyyyMMdd-HHmmss>.log
 
@@ -8,6 +9,7 @@ param(
     [string]$BackendToken = "",
     [switch]$SkipVerifierUnit,
     [switch]$IncludeFiverr,
+    [switch]$IncludeMoltworldRelate,
     [switch]$ForceSubmit
 )
 if (-not $BackendToken) { $BackendToken = $env:BACKEND_TOKEN }
@@ -37,6 +39,7 @@ try {
     Write-Host "============================================================" -ForegroundColor Cyan
     $suiteDesc = "verifier_unit -> quick_test -> test_run (gig) -> test_proposer_review -> test_proposer_review_reject"
     if ($IncludeFiverr) { $suiteDesc += " -> test_run (fiverr)" }
+    if ($IncludeMoltworldRelate) { $suiteDesc += " -> test_moltworld_bots_relate" }
     Write-Host "Test suite: $suiteDesc" -ForegroundColor Cyan
     Write-Host "Backend: $BackendUrl" -ForegroundColor Cyan
     Write-Host "============================================================" -ForegroundColor Cyan
@@ -102,6 +105,21 @@ try {
         $testRunArgs = @{ BackendUrl = $BackendUrl; TaskType = "fiverr" }; if ($BackendToken) { $testRunArgs.BackendToken = $BackendToken }; & "$scriptDir\test_run.ps1" @testRunArgs
         if ($LASTEXITCODE -ne 0) {
             Write-Host "test_run.ps1 -TaskType fiverr failed (exit $LASTEXITCODE). Ensure agent_1 is running and WEB_SEARCH_ENABLED=1, SERPER_API_KEY set." -ForegroundColor Red
+            exit $LASTEXITCODE
+        }
+    }
+
+    if ($IncludeMoltworldRelate) {
+        Write-Host ""
+        Write-Host "--- MoltWorld bots relate (criteria unit + theebie chat) ---" -ForegroundColor Yellow
+        python "$scriptDir\test_moltworld_bots_relate_criteria.py"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "test_moltworld_bots_relate_criteria.py failed (exit $LASTEXITCODE)." -ForegroundColor Red
+            exit $LASTEXITCODE
+        }
+        & "$scriptDir\test_moltworld_bots_relate.ps1" -SkipTrigger -Last 25
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "test_moltworld_bots_relate.ps1 failed (exit $LASTEXITCODE). At least one bot reply must relate to the previous message (references or substantive answer)." -ForegroundColor Red
             exit $LASTEXITCODE
         }
     }

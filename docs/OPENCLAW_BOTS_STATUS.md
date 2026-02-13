@@ -8,10 +8,10 @@ Summary of **how they're set up** and **what they can and can't do** as of the l
 
 | | sparky1 | sparky2 |
 |---|---------|---------|
-| **Runtime** | Clawd (clawdbot + clawdbot-gateway) | OpenClaw (openclaw-gateway) |
-| **Config** | `~/.clawdbot/` | `~/.openclaw/` (`.clawdbot` → symlink to `.openclaw`) |
+| **Runtime** | OpenClaw (openclaw-gateway) | OpenClaw (openclaw-gateway) |
+| **Config** | `~/.openclaw/` | `~/.openclaw/` |
 | **LLM** | **Ollama locally** at 127.0.0.1:11434 (no cloud API key) | Same |
-| **Primary model** | ollama/qwen2.5-coder:32b | ollama/llama3.3:latest |
+| **Primary model** | ollama/qwen2.5-coder:32b | ollama/qwen-agentic:latest |
 | **Tools** | profile: full; deny: sessions_send, message, tts, sessions_spawn | Same |
 | **Browser** | enabled, chromium-browser | enabled, chromium-browser |
 | **Channels** | Telegram enabled | Telegram enabled (plugins.entries.telegram) |
@@ -25,7 +25,7 @@ Separately, **both** sparkies run our **Python agent** (`python3 -m agent_templa
 
 ## What they CAN do
 
-- **Chat** — TUI (`clawdbot tui` / `openclaw tui`) or Control UI in the browser (gateway port 18789, token from config). The model replies with **text**.
+- **Chat** — TUI (`openclaw tui`) or Control UI in the browser (gateway port 18789, token from config). The model replies with **text**.
 - **Use Ollama** — Both gateways call Ollama; no cloud API required.
 - **Cron** — Scheduled jobs (e.g. "Fiverr screen") can be added; delivery to Telegram works if configured.
 - **Browser / tools** — **sparky2** has been observed using the browser (e.g. fetching and summarizing www.spiegel.de), so tool execution (browser, web) **does work** there. **We run the jokelord patch** to enable it: patched gateway build + `compat.supportedParameters: ["tools", "tool_choice"]` in Ollama model config. See [CLAWD_JOKELORD_STEPS.md](external-tools/clawd/CLAWD_JOKELORD_STEPS.md). sparky1 (Clawd) may use the same fix; if you see tools working there too, update this doc.
@@ -37,7 +37,7 @@ Separately, **both** sparkies run our **Python agent** (`python3 -m agent_templa
 ### 1. MoltWorld (world_state, world_action, board_post)
 
 - **Status (as of 2026-02):** The **MoltWorld plugin** is **installed and configured** on both sparkies (via `scripts/clawd/run_install_moltworld_plugin_on_sparkies.ps1`). A **“MoltWorld chat turn” cron** runs on each gateway (generic prompt: use world_state, then optionally chat_say); added via `scripts/clawd/add_moltworld_chat_cron.ps1`. Sparky1 cron runs regularly (Status ok); sparky2 cron has run but sometimes shows Status error (check gateway logs). Both agents (Sparky1Agent, MalicorSparky2) appear in the world at theebie.de; verify with `.\scripts\clawd\verify_moltworld_cron.ps1`. See [OPENCLAW_MOLTWORLD_CHAT_PLAN.md](OPENCLAW_MOLTWORLD_CHAT_PLAN.md) and [AGENT_CHAT_DEBUG.md](AGENT_CHAT_DEBUG.md) §5.
-- **To (re)add or fix:** On each host: `openclaw`/`clawdbot` `plugins install @moltworld/openclaw-moltworld`, then in config add `plugins.entries["openclaw-moltworld"]` with `enabled: true` and `config.baseUrl`, `config.agentId`, `config.agentName`, `config.token` (e.g. from `~/.moltworld.env`). Restart the gateway. Clawd expects `clawdbot.plugin.json` in the extension dir; the install script copies from `openclaw.plugin.json` if missing. See [MOLTWORLD_OUTSIDERS_QUICKSTART.md](MOLTWORLD_OUTSIDERS_QUICKSTART.md) and [extensions/moltworld/README.md](../extensions/moltworld/README.md).
+- **To (re)add or fix:** On each host: `openclaw plugins install @moltworld/openclaw-moltworld`, then in config add `plugins.entries["openclaw-moltworld"]` with `enabled: true` and `config.baseUrl`, `config.agentId`, `config.agentName`, `config.token` (e.g. from `~/.moltworld.env`). Restart the gateway. Clawd expects `clawdbot.plugin.json` in the extension dir; the install script copies from `openclaw.plugin.json` if missing. See [MOLTWORLD_OUTSIDERS_QUICKSTART.md](MOLTWORLD_OUTSIDERS_QUICKSTART.md) and [extensions/moltworld/README.md](../extensions/moltworld/README.md).
 
 ### 2. Same identity as the Python world agents
 

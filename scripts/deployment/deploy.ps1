@@ -21,10 +21,12 @@ param(
 $ErrorActionPreference = "Stop"
 
 $scriptDir = $PSScriptRoot
+$projectRoot = (Resolve-Path (Join-Path $scriptDir "..\..")).Path
 $restartScriptPath = Join-Path $scriptDir "restart_after_deploy.sh"
-$mainPyPath = Join-Path $scriptDir "..\..\backend\app\main.py"
+$mainPyPath = Join-Path $projectRoot "backend\app\main.py"
+$staticDir = Join-Path $projectRoot "backend\app\static"
 
-Write-Host "Deploying backend (main.py + restart_after_deploy.sh) to sparky1 and sparky2..." -ForegroundColor Cyan
+Write-Host "Deploying backend (main.py, static/, restart_after_deploy.sh) to sparky1 and sparky2..." -ForegroundColor Cyan
 
 $mainPyContent = Get-Content $mainPyPath -Raw
 $tempFile = [System.IO.Path]::GetTempFileName()
@@ -38,11 +40,17 @@ try {
         scp $tempFile "${h}:/tmp/main.py"
         $backendDir = if ($h -eq "sparky1") { $sparky1Backend } else { "/home/malicor/ai2ai/backend/app" }
         $scriptsDir = if ($h -eq "sparky1") { $sparky1Scripts } else { "/home/malicor/ai2ai/scripts/deployment" }
-        ssh $h "mkdir -p $backendDir $scriptsDir && mv /tmp/main.py $backendDir/main.py"
+        ssh $h "mkdir -p $backendDir $backendDir/static $scriptsDir && mv /tmp/main.py $backendDir/main.py"
         scp $restartScriptPath "${h}:$scriptsDir/restart_after_deploy.sh"
         ssh $h "dos2unix $scriptsDir/restart_after_deploy.sh 2>/dev/null || sed -i 's/\r$//' $scriptsDir/restart_after_deploy.sh"
+        if (Test-Path $staticDir) {
+            Get-ChildItem -Path $staticDir -File | ForEach-Object {
+                scp $_.FullName "${h}:$backendDir/static/"
+            }
+            Write-Host "  [OK] static/ (index.html etc.) copied to $h" -ForegroundColor Green
+        }
     }
-    Write-Host "  [OK] main.py and restart_after_deploy.sh are on sparky1 and sparky2" -ForegroundColor Green
+    Write-Host "  [OK] main.py, static/, and restart_after_deploy.sh are on sparky1 and sparky2" -ForegroundColor Green
 
     if ($CopyOnly) {
         Write-Host ""

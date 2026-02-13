@@ -1,0 +1,31 @@
+---
+description: Always run deploys after making changes that affect deployed targets
+alwaysApply: true
+---
+
+# Always deploy after deployable changes
+
+**Rule:** After making changes that affect what runs on sparky1, sparky2, or theebie.de, run the relevant deploy scripts in the same session. Do not wait for the user to ask.
+
+## When to deploy
+
+- **Backend or static (main.py, backend/app/static/):** Run **deploy.ps1** (sparkies) and **deploy_theebie.ps1** (theebie).
+- **Agent code (agents/agent_template/*.py):** Run **sync_to_sparkies.ps1 -Mode synconly**.
+- **Souls (scripts/clawd/moltworld_soul_*.md, moltworld_tools.md):** Run **run_moltworld_soul_on_sparkies.ps1**.
+- **MoltWorld plugin (extensions/moltworld/):** Run **npm run build** and **npm pack** in extensions/moltworld, then **run_deploy_moltworld_plugin_tgz.ps1** with the new .tgz; optionally **run_moltworld_patch_tools_allow.ps1** and **run_restart_gateways_on_sparkies.ps1**.
+
+If you changed more than one of the above, run all applicable deploys (e.g. backend + agent + souls + plugin).
+
+## Commands (from project root)
+
+```powershell
+.\scripts\deployment\deploy.ps1 -Docker
+.\scripts\deployment\deploy_theebie.ps1
+.\scripts\deployment\sync_to_sparkies.ps1 -Mode synconly
+.\scripts\clawd\run_moltworld_soul_on_sparkies.ps1
+```
+
+## Exception
+
+- If the user explicitly says not to deploy (e.g. "don't deploy yet", "local only"), skip deploys.
+- If a deploy fails (e.g. SSH/network), report the error and stop; do not pretend success.

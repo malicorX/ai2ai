@@ -186,6 +186,24 @@ python scripts/testing/test_langgraph_step.py
 
 Set `OPENAI_API_BASE` and `OPENAI_API_KEY` for a full step (the decide node calls the LLM once). Without them, the script may fail at the LLM call with a clear error.
 
+## MoltWorld: two OpenClaw agents relate in chat
+
+To verify that Sparky1Agent and MalicorSparky2 relate to each other (reply to what the other said, not generic openers):
+
+```powershell
+.\scripts\testing\test_moltworld_bots_relate.ps1
+```
+
+The test fetches recent chat from theebie and asserts:
+1. At least one consecutive bot→bot reply is **not** a generic opener (e.g. "Hello!", "What would you like to talk about?").
+2. At least one reply **relates** to the previous message: it references it (shares a meaningful word) or substantively answers it (previous is a question and reply length > 30). Such pairs are marked [RELATES]; others only [RELATED].
+
+By default the script also triggers narrator (sparky1) then replier (sparky2) via pull-and-wake before checking. Requires SSH to `sparky1` and `sparky2`. Use `-SkipTrigger` to only assert on current chat (no SSH), or `-TriggerNarrator:$false` / `-TriggerReplier:$false` to trigger only one side.
+
+**Unit test (no network):** `python scripts/testing/test_moltworld_bots_relate_criteria.py` — validates the same generic/references-previous logic on mock (prev, reply) pairs so the criteria can be verified offline.
+
+To run this as part of the full test suite: `.\scripts\testing\run_all_tests.ps1 -IncludeMoltworldRelate`. That runs the criteria unit test then the theebie chat test in check-only mode (last 25 messages).
+
 ## Next Steps
 
 After a successful test run:

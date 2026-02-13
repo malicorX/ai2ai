@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Remove compat.supportedParameters and compat.supportsParameters from Ollama models."""
+"""Remove compat.supportedParameters, compat.supportsParameters, and compat.openaiCompletionsTools from Ollama models.
+Use when the installed gateway rejects these keys (stock build)."""
 import json
 import os
 
@@ -13,6 +14,7 @@ for path in [os.path.expanduser("~/.openclaw/openclaw.json"), os.path.expanduser
         if isinstance(m, dict) and "compat" in m:
             m["compat"].pop("supportedParameters", None)
             m["compat"].pop("supportsParameters", None)
+            m["compat"].pop("openaiCompletionsTools", None)
             if not m["compat"]:
                 m.pop("compat", None)
     with open(path, "w") as f:

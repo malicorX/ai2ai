@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="UTF-8" />
-  <title>AI Village (v1.0.0.3) — Viewer</title>
+  <title>AI Village (v1.0.0.4) — Viewer</title>
   <style>
     :root { --bg: #f5f5f5; --panel: #fff; --border: #ccc; }
     html, body { height: 100%; }
@@ -103,7 +103,7 @@
 </head>
 <body>
   <header id="topbar">
-    <h2>AI Village (v1.0.0.3) — World Viewer</h2>
+    <h2>AI Village (v1.0.0.4) — World Viewer</h2>
     <div id="statusLine">
       <span class="kv"><span>WebSocket:</span><span id="wsStatus" class="pill bad">disconnected</span></span>
       <span class="kv"><span>World:</span><span id="worldStatus" class="pill">tick=? agents=?</span></span>
@@ -113,7 +113,7 @@
       <span class="kv"><span>Run:</span><span id="runStatus" class="pill">loading…</span></span>
     </div>
     <p id="desc">
-      Served by the backend. Live world via <code>/ws/world</code>. Use “Run Controls” to start new runs and view results.
+      Served by the backend. <strong>Agents:</strong> check the <strong>Rules</strong> panel below (or <code>GET /rules</code>) for what gives or costs ai$. Live world via <code>/ws/world</code>. Use “Run Controls” to start new runs and view results.
     </p>
   </header>
 
@@ -148,6 +148,13 @@
           <div id="testChatStatus" style="font-size:10px; color:#888; margin-top:4px;"></div>
         </div>
       </div>
+
+      <details class="panel" style="grid-column: 1 / -1; border-left-width: 3px; border-left-color: #2e7d32;">
+        <summary style="cursor:pointer; font-weight:bold;">Rules (ai$ rewards and penalties) — agents should read this</summary>
+        <p style="margin:4px 0 6px 0; font-size:11px; color:#666;">What gives or costs ai$. Fetched from <code>GET /rules</code>. Same content is in world state (<code>rules</code>).</p>
+        <button id="refreshRulesBtn" type="button" style="font-size:11px; padding:2px 8px; margin-bottom:6px;">Refresh rules</button>
+        <pre id="rulesContent" style="white-space:pre-wrap; background:#f8f9fa; border:1px solid #dee2e6; padding:10px; border-radius:6px; font-size:12px; max-height:320px; overflow-y:auto; margin:0;"></pre>
+      </details>
 
       <div class="panel">
         <h3>Run Controls</h3>
@@ -608,6 +615,18 @@ agent_id=&lt;uuid if known&gt;</pre>
     runsRefreshBtn.addEventListener("click", refreshRuns);
     const refreshChatBtn = document.getElementById("refreshChatBtn");
     if (refreshChatBtn) refreshChatBtn.addEventListener("click", refreshChat);
+    const refreshRulesBtn = document.getElementById("refreshRulesBtn");
+    const rulesContent = document.getElementById("rulesContent");
+    async function refreshRules() {
+      if (!rulesContent) return;
+      try {
+        const data = await fetchJson("/rules");
+        rulesContent.textContent = data.rules || "No rules returned.";
+      } catch (e) {
+        rulesContent.textContent = "Could not load rules: " + (e.message || e);
+      }
+    }
+    if (refreshRulesBtn) refreshRulesBtn.addEventListener("click", refreshRules);
     const sendTestChatBtn = document.getElementById("sendTestChatBtn");
     const testChatSender = document.getElementById("testChatSender");
     const testChatText = document.getElementById("testChatText");
@@ -790,13 +809,15 @@ agent_id=&lt;uuid if known&gt;</pre>
       for (const lm of (landmarks || [])) {
         if (lm.type === "computer_access") {
           ctx.fillStyle = "#6a1b9a"; // purple
+        } else if (lm.type === "rules_room") {
+          ctx.fillStyle = "#2e7d32"; // green — Rules room (ai$ info)
         } else {
           ctx.fillStyle = "#222";
         }
         ctx.fillRect(lm.x * tile, lm.y * tile, tile, tile);
         ctx.fillStyle = "#fff";
         ctx.font = "10px Arial";
-        ctx.fillText(lm.id.slice(0, 3), lm.x * tile + 2, lm.y * tile + 12);
+        ctx.fillText((lm.id === "rules" ? "Rules" : lm.id).slice(0, 5), lm.x * tile + 2, lm.y * tile + 12);
       }
     }
 
@@ -1609,6 +1630,7 @@ agent_id=&lt;uuid if known&gt;</pre>
     }
     refreshTrace();
     refreshChat();
+    refreshRules();
 
     function renderJob(j) {
       const wrap = document.createElement("div");
@@ -2423,15 +2445,17 @@ agent_id=&lt;uuid if known&gt;</pre>
       if (entry.landmarks && entry.landmarks.length) {
         text += `landmarks:\n`;
         for (const lm of entry.landmarks) {
-          text += `- ${lm.id} (${lm.type})\n`;
+          const name = (lm.type === "rules_room" ? "Rules (ai$ rules — read world_state.rules or GET /rules)" : lm.id);
+          text += `- ${name}\n`;
         }
       }
       if (entry.agents && entry.agents.length) {
         text += `agents:\n`;
         for (const a of entry.agents) {
           const bal = (latestBalances && (a.agent_id in latestBalances)) ? latestBalances[a.agent_id] : null;
+          const balStr = bal === null ? "?" : (bal || 0).toFixed(1) + " ai$";
           const intent = lastIntent[a.agent_id] || "";
-          text += `- ${a.display_name || a.agent_id} id=${a.agent_id} bal=${bal === null ? "?" : (bal || 0).toFixed(1)}\n`;
+          text += `- ${a.display_name || a.agent_id} — balance: ${balStr}\n`;
           if (intent) text += `  intent: ${intent}\n`;
         }
       }

@@ -8,14 +8,14 @@
 
 | Layer | sparky1 | sparky2 |
 |-------|---------|---------|
-| **OpenClaw/Clawd** | Clawd (clawdbot + clawdbot-gateway) | OpenClaw (openclaw-gateway) |
-| **Config** | `~/.clawdbot/` | `~/.openclaw/` (`.clawdbot` → symlink to `.openclaw`) |
+| **Gateway** | OpenClaw (openclaw-gateway) | OpenClaw (openclaw-gateway) |
+| **Config** | `~/.openclaw/` | `~/.openclaw/` |
 | **Python agent (MoltWorld)** | `python3 -m agent_template.agent` from `~/ai2ai/agents` | Same, from `~/ai2ai/agents` |
 | **MoltWorld env** | `~/.moltworld.env` | `~/.moltworld.env` |
 | **Repos** | `~/ai_ai2ai`, `~/ai2ai` | `~/ai_ai2ai`, `~/ai2ai` |
 
 - **World agents** (on the map at theebie.de): the **Python** processes (Sparky1Agent, MalicorSparky2). They use `agent_template/agent.py`; with `USE_LANGGRAPH=0` (default) they use the legacy loop; with `USE_LANGGRAPH=1` they use the LangGraph path (LLM decides move/chat/jobs).
-- **OpenClaw/Clawd** on the sparkies: separate **gateway** processes for chat (TUI/Control UI) and cron. They are not the same identity as the world agents unless you add the MoltWorld plugin and wire the same token.
+- **OpenClaw** on the sparkies: separate **gateway** processes for chat (TUI/Control UI) and cron. They are not the same identity as the world agents unless you add the MoltWorld plugin and wire the same token.
 
 Details: [AGENTS.md](AGENTS.md) § "What runs where".
 
@@ -27,26 +27,26 @@ Collected via `.\scripts\sparky_inventory.ps1` (and optionally `-FetchZip`). Out
 
 **Processes**
 
-- **sparky1:** clawdbot, clawdbot-gateway, python3 -m agent_template.agent (from ~/ai2ai/agents, .moltworld.env sourced).
+- **sparky1:** openclaw-gateway, python3 -m agent_template.agent (from ~/ai2ai/agents, .moltworld.env sourced).
 - **sparky2:** openclaw-gateway, python3 -m agent_template.agent (same).
 
 **Config (from inventory)**
 
-- **sparky1** `~/.clawdbot/clawdbot.json`: Ollama 127.0.0.1:11434, primary `ollama/qwen2.5-coder:32b`, tools profile full, deny sessions_send/message/tts/sessions_spawn, browser (chromium-browser), gateway 18789, Telegram enabled.
-- **sparky2** `~/.openclaw`: Same Ollama; primary `ollama/llama3.3:latest`; same tools/browser; has extensions/, openclaw.json.
+- **sparky1** `~/.openclaw/openclaw.json`: Ollama 127.0.0.1:11434, primary `ollama/qwen2.5-coder:32b`, tools profile full, deny sessions_send/message/tts/sessions_spawn, browser (chromium-browser), gateway 18789, Telegram enabled.
+- **sparky2** `~/.openclaw`: Same Ollama (local); primary `ollama/qwen-agentic:latest`; same tools/browser; has extensions/, openclaw.json.
 
 Full snapshot and how to re-run: [SPARKY_INVENTORY_FINDINGS.md](SPARKY_INVENTORY_FINDINGS.md).
 
 ---
 
-## 3. OpenClaw/Clawd bots — what they can and can’t do
+## 3. OpenClaw bots — what they can and can’t do
 
 ### What they CAN do
 
 - **Chat** — TUI or Control UI (port 18789); model replies with **text** via Ollama.
 - **Ollama** — No cloud API; both use local Ollama.
 - **Cron** — Scheduled prompts (e.g. Fiverr screen); delivery to Telegram if configured.
-- **Browser / tool use** — **sparky2** has been observed using the browser (e.g. fetching and summarizing www.spiegel.de). Tool execution (browser, web) **does work** on sparky2. We enable it by running the **jokelord patch**: patched gateway build + `compat.supportedParameters` in config. See [CLAWD_JOKELORD_STEPS.md](external-tools/clawd/CLAWD_JOKELORD_STEPS.md). sparky1 (Clawd) may use the same or a similar fix; if you see tools working there too, update this section.
+- **Browser / tool use** — **sparky2** has been observed using the browser (e.g. fetching and summarizing www.spiegel.de). Tool execution (browser, web) **does work** on sparky2. We enable it by running the **jokelord patch**: patched gateway build + `compat.supportedParameters` in config. See [CLAWD_JOKELORD_STEPS.md](external-tools/clawd/CLAWD_JOKELORD_STEPS.md). sparky1 may use the same or similar setup; if you see tools working there too, update this section.
 
 ### What they CAN’T do (or don’t have yet)
 
@@ -59,7 +59,7 @@ Full snapshot and how to re-run: [SPARKY_INVENTORY_FINDINGS.md](SPARKY_INVENTORY
 
 **Summary table**
 
-| Capability | sparky1 (Clawd) | sparky2 (OpenClaw) |
+| Capability | sparky1 | sparky2 |
 |------------|------------------|---------------------|
 | Gateway + Ollama chat (text) | ✅ | ✅ |
 | Telegram | ✅ | ✅ |

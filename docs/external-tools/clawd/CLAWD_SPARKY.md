@@ -72,7 +72,9 @@ Our prep script also writes `models.providers.ollama.apiKey: "ollama-local"` int
 
 ## Continue with Clawdbot (tool calling)
 
-We **run the jokelord patch** to enable tool calling with Ollama on sparky2 (and optionally sparky1). Full steps: [CLAWD_JOKELORD_STEPS.md](CLAWD_JOKELORD_STEPS.md). Summary:
+**Preferred:** Use **upstream OpenClaw** (`openclaw@latest` or main) with `compat.openaiCompletionsTools: true` on Ollama models so the gateway sends tools without any patch. See [OPENCLAW_OLLAMA_TOOL_CALLING_PLAN.md](OPENCLAW_OLLAMA_TOOL_CALLING_PLAN.md).
+
+**Fallback:** We **run the jokelord patch** when the installed build doesn’t support that compat key. Full steps: [CLAWD_JOKELORD_STEPS.md](CLAWD_JOKELORD_STEPS.md). Summary:
 
 To get **tool calling** working with Ollama (browser, HTTP, Moltbook skill) on sparky2:
 
@@ -368,11 +370,11 @@ Clawd expects **OpenAI-style tool_calls**:
 
 1. **Upvote / comment on [clawdbot/clawdbot #1866](https://github.com/clawdbot/clawdbot/issues/1866)** — “Add tool calling support for openai-completions API mode.” Request that when using Ollama (or any openai-completions provider), the gateway (a) includes `tools` in the request to the model, and (b) parses `tool_calls` from the response. That would enable Ollama + browser automation.
 2. **jokelord patch (community, tested):** [jokelord/openclaw-local-model-tool-calling-patch](https://github.com/jokelord/openclaw-local-model-tool-calling-patch) — Enables tool calling for `openai-completions` by adding `compat.supportedParameters: ["tools", "tool_choice"]` to the schema and using it in the gateway so tools are sent when the model declares support. **Steps:** (1) Clone Clawdbot source (same version as installed, e.g. 2026.1.24), (2) apply the patch (4 files: `zod-schema.core.ts`, `types.models.ts`, `model-compat.ts`, `attempt.ts` — see the repo README for copy-paste snippets), (3) build and install on sparky2 (`npm run build`, `sudo npm install -g .`), (4) add to each Ollama model in `~/.clawdbot/clawdbot.json`: `"compat": { "supportedParameters": ["tools", "tool_choice"] }`, (5) restart the gateway. The patch was verified with sglang/vLLM; **Ollama** also accepts `tools` and returns `tool_calls`, so the same patch works with Ollama once applied. No need for sglang/vLLM tool-call-parser when using Ollama directly.
-3. **PR #4287 (openclaw):** [openclaw/openclaw PR #4287](https://github.com/openclaw/openclaw/pull/4287) — Alternative fix using `compat.openaiCompletionsTools: true`. If that PR is merged or you apply its diff, use that config instead. Our scripts do not set compat (stock Clawd rejects it). When you have a gateway build that includes PR #4287, add the key manually to Ollama model entries.
+3. **Upstream OpenClaw (preferred):** The fix from [openclaw/openclaw PR #4287](https://github.com/openclaw/openclaw/pull/4287) was **landed in main** (squash). Use **OpenClaw from npm** (`npm install -g openclaw@latest`) or a build from `openclaw/openclaw` main, then set `compat.openaiCompletionsTools: true` on each Ollama model in config. No jokelord patch needed. See [OPENCLAW_OLLAMA_TOOL_CALLING_PLAN.md](OPENCLAW_OLLAMA_TOOL_CALLING_PLAN.md) for the migration plan.
 4. **Watch for a new API mode** — The issue suggests a mode like `openai-chat-with-tools` that uses `/v1/chat/completions`, sends tools, and parses tool_calls. If that lands, we could set `models.providers.ollama.api` to that value (and restart the gateway).
 5. **Until then** — Use a cloud provider (OpenAI, Anthropic, etc.) for tool-heavy tasks, or run the Fiverr-style task outside Clawd (e.g. script or another client that calls Ollama with `tools` and handles `tool_calls`).
 
-**If PR #4287 was closed/reverted:** Get the patch from [PR #4287 diff](https://github.com/openclaw/openclaw/pull/4287.diff). It touches: `src/agents/pi-embedded-runner/tool-split.ts`, `run/attempt.ts`, `compact.ts`, `src/config/types.models.ts`, `zod-schema.core.ts`, and docs. Cherry-pick the PR branch or apply the diff to your OpenClaw clone, then build and install that build on sparky2. Add compat.openaiCompletionsTools manually to model entries when your gateway supports it.
+**If your OpenClaw build doesn’t support the compat key:** Upgrade to `openclaw@latest` or build from main (see [OPENCLAW_OLLAMA_TOOL_CALLING_PLAN.md](OPENCLAW_OLLAMA_TOOL_CALLING_PLAN.md)). If you must stay on an old build, use the [PR #4287 diff](https://github.com/openclaw/openclaw/pull/4287.diff) or the jokelord patch.
 
 **From your dev machine (after onboarding + Telegram channel):** Use the helper script to add the cron on sparky1:
 
@@ -465,11 +467,11 @@ If the **TUI** has display bugs (reply only after restart, "Cannot read properti
 
 2. **In your browser** open: [http://127.0.0.1:18789/](http://127.0.0.1:18789/)
 
-3. **Paste the gateway token** when the UI asks. On sparky2:
-   ```bash
-   grep -A1 '"auth"' ~/.clawdbot/clawdbot.json
+3. **Paste the gateway token** when the UI asks. From this repo you can fetch it for both sparkies:
+   ```powershell
+   .\scripts\clawd\get_gateway_token_for_control_ui.ps1
    ```
-   Use the value of `"token"` (e.g. `5d670845a55742a4137a0ab996966718e22cf71449e4fc1d`).
+   Or on the sparky: `grep -A1 '"auth"' ~/.clawdbot/clawdbot.json` and use the value of `"token"`.
 
 4. Open the **Chat** tab and send messages. Same sessions and agent as the TUI, different UI.
 

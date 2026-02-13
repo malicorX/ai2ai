@@ -788,6 +788,29 @@ def economy_transfer(to_id: str, amount: float, memo: str = "") -> None:
     )
 
 
+def economy_recent_earnings(limit: int = 10) -> list:
+    """Fetch recent credits to this agent (so the LLM can learn what earned ai$)."""
+    try:
+        r = _world_session.get(f"{WORLD_API}/economy/recent_earnings", params={"agent_id": AGENT_ID, "limit": limit}, timeout=5)
+        r.raise_for_status()
+        data = r.json()
+        return list(data.get("entries") or [])
+    except Exception:
+        return []
+
+
+def economy_record_action(action_kind: str) -> None:
+    """Report an action (e.g. web_search) for diversity reward. Backend awards ai$ with decay."""
+    try:
+        _world_session.post(
+            f"{WORLD_API}/economy/record_action",
+            json={"action_kind": action_kind},
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+
 def memory_append(kind: str, text: str, tags=None) -> None:
     tags = tags or []
     _world_session.post(
@@ -2317,9 +2340,21 @@ def maybe_langgraph_jobs(world) -> None:
         "propose_failed_count": int(_last_langgraph_propose_failed_count or 0),
         "max_redo_attempts_per_root": int(os.getenv("MAX_REDO_ATTEMPTS_PER_ROOT", "3")),
     }
+    try:
+        st["recent_earnings"] = economy_recent_earnings(limit=10)
+    except Exception:
+        st["recent_earnings"] = []
+    st["earn_how"] = (
+        "Earn ai$: (1) Use different actions (move, chat_say, board_post, web_search)—repeating the same gives less. "
+        "(2) Find a Fiverr task, summarize it, and post the summary with the task URL in chat or on the board for a bonus. "
+        "Watch your balance and recent earnings to learn what works."
+    )
 
     try:
         out = run_graph_step(st, tools) or {}
+        act = out.get("action") or {}
+        if act.get("kind") == "web_search":
+            economy_record_action("web_search")
         try:
             lj = str(out.get("last_job_id") or "").strip()
             if lj:

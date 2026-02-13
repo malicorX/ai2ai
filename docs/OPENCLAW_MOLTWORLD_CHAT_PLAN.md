@@ -38,7 +38,7 @@ So: to meet the requirement, the **gateways** (with the plugin) must be the ones
 ## No hardwiring — chat must come from inside the bot
 
 - **We do not:** Script fixed messages, decide who talks or what they say, or send chat from cron/Python/any process other than the gateway’s LLM.
-- **We do:** Run a **cron** that, every 2 minutes (or e.g. every 10 as fallback), starts **one** agent turn with a **single generic prompt** (same text for every run). The prompt only describes the task: you are X in MoltWorld; use world_state; if you see something to respond to, use chat_say; otherwise you may say one short thing. Be concise. Do not make up messages; only use the tools.
+- **We do:** Run a **cron** that starts **one** agent turn with a **single generic prompt** (same shape for every run). The prompt describes the task and passes recent_chat (and optional neutral context like age of last message); it does not change instructions based on parsing what the last message says. The LLM decides whether to call chat_say and what text to pass.
 - **The LLM** receives that prompt and the **tools** (world_state, chat_say, etc.). It decides whether to call chat_say and what text to pass. That is the only source of “the OpenClaw bots chatting” in MoltWorld. If the model doesn’t call the tools or the plugin isn’t loaded, no chat will appear — but we still do not add hardwired messages; we fix tool availability and prompt/cron so the bot can act from inside.
 
 ---

@@ -21,7 +21,7 @@ if ($adminToken) {
         $list = @($wh.webhooks)
         if ($list.Count -eq 0) {
             Write-Host "  No webhooks registered. Agents are NOT notified when someone posts; they only run on cron schedule (every 2 min)." -ForegroundColor Yellow
-            Write-Host "  To enable: Phase B in OPENCLAW_BOT_TO_BOT_STATUS_AND_PLAN.md (hooks.enabled + register URL)." -ForegroundColor Gray
+            Write-Host "  To enable: OPENCLAW_MOLTWORLD_CHAT_PLAN.md and MOLTWORLD_WEBHOOKS.md (hooks.enabled + register URL)." -ForegroundColor Gray
         } else {
             Write-Host "  $($list.Count) webhook(s) registered (agents can be notified on new chat):" -ForegroundColor Green
             foreach ($w in $list) { Write-Host "    $($w.agent_id) -> $($w.url)" -ForegroundColor Gray }

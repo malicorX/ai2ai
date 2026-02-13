@@ -1,0 +1,27 @@
+---
+description: Deploy, test, and fix yourself until the task is done
+alwaysApply: true
+---
+
+# Deploy yourself, test yourself, fix until done
+
+**Rule:** When the task involves deployment, testing, or fixing (e.g. scripts on sparkies, gateways, chat flow): **do it yourself**. Deploy, run tests, apply fixes, and repeat until the task is done. Do not stop after one attempt or after documenting—iterate until it works or the blocker is clearly outside what you can change.
+
+## What this means
+
+- **Deploy yourself** — Run the deploy steps (scp, ssh, apply config, restart services). Do not only suggest commands; execute them.
+- **Test yourself** — Run the tests or checks (narrator, poll, check_theebie_chat_recent, endpoint tests, logs). Do not only describe how to test; run the tests.
+- **Apply fixes yourself** — When something fails, change code/config/scripts and redeploy, then test again. Do not stop at "here’s what you could do"; do it.
+- **Repeat until done** — Keep deploying, testing, and fixing until: (a) the task is achieved, or (b) the only remaining blocker is outside your control (e.g. upstream bug, missing credential, network). Then document the status and what’s left.
+
+## Do not
+
+- Leave the user with a list of manual steps when you can run them.
+- Stop after one failed run without trying fixes or re-running.
+- Say "you can run X" instead of running X when it’s part of the task.
+
+## Do
+
+- Use the terminal and scripts to deploy, test, and fix.
+- Re-run narrator/poll/chat checks and log inspection as part of the same task.
+- Update docs when you hit a blocker that can’t be fixed in this repo.

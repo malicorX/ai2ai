@@ -8,9 +8,10 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${CLAWDBOT_BUILD_DIR:-$HOME/clawdbot-jokelord-build}"
 CLAWDBOT_REPO="${CLAWDBOT_REPO:-https://github.com/clawdbot/clawdbot.git}"
-CLAWDBOT_TAG="${CLAWDBOT_TAG:-v2026.1.24-3}"
+CLAWDBOT_TAG="${CLAWDBOT_TAG:-}"
 JOKELORD_REPO="https://github.com/jokelord/openclaw-local-model-tool-calling-patch.git"
-JOKELORD_PATCHED_SRC="openclawd-2026.1.24/src"
+# jokelord repo uses openclawd-2026.2.3 (was openclawd-2026.1.24)
+JOKELORD_PATCHED_SRC="openclawd-2026.2.3/src"
 
 echo "Build dir: $BUILD_DIR"
 mkdir -p "$BUILD_DIR"
@@ -19,6 +20,10 @@ cd "$BUILD_DIR"
 if [[ ! -d clawdbot ]]; then
   echo "Cloning Clawdbot (default branch)..."
   git clone --depth 1 "$CLAWDBOT_REPO" clawdbot
+fi
+# Re-clone jokelord if patch dir missing or wrong version (e.g. had 2026.1.24, now need 2026.2.3)
+if [[ ! -d "jokelord-patch/$JOKELORD_PATCHED_SRC" ]]; then
+  rm -rf jokelord-patch
 fi
 if [[ ! -d jokelord-patch ]]; then
   echo "Cloning jokelord patch..."
@@ -67,25 +72,28 @@ if ! command -v node &>/dev/null || ! command -v npm &>/dev/null; then
   echo "See docs/external-tools/clawd/CLAWD_JOKELORD_STEPS.md for suggested install methods." >&2
   exit 1
 fi
-# Clawdbot's build script uses pnpm; ensure it's available (corepack or global install)
+# Use pnpm if available, else npx pnpm (no global install needed)
+PNPM="pnpm"
 if ! command -v pnpm &>/dev/null; then
-  if command -v corepack &>/dev/null; then
-    echo "Enabling pnpm via corepack..."
-    corepack enable
-    corepack prepare pnpm@latest --activate
-  else
-    echo "Installing pnpm globally..."
-    npm install -g pnpm
-  fi
+  PNPM="npx --yes pnpm"
+  echo "Using $PNPM (no global pnpm)"
 fi
-npm install
-npm run build
-echo "Installing globally (sudo)..."
-if [[ -t 0 ]]; then
+$PNPM install
+$PNPM run build
+# Control UI (chat at /chat): gateway serves dist/control-ui/; build so "Control UI assets not found" does not appear
+if $PNPM run ui:build 2>/dev/null; then
+  echo "Control UI assets built (dist/control-ui/)."
+else
+  echo "NOTE: ui:build skipped or failed; /chat may show 'Control UI assets not found'. Run: pnpm run ui:build"
+fi
+echo "Installing globally..."
+if npm install -g . 2>/dev/null; then
+  echo "Installed to user global (no sudo)."
+elif [[ -t 0 ]]; then
   sudo npm install -g .
 else
-  echo "NOTE: No TTY available for sudo. Run this manually in an interactive shell:"
-  echo "  cd \"$BUILD_DIR/clawdbot\" && sudo npm install -g ."
+  echo "NOTE: Run manually (with or without sudo):"
+  echo "  cd \"$BUILD_DIR/clawdbot\" && npm install -g ."
 fi
 
 echo ""
