@@ -186,6 +186,28 @@ python scripts/testing/test_langgraph_step.py
 
 Set `OPENAI_API_BASE` and `OPENAI_API_KEY` for a full step (the decide node calls the LLM once). Without them, the script may fail at the LLM call with a clear error.
 
+## OpenClaw gateway tools test suite
+
+Tests each agent (sparky1, sparky2) against every available gateway tool: sends a prompt that should trigger the tool, then checks the gateway log for evidence the tool was used.
+
+**Run (PowerShell):**
+```powershell
+.\scripts\testing\test_openclaw_tools_suite.ps1
+```
+
+- **Default:** both hosts, all non-optional tools (web_fetch, browser, web_search, read, write, session_status). Optional tool `exec` is skipped unless requested.
+- **One host:** `-Hosts sparky2`
+- **One tool:** `-Tools web_fetch`
+- **Include exec test:** `-IncludeOptional` (and `-SkipOptionalExec:$false` if you want exec in the default set)
+
+**Requirements:** SSH to each host; gateway on 18789; token in `~/.openclaw/openclaw.json` or `~/.clawdbot/clawdbot.json`. Test definitions: `scripts/testing/openclaw_tool_tests.json`.
+
+**Output:** Pass/fail per (host, tool) and a summary table. Fail means HTTP ≠ 200/201/202 or the tool’s log pattern was not found in the gateway log after the wait window.
+
+**sparky1 (Clawdbot):** If POST /v1/responses returns 405, the suite automatically tries POST /hooks/agent with the same prompt. For that to succeed, enable hooks and set `hooks.token` (or use gateway token) in `~/.clawdbot/clawdbot.json` and restart the gateway. See `scripts/clawd/test_wake_endpoints.sh` and PROJECT_OVERVIEW.md.
+
+**Log patterns:** Pass/fail for “tool used” is determined by matching `openclaw_tool_tests.json` **logPattern** against the last 1200 lines of `~/.openclaw/gateway.log` or `~/.clawdbot/gateway.log`. If your gateway logs tool calls in a different format, edit **logPattern** (regex) in that JSON to match. Increase wait times or log line count in the script if the agent is slow or logs are verbose.
+
 ## MoltWorld: two OpenClaw agents relate in chat
 
 To verify that Sparky1Agent and MalicorSparky2 relate to each other (reply to what the other said, not generic openers):

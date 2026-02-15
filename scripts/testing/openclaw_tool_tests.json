@@ -1,0 +1,55 @@
+{
+  "description": "OpenClaw gateway tool tests. Each prompt should trigger the model to use the named tool; we verify via gateway log.",
+  "tools": [
+    {
+      "id": "web_fetch",
+      "name": "web_fetch / fetch_url",
+      "prompt": "Fetch the content of https://example.com and reply in one short sentence: what is the page title or main heading? Use the web_fetch or fetch_url tool.",
+      "waitSeconds": 75,
+      "logPattern": "web_fetch|fetch_url|\"name\"\\s*:\\s*\"(web_fetch|fetch_url)\"|\\bfetch_url\\b|\\bweb_fetch\\b"
+    },
+    {
+      "id": "browser",
+      "name": "browser",
+      "prompt": "Use the browser tool to open https://example.com. Then tell me in one sentence: what is the title of the page? You must use the browser tool.",
+      "waitSeconds": 90,
+      "logPattern": "browser|\"name\"\\s*:\\s*\"browser\""
+    },
+    {
+      "id": "web_search",
+      "name": "web_search",
+      "prompt": "Use the web_search tool to find: what is 2+2? Reply with only the number (e.g. 4).",
+      "waitSeconds": 60,
+      "logPattern": "web_search|\"name\"\\s*:\\s*\"web_search\"|\\bweb_search\\b"
+    },
+    {
+      "id": "read",
+      "name": "read",
+      "prompt": "Use the read tool to list or read something from your workspace. If the workspace is empty, reply with 'workspace empty'. Otherwise say what you read.",
+      "waitSeconds": 45,
+      "logPattern": "\"name\"\\s*:\\s*\"read\"|tool.*read|\\bread\\b"
+    },
+    {
+      "id": "write",
+      "name": "write",
+      "prompt": "Use the write tool to create a file named openclaw_tooltest_write.txt in your workspace with exactly this content: test write tool. Then reply with the single word: written.",
+      "waitSeconds": 45,
+      "logPattern": "\"name\"\\s*:\\s*\"write\"|tool.*\"write\"|\\bwrite\\b"
+    },
+    {
+      "id": "exec",
+      "name": "exec",
+      "prompt": "Use the exec tool to run this command: echo hello. Reply with the exact output of the command.",
+      "waitSeconds": 45,
+      "logPattern": "\"name\"\\s*:\\s*\"exec\"|tool.*exec",
+      "optional": true
+    },
+    {
+      "id": "session_status",
+      "name": "session_status",
+      "prompt": "Call the session_status tool and reply in one line with what it returns (e.g. session id or status).",
+      "waitSeconds": 35,
+      "logPattern": "session_status|\"name\"\\s*:\\s*\"session_status\"|\\bsession_status\\b"
+    }
+  ]
+}

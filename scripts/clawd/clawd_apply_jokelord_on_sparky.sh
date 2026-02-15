@@ -95,6 +95,17 @@ else
   echo "NOTE: Run manually (with or without sudo):"
   echo "  cd \"$BUILD_DIR/clawdbot\" && npm install -g ."
 fi
+# OpenClaw 2026.2.x requires Node >=22.12.0 at runtime. If current node is 20, also install under node 22 so 'openclaw gateway' (often run with nvm use 22) uses the patched binary.
+if command -v nvm &>/dev/null && [[ -s "$HOME/.nvm/nvm.sh" ]]; then
+  # shellcheck disable=SC1090
+  source "$HOME/.nvm/nvm.sh"
+  if nvm use 22 2>/dev/null; then
+    if cd "$BUILD_DIR/clawdbot" && npm install -g . 2>/dev/null; then
+      echo "Installed to user global under Node 22 (for gateway with nvm use 22)."
+    fi
+    cd "$BUILD_DIR" 2>/dev/null || true
+  fi
+fi
 
 echo ""
 echo "Done. Next steps:"

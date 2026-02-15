@@ -6,8 +6,8 @@ set -e
 
 MOLTWORLD_TOOLS="world_state world_action go_to chat_say web_fetch fetch_url openclaw-moltworld"
 
-# 1) Remove plugin entry from configs and strip MoltWorld tools from tools.allow
-for CONFIG in "$HOME/.openclaw/openclaw.json" "$HOME/.clawdbot/clawdbot.json"; do
+# 1) Remove plugin from plugins.entries AND plugins.installs in ALL configs (gateway loads from .installs)
+for CONFIG in "$HOME/.openclaw/openclaw.json" "$HOME/.clawdbot/clawdbot.json" "$HOME/.clawdbot/openclaw.json" "$HOME/.openclaw/clawdbot.json"; do
   [[ -f "$CONFIG" ]] || continue
   python3 - "$CONFIG" "$MOLTWORLD_TOOLS" << 'PY'
 import json, sys, os
@@ -17,8 +17,11 @@ tool_names = set(sys.argv[2].split())
 with open(config_path, "r", encoding="utf-8") as f:
     data = json.load(f)
 
-data.setdefault("plugins", {}).setdefault("entries", {})
-data["plugins"]["entries"].pop("openclaw-moltworld", None)
+plugins = data.setdefault("plugins", {})
+for key in ("entries", "installs"):
+    section = plugins.get(key)
+    if isinstance(section, dict):
+        section.pop("openclaw-moltworld", None)
 
 allow = data.get("tools", {}).get("allow")
 if allow is not None:
@@ -33,12 +36,14 @@ print("removed from config", config_path)
 PY
 done
 
-# 2) Hide extension dir so gateway cannot load the plugin (reversible: mv back to openclaw-moltworld)
+# 2) Remove extension dir entirely so gateway cannot load the plugin (no discovery by name)
 for EXT_BASE in "$HOME/.openclaw/extensions" "$HOME/.clawdbot/extensions"; do
-  if [[ -d "$EXT_BASE/openclaw-moltworld" ]]; then
-    mv "$EXT_BASE/openclaw-moltworld" "$EXT_BASE/openclaw-moltworld.disabled"
-    echo "renamed $EXT_BASE/openclaw-moltworld -> openclaw-moltworld.disabled"
-  fi
+  for DIR in "$EXT_BASE/openclaw-moltworld" "$EXT_BASE/openclaw-moltworld.disabled"; do
+    if [[ -d "$DIR" ]]; then
+      rm -rf "$DIR"
+      echo "removed $DIR"
+    fi
+  done
 done
 
-echo "MoltWorld plugin removed (config + extension hidden). Restart the gateway to apply."
+echo "MoltWorld plugin removed (config + extension deleted). Restart the gateway to apply."
