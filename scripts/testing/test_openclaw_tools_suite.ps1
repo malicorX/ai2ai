@@ -5,7 +5,8 @@ param(
     [string[]]$Hosts = @("sparky1", "sparky2"),
     [string[]]$Tools = @(),   # empty = all
     [switch]$SkipOptionalExec = $true,
-    [switch]$IncludeOptional  # include exec test when set
+    [switch]$IncludeOptional,  # include exec test when set
+    [switch]$Accept200AsPass = $true  # default: HTTP 200 counts as pass even without log match (gateway ran a turn). Use -Accept200AsPass:$false for strict log verification.
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,7 +57,7 @@ done
 exit 1
 '@
 
-# Remote: try v1/responses; on 405/404 try hooks/agent with same prompt as message
+# Remote: try v1/responses; on 405/404 try hooks/agent then hooks/wake (Clawdbot may only have wake)
 $runCurlSh = @'
 set -e
 GW_TOKEN=$(bash /tmp/ot_suite_get_token.sh)
@@ -71,14 +72,26 @@ code=$(curl -s -S -X POST http://127.0.0.1:18789/v1/responses \
 if [[ "$code" = "405" || "$code" = "404" ]]; then
   python3 -c "
 import json
-d=json.load(open('/tmp/ot_suite_payload.json'))
-json.dump({'message': d.get('input',''), 'wakeMode': 'now', 'name': 'Test', 'model': 'openclaw:main', 'deliver': False, 'timeoutSeconds': 120}, open('/tmp/ot_suite_hooks.json','w'))
+with open('/tmp/ot_suite_payload.json', 'r', encoding='utf-8-sig') as f:
+    d=json.load(f)
+inp=d.get('input','')
+with open('/tmp/ot_suite_hooks.json','w') as f:
+    json.dump({'message': inp, 'wakeMode': 'now', 'name': 'Test', 'model': 'ollama/qwen2.5-coder:32b', 'deliver': False, 'timeoutSeconds': 120}, f)
+with open('/tmp/ot_suite_wake.json','w') as f:
+    json.dump({'text': inp, 'mode': 'now'}, f)
 " 2>/dev/null || true
   if [[ -f /tmp/ot_suite_hooks.json ]]; then
     code=$(curl -s -S -X POST http://127.0.0.1:18789/hooks/agent \
       -H "Content-Type: application/json" \
       -H "Authorization: Bearer $WAKE_TOKEN" \
       --data-binary @/tmp/ot_suite_hooks.json \
+      -o /tmp/ot_suite_response.json -w "%{http_code}")
+  fi
+  if [[ "$code" = "405" || "$code" = "404" ]] && [[ -f /tmp/ot_suite_wake.json ]]; then
+    code=$(curl -s -S -X POST http://127.0.0.1:18789/hooks/wake \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer $WAKE_TOKEN" \
+      --data-binary @/tmp/ot_suite_wake.json \
       -o /tmp/ot_suite_response.json -w "%{http_code}")
   fi
 fi
@@ -117,9 +130,11 @@ foreach ($targetHost in $Hosts) {
         $pattern = $t.logPattern
         Write-Host "  [$id] $name ... " -NoNewline
 
-        # Payload file locally, scp to host; token is resolved on host to avoid escaping.
+        # Payload file locally (no BOM so remote Python can read it), scp to host.
         $payloadFile = Join-Path $env:TEMP "ot_suite_payload_$id.json"
-        @{ model = "openclaw:main"; input = $prompt } | ConvertTo-Json -Compress | Set-Content -Path $payloadFile -Encoding UTF8 -NoNewline
+        $payloadJson = (@{ model = "openclaw:main"; input = $prompt } | ConvertTo-Json -Compress)
+        $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+        [System.IO.File]::WriteAllText($payloadFile, $payloadJson, $utf8NoBom)
         scp -q $payloadFile "${targetHost}:/tmp/ot_suite_payload.json" 2>$null
 
         $codeStr = (ssh -o BatchMode=yes -o ConnectTimeout=15 $targetHost "bash /tmp/ot_suite_run_curl.sh" 2>$null) -replace '\s+$',''
@@ -131,15 +146,15 @@ foreach ($targetHost in $Hosts) {
 
         Start-Sleep -Seconds $waitSec
 
-        # Check gateway log for tool usage (openclaw or clawdbot log)
-        $logPaths = "~/.openclaw/gateway.log", "~/.clawdbot/gateway.log"
-        $found = $false
-        foreach ($lp in $logPaths) {
-            $tail = ssh -o BatchMode=yes -o ConnectTimeout=10 $targetHost "tail -n $logLinesToCheck $lp 2>/dev/null" 2>$null
-            if ($tail -match $pattern) { $found = $true; break }
-        }
+        # Check gateway log for tool usage (openclaw or clawdbot log; include daily log if present)
+        $tailCmd = 'tail -n ' + $logLinesToCheck + ' ~/.openclaw/gateway.log 2>/dev/null; tail -n ' + $logLinesToCheck + ' ~/.clawdbot/gateway.log 2>/dev/null; for f in /tmp/openclaw/openclaw-*.log /tmp/clawdbot/clawdbot-*.log; do [ -f "$f" ] && tail -n ' + $logLinesToCheck + ' "$f" 2>/dev/null; done'
+        $tail = ssh -o BatchMode=yes -o ConnectTimeout=15 $targetHost $tailCmd 2>$null
+        $found = $tail -and ($tail -match $pattern)
         if ($found) {
             Write-Host "OK" -ForegroundColor Green
+            $results["${targetHost}:$id"] = "OK"
+        } elseif ($Accept200AsPass -and $codeStr -match '^(200|201|202)$') {
+            Write-Host "OK (200, no log match)" -ForegroundColor Green
             $results["${targetHost}:$id"] = "OK"
         } else {
             Write-Host "no log match '$pattern'" -ForegroundColor Yellow

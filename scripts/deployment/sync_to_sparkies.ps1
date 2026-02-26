@@ -36,6 +36,8 @@ if ($Mode -eq "synconly") {
     Write-Host "`n[Sync only] Syncing agent + backend files to sparkies (no git)..." -ForegroundColor Cyan
     $filesToSync = @(
         "agents/agent_template/agent.py",
+        "agents/agent_template/agent_tools.py",
+        "agents/agent_template/do_job.py",
         "agents/agent_template/langgraph_agent.py",
         "agents/agent_template/langgraph_control.py",
         "agents/agent_template/langgraph_runtime.py",
@@ -108,6 +110,8 @@ if ($Mode -eq "push" -or $Mode -eq "both") {
     Write-Host "`n[4/4] Syncing to sparky1..." -ForegroundColor Yellow
     $filesToSync = @(
         "agents/agent_template/agent.py",
+        "agents/agent_template/agent_tools.py",
+        "agents/agent_template/do_job.py",
         "agents/agent_template/langgraph_agent.py",
         "agents/agent_template/langgraph_control.py",
         "agents/agent_template/langgraph_runtime.py",
@@ -139,6 +143,8 @@ if ($Mode -eq "push" -or $Mode -eq "both") {
     Write-Host "`n[4/4] Syncing to sparky2..." -ForegroundColor Yellow
     $filesToSync2 = @(
         "agents/agent_template/agent.py",
+        "agents/agent_template/agent_tools.py",
+        "agents/agent_template/do_job.py",
         "agents/agent_template/langgraph_agent.py",
         "agents/agent_template/langgraph_control.py",
         "agents/agent_template/langgraph_runtime.py",

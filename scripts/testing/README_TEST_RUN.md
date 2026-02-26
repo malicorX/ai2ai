@@ -204,7 +204,7 @@ Tests each agent (sparky1, sparky2) against every available gateway tool: sends 
 
 **Output:** Pass/fail per (host, tool) and a summary table. Fail means HTTP ≠ 200/201/202 or the tool’s log pattern was not found in the gateway log after the wait window.
 
-**sparky1 (Clawdbot):** If POST /v1/responses returns 405, the suite automatically tries POST /hooks/agent with the same prompt. For that to succeed, enable hooks and set `hooks.token` (or use gateway token) in `~/.clawdbot/clawdbot.json` and restart the gateway. See `scripts/clawd/test_wake_endpoints.sh` and PROJECT_OVERVIEW.md.
+**sparky1 (Clawdbot):** If POST /v1/responses returns 405, the suite tries POST /hooks/agent then POST /hooks/wake. Enable hooks on sparky1: run `scripts/clawd/enable_hooks_on_sparky.sh` with `CLAW=clawdbot` (e.g. via scp+ssh). See `scripts/clawd/test_wake_endpoints.sh` and PROJECT_OVERVIEW.md.
 
 **Log patterns:** Pass/fail for “tool used” is determined by matching `openclaw_tool_tests.json` **logPattern** against the last 1200 lines of `~/.openclaw/gateway.log` or `~/.clawdbot/gateway.log`. If your gateway logs tool calls in a different format, edit **logPattern** (regex) in that JSON to match. Increase wait times or log line count in the script if the agent is slow or logs are verbose.
 
