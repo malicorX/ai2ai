@@ -55,7 +55,7 @@ def list_runs():
                     try:
                         meta = json.loads(meta_path.read_text(encoding="utf-8", errors="replace"))
                     except Exception:
-                        pass
+                        _log.debug("Failed to read run meta %s", meta_path)
                 runs.append({"run_id": d.name, "dir": str(d), "meta": meta})
     runs.sort(key=lambda r: r.get("run_id", ""), reverse=True)
     return {"runs": runs[:100], "current_run_id": state.run_id}
@@ -72,7 +72,7 @@ def run_summary(run_id: str):
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8", errors="replace"))
         except Exception:
-            pass
+            _log.debug("Failed to read run meta %s", meta_path)
     files = []
     for p in rd.iterdir():
         if p.is_file():
@@ -162,11 +162,11 @@ async def admin_purge_cancelled_jobs(req: PurgeCancelledJobsRequest, request: Re
         from app.utils import write_jsonl_atomic
         write_jsonl_atomic(JOBS_PATH, [asdict(ev) for ev in state.job_events])
     except Exception:
-        pass
+        _log.exception("Failed to write job events after purge")
     try:
         await ws_manager.broadcast({"type": "jobs", "data": {"purge_cancelled": {"removed_jobs": removed_jobs, "removed_events": removed_events}}})
     except Exception:
-        pass
+        _log.debug("Broadcast after purge failed", exc_info=True)
     return {"ok": True, "removed_jobs": removed_jobs, "removed_events": removed_events}
 
 

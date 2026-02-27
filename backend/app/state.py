@@ -7,11 +7,9 @@ This is a transitional module — eventually replaced by a real database.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import math
-import re
 import time
 import urllib.parse
 import urllib.request
@@ -25,15 +23,13 @@ from app.config import (
     ECONOMY_PATH, EMBEDDINGS_BASE_URL, EMBEDDINGS_MODEL, EMBEDDINGS_TIMEOUT_SECONDS,
     EMBEDDINGS_TRUNCATE, EVENTS_PATH, JOBS_PATH, LANDMARKS, MEMORY_DIR,
     MEMORY_EMBED_DIR, MOLTWORLD_WEBHOOK_COOLDOWN_SECONDS,
-    MOLTWORLD_WEBHOOKS_PATH, OPPORTUNITIES_PATH, REWARD_ACTION_DIVERSITY_BASE,
-    REWARD_ACTION_DIVERSITY_WINDOW, REWARD_FIVERR_DISCOVERY,
-    REWARD_FIVERR_MIN_TEXT_LEN, STARTING_AIDOLLARS, TRACE_PATH, TREASURY_ID,
+    MOLTWORLD_WEBHOOKS_PATH, STARTING_AIDOLLARS, TRACE_PATH, TREASURY_ID,
     WORLD_PUBLIC_URL, WORLD_SIZE, SIM_MINUTES_PER_REAL_SECOND,
 )
 from app.models import (
-    AgentState, AuditEntry, AwardRequest, BoardPost, BoardReply,
+    AgentState, AuditEntry, BoardPost, BoardReply,
     ChatMessage, EconomyEntry, EventLogEntry, Job, JobEvent,
-    MemoryEntry, Opportunity, TraceEvent, VillageEvent, WorldSnapshot,
+    Opportunity, TraceEvent, VillageEvent, WorldSnapshot,
 )
 from app.utils import (
     append_jsonl, normalize_text_for_similarity, chat_text_similarity,
@@ -42,6 +38,19 @@ from app.utils import (
 from app.ws import ws_manager
 
 _log = logging.getLogger(__name__)
+
+# Economy and opportunity logic live in dedicated modules.
+# Re-exported here for backward compatibility (routes import from state).
+from app.economy_logic import (  # noqa: E402, F401
+    recompute_balances, ensure_account, action_diversity_decay,
+    award_action_diversity, extract_fiverr_url, try_award_fiverr_discovery,
+    apply_penalty, action_history,
+)
+from app.opportunity_logic import (  # noqa: E402, F401
+    norm_text, opportunity_fingerprint, save_opportunities, load_opportunities,
+    recalculate_opportunity_success_score, recalculate_opportunity_value_score,
+    upsert_opportunity,
+)
 
 # --- Run state ---
 run_id: str = time.strftime("%Y%m%d-%H%M%S")
@@ -76,10 +85,11 @@ def load_agents() -> None:
                             last_seen_at=float(d.get("last_seen_at", 0)),
                         )
                     except Exception:
+                        _log.warning("Skipping bad agent entry %s", aid, exc_info=True)
                         continue
                 return
         except Exception:
-            pass
+            _log.warning("Failed to load agents from %s", AGENTS_PATH, exc_info=True)
     for m in chat:
         sid = str(m.sender_id or "").strip()
         if sid and sid not in agents:
@@ -111,7 +121,7 @@ def save_agents(force: bool = False) -> None:
         }
         AGENTS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=0), encoding="utf-8")
     except Exception:
-        pass
+        _log.warning("Failed to save agents to %s", AGENTS_PATH, exc_info=True)
 
 
 # --- Audit ---
@@ -263,7 +273,7 @@ def load_moltworld_webhooks() -> None:
                 for w in data if w.get("url")
             ]
     except Exception:
-        pass
+        _log.warning("Failed to load webhooks from %s", MOLTWORLD_WEBHOOKS_PATH, exc_info=True)
 
 
 def save_moltworld_webhooks() -> None:
@@ -271,7 +281,7 @@ def save_moltworld_webhooks() -> None:
         MOLTWORLD_WEBHOOKS_PATH.parent.mkdir(parents=True, exist_ok=True)
         MOLTWORLD_WEBHOOKS_PATH.write_text(json.dumps(moltworld_webhooks, indent=2), encoding="utf-8")
     except Exception:
-        pass
+        _log.warning("Failed to save webhooks to %s", MOLTWORLD_WEBHOOKS_PATH, exc_info=True)
 
 
 def _http_post_webhook(url: str, payload: dict, timeout: float = 10.0, headers: Optional[dict] = None) -> None:
@@ -283,7 +293,7 @@ def _http_post_webhook(url: str, payload: dict, timeout: float = 10.0, headers: 
         req = urllib.request.Request(url, data=data, method="POST", headers=h)
         urllib.request.urlopen(req, timeout=timeout)
     except Exception:
-        pass
+        _log.debug("Webhook POST to %s failed", url[:120], exc_info=True)
 
 
 def _is_gateway_wake_url(url: str) -> bool:
@@ -326,12 +336,12 @@ async def fire_moltworld_webhooks(sender_id: str, sender_name: str, text: str, s
             try:
                 await asyncio.to_thread(_http_post_webhook, url, payload, 10.0, headers)
             except Exception:
-                pass
+                _log.debug("Webhook thread failed for %s", agent_id, exc_info=True)
         else:
             try:
                 await asyncio.to_thread(_http_post_webhook, url, new_chat_payload)
             except Exception:
-                pass
+                _log.debug("Webhook thread failed for %s", agent_id, exc_info=True)
 
 
 # --- Trace ---
@@ -378,25 +388,14 @@ def emit_trace(agent_id: str, agent_name: str, kind: str, summary: str, data: Op
         try:
             asyncio.create_task(ws_manager.broadcast({"type": "trace", "data": asdict(ev)}))
         except Exception:
-            pass
+            pass  # no event loop — expected during sync calls
     except Exception:
-        return
+        _log.warning("emit_trace failed for %s/%s", agent_id, kind, exc_info=True)
 
 
 # --- Economy ---
 economy_ledger: List[EconomyEntry] = []
 balances: Dict[str, float] = {}
-
-
-def recompute_balances() -> None:
-    global balances
-    b: Dict[str, float] = {}
-    for e in economy_ledger:
-        if e.from_id:
-            b[e.from_id] = float(b.get(e.from_id, 0.0)) - float(e.amount)
-        if e.to_id:
-            b[e.to_id] = float(b.get(e.to_id, 0.0)) + float(e.amount)
-    balances = b
 
 
 def load_economy() -> None:
@@ -418,99 +417,6 @@ def load_economy() -> None:
             continue
     economy_ledger = ledger
     recompute_balances()
-
-
-def ensure_account(agent_id: str) -> None:
-    if agent_id in balances:
-        return
-    if agent_id == TREASURY_ID:
-        balances[agent_id] = float(balances.get(agent_id, 0.0))
-        return
-    now = time.time()
-    entry = EconomyEntry(
-        entry_id=str(uuid.uuid4()),
-        entry_type="genesis",
-        amount=float(STARTING_AIDOLLARS),
-        from_id="",
-        to_id=agent_id,
-        memo="starting balance",
-        created_at=now,
-    )
-    economy_ledger.append(entry)
-    append_jsonl(ECONOMY_PATH, asdict(entry))
-    recompute_balances()
-
-
-# --- Action diversity / Fiverr rewards ---
-action_history: Dict[str, List[tuple]] = {}
-_fiverr_awarded: List[dict] = []
-_fiverr_awarded_max = 500
-
-
-def action_diversity_decay(agent_id: str, action_kind: str) -> float:
-    history = action_history.get(agent_id) or []
-    window = history[-REWARD_ACTION_DIVERSITY_WINDOW:]
-    same_count = sum(1 for (k, _) in window if k == action_kind)
-    if same_count == 0:
-        return 1.0
-    if same_count == 1:
-        return 0.5
-    if same_count == 2:
-        return 0.25
-    return 0.1
-
-
-async def award_action_diversity(agent_id: str, action_kind: str) -> Optional[float]:
-    decay = action_diversity_decay(agent_id, action_kind)
-    now = time.time()
-    history = action_history.setdefault(agent_id, [])
-    history.append((action_kind, now))
-    if len(history) > 30:
-        del history[: len(history) - 30]
-    ensure_account(agent_id)
-    ensure_account(TREASURY_ID)
-    amount = round(REWARD_ACTION_DIVERSITY_BASE * decay, 4)
-    if amount < 0.001:
-        return None
-    # Import here to avoid circular dependency
-    from app.routes.economy import do_economy_award
-    await do_economy_award(agent_id, amount, f"action_diversity ({action_kind})", "system")
-    return amount
-
-
-def extract_fiverr_url(text: str) -> Optional[str]:
-    if not text or "fiverr.com" not in text.lower():
-        return None
-    m = re.search(r"https?://[^\s\)\]\"]+fiverr\.com[^\s\)\]\"]*", text, re.IGNORECASE)
-    if not m:
-        return None
-    url = m.group(0).lower()
-    if "?" in url:
-        url = url.split("?")[0]
-    if "#" in url:
-        url = url.split("#")[0]
-    return url.strip()
-
-
-async def try_award_fiverr_discovery(agent_id: str, text: str) -> Optional[float]:
-    if len((text or "").strip()) < REWARD_FIVERR_MIN_TEXT_LEN:
-        return None
-    url = extract_fiverr_url(text)
-    if not url:
-        return None
-    date_str = time.strftime("%Y-%m-%d", time.gmtime(time.time()))
-    url_key = url[:200]
-    for e in _fiverr_awarded:
-        if e.get("agent_id") == agent_id and e.get("url_key") == url_key and e.get("date_str") == date_str:
-            return None
-    _fiverr_awarded.append({"agent_id": agent_id, "url_key": url_key, "date_str": date_str})
-    if len(_fiverr_awarded) > _fiverr_awarded_max:
-        del _fiverr_awarded[: len(_fiverr_awarded) - _fiverr_awarded_max]
-    ensure_account(agent_id)
-    ensure_account(TREASURY_ID)
-    from app.routes.economy import do_economy_award
-    await do_economy_award(agent_id, REWARD_FIVERR_DISCOVERY, f"fiverr discovery: {url_key[:80]}", "system")
-    return REWARD_FIVERR_DISCOVERY
 
 
 # --- Jobs ---
@@ -747,188 +653,6 @@ board_replies: Dict[str, List[BoardReply]] = {}
 opportunities: Dict[str, Opportunity] = {}
 
 
-def norm_text(x) -> str:
-    try:
-        return str(x or "").strip()
-    except Exception:
-        return ""
-
-
-def opportunity_fingerprint(title: str, platform: str, source_url: str) -> str:
-    s = f"{norm_text(title).lower()}|{norm_text(platform).lower()}|{norm_text(source_url)}"
-    try:
-        return hashlib.sha1(s.encode("utf-8", errors="ignore")).hexdigest()[:16]
-    except Exception:
-        return str(uuid.uuid4())[:16]
-
-
-def save_opportunities() -> None:
-    try:
-        rows = [asdict(o) for o in opportunities.values()]
-        rows.sort(key=lambda r: float(r.get("last_seen_at") or r.get("created_at") or 0.0), reverse=True)
-        tmp = OPPORTUNITIES_PATH.with_suffix(".tmp")
-        with tmp.open("w", encoding="utf-8") as f:
-            for r in rows:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
-        tmp.replace(OPPORTUNITIES_PATH)
-    except Exception:
-        pass
-
-
-def load_opportunities() -> None:
-    global opportunities
-    opportunities = {}
-    if not OPPORTUNITIES_PATH.exists():
-        return
-    try:
-        for ln in OPPORTUNITIES_PATH.read_text(encoding="utf-8", errors="replace").splitlines():
-            ln = (ln or "").strip()
-            if not ln:
-                continue
-            try:
-                r = json.loads(ln)
-                if not isinstance(r, dict):
-                    continue
-                fp = str(r.get("fingerprint") or "").strip()
-                if not fp:
-                    continue
-                opportunities[fp] = Opportunity(
-                    opp_id=str(r.get("opp_id") or "").strip() or str(uuid.uuid4()),
-                    fingerprint=fp,
-                    title=norm_text(r.get("title")),
-                    platform=norm_text(r.get("platform")),
-                    demand_signal=norm_text(r.get("demand_signal")),
-                    estimated_price_usd=norm_text(r.get("estimated_price_usd")),
-                    why_fit=norm_text(r.get("why_fit")),
-                    first_action=norm_text(r.get("first_action")),
-                    source_url=norm_text(r.get("source_url")),
-                    source_quote=norm_text(r.get("source_quote")),
-                    source_domain=norm_text(r.get("source_domain")),
-                    status=norm_text(r.get("status")) or "new",
-                    tags=list(r.get("tags") or []) if isinstance(r.get("tags"), list) else [],
-                    notes=norm_text(r.get("notes")),
-                    created_at=float(r.get("created_at") or time.time()),
-                    last_seen_at=float(r.get("last_seen_at") or r.get("created_at") or time.time()),
-                    run_ids=list(r.get("run_ids") or []) if isinstance(r.get("run_ids"), list) else [],
-                    job_ids=list(r.get("job_ids") or []) if isinstance(r.get("job_ids"), list) else [],
-                    client_response=norm_text(r.get("client_response")) or "",
-                    outcome=norm_text(r.get("outcome")) or "",
-                    success_score=float(r.get("success_score") or 0.0),
-                    actual_revenue_usd=float(r.get("actual_revenue_usd") or 0.0),
-                    estimated_value_score=float(r.get("estimated_value_score") or 0.0),
-                )
-            except Exception:
-                continue
-    except Exception:
-        return
-
-
-def recalculate_opportunity_success_score(opp: Opportunity) -> None:
-    if not opp:
-        return
-    similar = []
-    for o in opportunities.values():
-        if o.fingerprint == opp.fingerprint:
-            continue
-        if o.platform == opp.platform and o.platform:
-            similar.append(o)
-        elif o.source_domain == opp.source_domain and o.source_domain:
-            similar.append(o)
-    if similar:
-        successes = sum(1 for o in similar if o.outcome == "success")
-        total_with_outcome = sum(1 for o in similar if o.outcome)
-        if total_with_outcome > 0:
-            opp.success_score = float(successes) / float(total_with_outcome)
-        else:
-            opp.success_score = 0.5
-    else:
-        if opp.outcome == "success":
-            opp.success_score = 0.8
-        elif opp.outcome == "failed":
-            opp.success_score = 0.2
-        else:
-            opp.success_score = 0.5
-    recalculate_opportunity_value_score(opp)
-
-
-def recalculate_opportunity_value_score(opp: Opportunity) -> None:
-    if not opp:
-        return
-    price = 0.0
-    try:
-        price_str = str(opp.estimated_price_usd or "").strip()
-        nums = [float(x) for x in re.findall(r"(\d+(?:\.\d+)?)", price_str)]
-        if nums:
-            price = max(nums)
-    except Exception:
-        pass
-    price_score = min(1.0, price / 1000.0) if price > 0 else 0.3
-    success_likelihood = opp.success_score if opp.success_score > 0 else 0.5
-    fit_score = 0.5
-    why_fit = str(opp.why_fit or "").strip()
-    if len(why_fit) > 50:
-        fit_score = 0.7
-    if len(why_fit) > 100:
-        fit_score = 0.9
-    opp.estimated_value_score = (price_score * 0.4) + (success_likelihood * 0.4) + (fit_score * 0.2)
-
-
-def upsert_opportunity(item: dict, rid: str, job_id: str) -> Optional[Opportunity]:
-    if not isinstance(item, dict):
-        return None
-    title = norm_text(item.get("title") or item.get("name"))
-    if not title:
-        return None
-    platform = norm_text(item.get("platform"))
-    source_url = norm_text(item.get("source_url") or item.get("url"))
-    fp = opportunity_fingerprint(title, platform, source_url)
-    now = time.time()
-    existing = opportunities.get(fp)
-    if existing:
-        existing.title = title or existing.title
-        existing.platform = platform or existing.platform
-        existing.demand_signal = norm_text(item.get("demand_signal")) or existing.demand_signal
-        existing.estimated_price_usd = norm_text(item.get("estimated_price_usd") or item.get("price")) or existing.estimated_price_usd
-        existing.why_fit = norm_text(item.get("why_fit")) or existing.why_fit
-        existing.first_action = norm_text(item.get("first_action")) or existing.first_action
-        existing.source_url = source_url or existing.source_url
-        existing.source_quote = norm_text(item.get("source_quote")) or existing.source_quote
-        existing.source_domain = _url_host(source_url) or existing.source_domain
-        existing.last_seen_at = now
-        if rid and rid not in existing.run_ids:
-            existing.run_ids.append(rid)
-        if job_id and job_id not in existing.job_ids:
-            existing.job_ids.append(job_id)
-        return existing
-    opp = Opportunity(
-        opp_id=str(uuid.uuid4()), fingerprint=fp,
-        title=title, platform=platform,
-        demand_signal=norm_text(item.get("demand_signal")),
-        estimated_price_usd=norm_text(item.get("estimated_price_usd") or item.get("price")),
-        why_fit=norm_text(item.get("why_fit")),
-        first_action=norm_text(item.get("first_action")),
-        source_url=source_url,
-        source_quote=norm_text(item.get("source_quote")),
-        source_domain=_url_host(source_url),
-        status="new", tags=[], notes="",
-        created_at=now, last_seen_at=now,
-        run_ids=[rid] if rid else [],
-        job_ids=[job_id] if job_id else [],
-        client_response="", outcome="",
-        success_score=0.0, actual_revenue_usd=0.0, estimated_value_score=0.0,
-    )
-    opportunities[fp] = opp
-    recalculate_opportunity_value_score(opp)
-    return opp
-
-
-def _url_host(url: str) -> str:
-    try:
-        return (urllib.parse.urlparse(str(url or "")).hostname or "").lower().strip()
-    except Exception:
-        return ""
-
-
 # --- Memory helpers ---
 
 def memory_path(agent_id: str):
@@ -964,6 +688,7 @@ def get_embedding(text: str) -> Optional[List[float]]:
                 out = out[:EMBEDDINGS_TRUNCATE]
             return out
     except Exception:
+        _log.debug("Embedding request failed for text len=%d", len(text or ""), exc_info=True)
         return None
 
 
@@ -1037,35 +762,6 @@ def get_world_snapshot() -> WorldSnapshot:
         rules=get_rules_text(),
         rules_reminder="You should visit the Rules room: use go_to target=rules or move toward (12,10). When you have no other short-term goal, go there to read the ai$ rules. The full rules are in this response (field 'rules') and at GET /rules.",
     )
-
-
-# --- Penalty helper ---
-
-async def apply_penalty(agent_id: str, amount: float, reason: str = "", by: str = "system") -> tuple:
-    if amount <= 0:
-        return (0.0, None)
-    ensure_account(agent_id)
-    ensure_account(TREASURY_ID)
-    available = float(balances.get(agent_id, 0.0))
-    if available <= 0:
-        return (0.0, None)
-    amount = min(amount, available)
-    now = time.time()
-    memo = (f"penalty by {by}: {reason}" if reason else f"penalty by {by}").strip()[:400]
-    entry = EconomyEntry(
-        entry_id=str(uuid.uuid4()),
-        entry_type="spend",
-        amount=amount,
-        from_id=agent_id,
-        to_id=TREASURY_ID,
-        memo=memo,
-        created_at=now,
-    )
-    economy_ledger.append(entry)
-    append_jsonl(ECONOMY_PATH, asdict(entry))
-    recompute_balances()
-    await ws_manager.broadcast({"type": "balances", "data": {"balances": balances}})
-    return (amount, entry)
 
 
 # --- Load all state on module import ---

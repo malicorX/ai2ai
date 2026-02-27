@@ -3,8 +3,11 @@ Centralized configuration: all environment variables, paths, and constants.
 """
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 WORLD_SIZE = 32
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data")).resolve()
@@ -86,3 +89,41 @@ LANDMARKS = [
     {"id": "home_1", "x": 3, "y": 26, "type": "home"},
     {"id": "home_2", "x": 28, "y": 4, "type": "home"},
 ]
+
+
+def validate_config() -> None:
+    """Log warnings for missing/insecure configuration. Called once at startup."""
+    if not ADMIN_TOKEN:
+        _log.warning(
+            "ADMIN_TOKEN is empty — admin endpoints are UNPROTECTED. "
+            "Set ADMIN_TOKEN env var in production."
+        )
+    if not AGENT_TOKENS_PATH:
+        _log.warning(
+            "AGENT_TOKENS_PATH is empty — agent auth is DISABLED. "
+            "All agent API calls will be unauthenticated."
+        )
+    elif not Path(AGENT_TOKENS_PATH).exists():
+        _log.warning(
+            "AGENT_TOKENS_PATH is set to '%s' but file does not exist. "
+            "Agent auth will fail until the file is created.",
+            AGENT_TOKENS_PATH,
+        )
+    if not REGISTRATION_SECRET:
+        _log.info(
+            "REGISTRATION_SECRET is empty — open agent self-registration is enabled."
+        )
+    if PAYPAL_ENABLED and (not PAYPAL_CLIENT_ID or not PAYPAL_CLIENT_SECRET):
+        _log.warning(
+            "PAYPAL_ENABLED=true but CLIENT_ID or CLIENT_SECRET is missing. "
+            "PayPal webhooks will not work correctly."
+        )
+    if WEB_SEARCH_ENABLED and not SERPER_API_KEY:
+        _log.warning(
+            "WEB_SEARCH_ENABLED=true but SERPER_API_KEY is empty. "
+            "Web search will always return disabled."
+        )
+    if not EMBEDDINGS_BASE_URL:
+        _log.info("EMBEDDINGS_BASE_URL not set — semantic memory search disabled.")
+    if not VERIFY_LLM_BASE_URL:
+        _log.info("VERIFY_LLM_BASE_URL not set — LLM-based job verification disabled.")

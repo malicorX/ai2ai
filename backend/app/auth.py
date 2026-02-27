@@ -11,6 +11,9 @@ from fastapi import Request
 
 from app.config import ADMIN_TOKEN, AGENT_TOKENS_PATH
 
+import logging
+_log = logging.getLogger(__name__)
+
 _cached_agent_tokens: Optional[dict] = None
 _cached_agent_tokens_mtime: float = 0.0
 
@@ -32,7 +35,7 @@ def _load_agent_tokens() -> dict:
             _cached_agent_tokens_mtime = mtime
             return _cached_agent_tokens
     except Exception:
-        pass
+        _log.warning("Failed to load agent tokens from %s", AGENT_TOKENS_PATH, exc_info=True)
     return {}
 
 

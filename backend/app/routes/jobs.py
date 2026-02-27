@@ -209,7 +209,7 @@ async def jobs_create(req: JobCreateRequest):
                             state.save_opportunities()
                             break
     except Exception:
-        pass
+        _log.warning("Auto-update opportunity status failed for job %s", job_id, exc_info=True)
     await ws_manager.broadcast({"type": "jobs", "data": {"event": asdict(ev), "job": asdict(state.jobs[job_id])}})
     return {"ok": True, "job": asdict(state.jobs[job_id])}
 
@@ -315,14 +315,14 @@ async def jobs_review(job_id: str, req: JobReviewRequest):
                                         rw = float(j2.reward or 0.0)
                                         if rw > 0:
                                             opp.actual_revenue_usd = rw * 0.10
-                                    except Exception:
+                                    except (TypeError, ValueError):
                                         pass
                                     state.recalculate_opportunity_success_score(opp)
                                     opp.last_seen_at = time.time()
                                     state.save_opportunities()
                                     break
             except Exception:
-                pass
+                _log.warning("Auto-update opportunity outcome failed for job %s", job_id, exc_info=True)
             # Task-mode: +1 ai$ to BOTH proposer and executor
             try:
                 proposer = str(j2.created_by or "").strip()
@@ -332,7 +332,7 @@ async def jobs_review(job_id: str, req: JobReviewRequest):
                     await do_economy_award(proposer, 1.0, f"task verified (job {job_id})", req.reviewed_by)
                     await do_economy_award(executor, 1.0, f"task verified (job {job_id})", req.reviewed_by)
             except Exception:
-                pass
+                _log.warning("Task reward payout failed for job %s", job_id, exc_info=True)
         if req.penalty is not None:
             pen = float(req.penalty)
             if pen > 0:
@@ -358,7 +358,7 @@ async def jobs_review(job_id: str, req: JobReviewRequest):
                         if changed:
                             state.save_opportunities()
     except Exception:
-        pass
+        _log.warning("Market scan opportunity ingest failed for job %s", job_id, exc_info=True)
     return {"ok": True, "job": asdict(state.jobs[job_id])}
 
 

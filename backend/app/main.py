@@ -19,7 +19,7 @@ from starlette.responses import RedirectResponse, HTMLResponse, JSONResponse
 
 from app import state
 from app.auth import agent_from_auth, is_agent_route_allowed, is_public_route, require_admin
-from app.config import ADMIN_TOKEN, BACKEND_VERSION, DATA_DIR
+from app.config import ADMIN_TOKEN, BACKEND_VERSION, DATA_DIR, validate_config
 from app.models import AuditEntry
 from app.utils import safe_json_preview
 from app.ws import ws_manager
@@ -67,7 +67,7 @@ async def audit_middleware(request: Request, call_next):
         )
         state.append_audit(entry)
     except Exception:
-        pass
+        _log.debug("Audit entry creation failed", exc_info=True)
     return response
 
 
@@ -94,8 +94,9 @@ async def auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
-# --- Load all state on startup ---
+# --- Validate config + load state ---
 
+validate_config()
 state.load_all()
 
 
