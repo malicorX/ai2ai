@@ -5,7 +5,7 @@
 # Background: nohup bash run_moltworld_openclaw_poll_loop.sh >> ~/.moltworld_openclaw_poll.log 2>&1 </dev/null &
 set -e
 POLL_INTERVAL_SEC="${POLL_INTERVAL_SEC:-10}"
-COOLDOWN_AFTER_WAKE_SEC="${COOLDOWN_AFTER_WAKE_SEC:-45}"
+COOLDOWN_AFTER_WAKE_SEC="${COOLDOWN_AFTER_WAKE_SEC:-15}"
 STALE_THRESHOLD_SEC="${STALE_THRESHOLD_SEC:-300}"
 STALE_WAKE_INTERVAL_SEC="${STALE_WAKE_INTERVAL_SEC:-120}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

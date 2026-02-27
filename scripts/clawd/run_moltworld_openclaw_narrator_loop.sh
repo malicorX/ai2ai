@@ -4,7 +4,7 @@
 # Requires: ~/.moltworld.env (WORLD_AGENT_TOKEN, AGENT_ID, DISPLAY_NAME), OpenClaw gateway on 127.0.0.1:18789.
 # Background: nohup bash run_moltworld_openclaw_narrator_loop.sh >> ~/.moltworld_openclaw_narrator.log 2>&1 </dev/null &
 set -e
-NARRATOR_INTERVAL_SEC="${NARRATOR_INTERVAL_SEC:-120}"
+NARRATOR_INTERVAL_SEC="${NARRATOR_INTERVAL_SEC:-30}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WAKE_SCRIPT="${SCRIPT_DIR}/run_moltworld_pull_and_wake.sh"

@@ -192,19 +192,22 @@ def _is_other_bot(s):
 reply_to_other = _is_other_bot(last_sender) and bool(last_text)
 last_from_us = agent_id and (last_msg.get("sender_id") or "").strip() == agent_id
 
-# Compact, agent-friendly format: role + task first, then recent_chat, then short rules.
-# OpenClaw works better with clear task and data up front, minimal repeated rules.
+# Direct Ollama prompt: no tool-calling, just generate a conversational reply.
 lines = [
-    f"You are {agent_name}. Tools only: first world_state, then chat_say or go_to/world_action. No plain-text reply.",
+    f"You are {agent_name}, an AI agent in MoltWorld — a shared virtual world with other agents.",
+    "Reply with ONLY your message text. No JSON, no tool calls, no markdown, no prefixes.",
+    "Keep replies 1–3 sentences, natural and varied.",
 ]
 if reply_to_other:
     lines.extend([
-        f"TASK — The other agent just said: \"{last_text[:280]}\"",
-        "Your ONLY job this turn is to reply to that: reference their words, answer the question, or comment. Do NOT fetch_url or web_fetch first when replying—reply to what they said. Reply in chat_say that directly replies to the message in TASK above.",
-        "Avoid: generic greeting ('Hello there!', 'Good idea! I'm in.' when they asked something specific). Instead: if they asked 'what kind of fun?' say what kind; if 'where do we start?' give one concrete step (e.g. 'How about the board?').",
+        "",
+        f"The other agent ({other_bot}) just said: \"{last_text[:280]}\"",
+        "Reply directly to what they said. Reference their words or answer their question.",
+        "BAD: generic greetings like 'Hello!' or 'Good idea!' that ignore what they said.",
+        "GOOD: specific responses that show you read their message.",
     ])
 lines.append("")
-lines.append("recent_chat (latest last):")
+lines.append("Recent chat (latest last):")
 for i, m in enumerate(last):
     sender = m.get("sender_name") or m.get("sender_id") or "?"
     text = (m.get("text") or "").strip()
@@ -225,33 +228,28 @@ for i, m in enumerate(last):
 if last_from_us:
     lines.extend([
         "",
-        "Last message from you → world_state only this turn; do not call chat_say (avoids double-post).",
+        "The last message is from you — do NOT reply (wait for the other agent). Output exactly: SKIP",
     ])
 else:
-    is_narrator = "Sparky1" in agent_name or agent_name == "Sparky1Agent"
     if reply_to_other:
         lines.append("")
-        lines.append("LAST: chat_say must directly reply to the message in TASK above. No generic greeting.")
-    if is_narrator and not reply_to_other:
-        lines.extend([
-            "",
-            "No other-agent message to reply to: call world_state then fetch_url/web_fetch a real URL, then chat_say with 1–2 sentence summary or question from that page (not 'Got it!').",
-        ])
+        lines.append("Now write your reply to the other agent. Just the message text, nothing else.")
     else:
         lines.extend([
             "",
-            "world_state then chat_say. If last message asks about a webpage → web_fetch then summarize. If question (math/time) → answer in chat_say. If from Sparky1Agent → respond to what they said (concrete suggestion if they asked 'where do we start?'). If from you or old → short varied opener. Human unanswerable → 'I don't know how to answer this, sorry.'",
+            "Start a new topic or ask an interesting question. Be creative and specific.",
+            "Now write your message. Just the text, nothing else.",
         ])
-    lines.append("Vary wording; do not repeat the same phrase you or the other agent used recently.")
 text = "\n".join(lines)
-# Payload for /hooks/agent (isolated turn). Use a model present on both hosts (sparky1 has no llama3.3).
-payload = {"message": text, "wakeMode": "now", "name": "MoltWorld", "model": "ollama/qwen2.5-coder:32b", "deliver": False, "timeoutSeconds": 120}
+# Payload for /hooks/agent (gateway fallback).
+payload = {"message": text, "wakeMode": "now", "name": "MoltWorld", "model": "ollama/llama3.3:latest", "deliver": False, "timeoutSeconds": 120}
 with open(out_path, "w", encoding="utf-8") as f:
     json.dump(payload, f, ensure_ascii=False)
-# Payload for POST /v1/responses (main agent with MoltWorld plugin / chat_say)
-v1_payload = {"model": "openclaw:main", "input": text}
+# Payload for direct Ollama /api/chat call (preferred path — no gateway overhead).
+ollama_model = os.environ.get("MOLTWORLD_OLLAMA_MODEL", "qwen3.5:35b")
+ollama_payload = {"model": ollama_model, "messages": [{"role": "user", "content": text}], "stream": False}
 with open(v1_path, "w", encoding="utf-8") as f:
-    json.dump(v1_payload, f, ensure_ascii=False)
+    json.dump(ollama_payload, f, ensure_ascii=False)
 # Payload for /hooks/wake (gateway expects "text" and "mode")
 wake_payload = {"text": text, "mode": "now"}
 with open(wake_path, "w", encoding="utf-8") as f:
@@ -275,161 +273,52 @@ except Exception:
 PYDEBUG
 fi
 
-# 3) Tokens: gateway.auth.token for /v1/responses; hooks.token or gateway.auth.token for /hooks/agent
-WAKE_TOKEN=$(python3 -c "
-import json, sys
-p = sys.argv[1]
-with open(p, 'r') as f:
-    d = json.load(f)
-h = d.get('hooks', {})
-token = h.get('token') if h.get('enabled') else None
-if not token:
-    gw = d.get('gateway', {})
-    auth = gw.get('auth')
-    token = gw.get('token')
-    if isinstance(auth, dict):
-        token = token or auth.get('token')
-print(token or '')
-" "$CONFIG" 2>/dev/null) || true
-GW_TOKEN=$(python3 -c "
-import json, sys
-p = sys.argv[1]
-with open(p, 'r') as f:
-    d = json.load(f)
-gw = d.get('gateway', {})
-auth = gw.get('auth') or {}
-token = auth.get('token') or gw.get('token')
-print(token or '')
-" "$CONFIG" 2>/dev/null) || true
-[[ -z "$GW_TOKEN" ]] && GW_TOKEN="$WAKE_TOKEN"
+# 3) Direct Ollama call: bypass gateway entirely for conversation.
+#    Call Ollama /api/chat, extract the model's response, post to theebie directly.
+OLLAMA_BASE="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
+TMP_OLLAMA_RESP=$(mktemp)
+trap 'rm -f "$TMP_WORLD" "$TMP_PAYLOAD" "$TMP_V1" "$TMP_WAKE" "$TMP_OLLAMA_RESP"' EXIT
 
-# 4) Run agent turn. Prefer /v1/responses first so the main Ollama model runs (with tools); fall back to /hooks/agent.
-if [[ -z "$WAKE_TOKEN" && -z "$GW_TOKEN" ]]; then
-  echo "WARN: No hooks.token or gateway.auth.token in config. Run enable_hooks_on_sparky.sh on this host." >&2
+_trace "ollama_chat_start"
+OLLAMA_HTTP=$(curl -s -S -X POST "${OLLAMA_BASE}/api/chat" \
+  -H "Content-Type: application/json" \
+  --data-binary "@$TMP_V1" \
+  -o "$TMP_OLLAMA_RESP" -w "%{http_code}" 2>/dev/null) || OLLAMA_HTTP="000"
+_trace "ollama_chat_done code=$OLLAMA_HTTP"
+
+CHAT_SAY_TEXT=""
+code="$OLLAMA_HTTP"
+if [[ "$OLLAMA_HTTP" = "200" ]]; then
+  CHAT_SAY_TEXT=$(python3 -c "
+import json, sys, re
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+msg = d.get('message', {})
+text = (msg.get('content') or '').strip()
+if text:
+    text = re.sub(r'^(chat_say|reply|response|message)\s*[:：]\s*', '', text, flags=re.IGNORECASE).strip()
+    if len(text) > 2 and text[0] == '\"' and text[-1] == '\"':
+        text = text[1:-1].strip()
+    # SKIP means the model chose not to reply (e.g. last message was from us)
+    if text.upper().startswith('SKIP'):
+        text = ''
+print(text[:1000])
+" "$TMP_OLLAMA_RESP" 2>/dev/null) || true
 fi
-code="000"
-USE_TOKEN="${GW_TOKEN:-$WAKE_TOKEN}"
-_ok() { [[ "$code" = "200" || "$code" = "201" || "$code" = "202" ]]; }
-if [[ -n "$USE_TOKEN" ]]; then
-  # Prefer /v1/responses so main model (Ollama) runs with tools; avoids embedded runner on hook path.
-  if [[ -n "$GW_TOKEN" ]]; then
-    _trace "post_v1_responses_start"
-    code=$(curl -s -S -X POST http://127.0.0.1:18789/v1/responses \
-      -H "Content-Type: application/json" \
-      -H "Authorization: Bearer $GW_TOKEN" \
-      -H "x-openclaw-agent-id: main" \
-      --data-binary "@$TMP_V1" \
-      -o /dev/null -w "%{http_code}" 2>/dev/null) || code="000"
-    _trace "post_v1_responses_done code=$code"
-  fi
-  if ! _ok && [[ -n "$WAKE_TOKEN" ]]; then
-    _trace "post_hooks_agent_start"
-    code=$(curl -s -S -X POST http://127.0.0.1:18789/hooks/agent \
-      -H "Content-Type: application/json" \
-      -H "Authorization: Bearer $WAKE_TOKEN" \
-      --data-binary "@$TMP_PAYLOAD" \
-      -o /dev/null -w "%{http_code}" 2>/dev/null) || code="000"
-    _trace "post_hooks_agent_done code=$code"
-  fi
-  if ! _ok && [[ -n "$WAKE_TOKEN" ]]; then
-    _trace "post_hooks_agent_start (retry)"
-    code=$(curl -s -S -X POST http://127.0.0.1:18789/hooks/agent \
-      -H "Content-Type: application/json" \
-      -H "Authorization: Bearer $WAKE_TOKEN" \
-      --data-binary "@$TMP_PAYLOAD" \
-      -o /dev/null -w "%{http_code}" 2>/dev/null) || code="000"
-    _trace "post_hooks_agent_done code=$code"
-  fi
-else
-  _trace "post_hooks_agent_start (no token)"
-  code=$(curl -s -S -X POST http://127.0.0.1:18789/hooks/agent \
-    -H "Content-Type: application/json" \
-    --data-binary "@$TMP_PAYLOAD" \
-    -o /dev/null -w "%{http_code}" 2>/dev/null) || code="000"
-  _trace "post_hooks_agent_done code=$code"
-fi
-_trace "script_end"
+
+_trace "ollama_response len=${#CHAT_SAY_TEXT}"
 echo "${code}"
-echo "{\"ok\":true,\"pull\":\"world\",\"wake\":\"sent\",\"http_code\":\"$code\"}"
+echo "{\"ok\":true,\"pull\":\"world\",\"mode\":\"direct_ollama\",\"http_code\":\"$code\"}"
 
-# 4.5) Relay: when gateway does not execute plugin chat_say, read the model's chat_say from gateway log and POST to theebie.
-RELAY_ENABLED="${MOLTWORLD_RELAY_CHAT_SAY:-1}"
-RELAY_WAIT="${MOLTWORLD_RELAY_WAIT_SEC:-90}"
-if [[ "$RELAY_ENABLED" != "0" && ("$code" = "200" || "$code" = "201" || "$code" = "202") && -n "$TOKEN" && -n "$AGENT_ID" ]]; then
-  RELAY_SINCE=$(date +"%Y-%m-%d %H:%M:%S")
-  sleep "$RELAY_WAIT"
-  # Clawdbot (sparky1) uses ~/.clawdbot/gateway.log; OpenClaw (sparky2) uses ~/.openclaw/gateway.log
-  if [[ -f "$HOME/.clawdbot/gateway.log" ]]; then
-    GATEWAY_LOG="$HOME/.clawdbot/gateway.log"
-  else
-    GATEWAY_LOG="$HOME/.openclaw/gateway.log"
-  fi
-  # Parse chat_say from a stream of lines (gateway.log or journal). Expects either raw JSON lines or "prefix: JSON".
-  _parse_chat_say() {
-    python3 -c "
-import json, sys, re
-for line in sys.stdin:
-    line = line.strip()
-    if '\"chat_say\"' not in line or '\"arguments\"' not in line:
-        continue
-    # Extract JSON: whole line or from first { to last }
-    m = re.search(r'\{.*\}', line)
-    if not m:
-        continue
-    try:
-        d = json.loads(m.group(0))
-        if d.get('name') == 'chat_say' and isinstance(d.get('arguments'), dict):
-            t = (d.get('arguments') or {}).get('text')
-            if isinstance(t, str) and t.strip():
-                print(t.strip())
-    except Exception:
-        pass
-" 2>/dev/null | tail -n 1
-  }
-  _parse_chat_say_first() {
-    python3 -c "
-import json, sys, re
-for line in sys.stdin:
-    line = line.strip()
-    if '\"chat_say\"' not in line or '\"arguments\"' not in line:
-        continue
-    m = re.search(r'\{.*\}', line)
-    if not m:
-        continue
-    try:
-        d = json.loads(m.group(0))
-        if d.get('name') == 'chat_say' and isinstance(d.get('arguments'), dict):
-            t = (d.get('arguments') or {}).get('text')
-            if isinstance(t, str) and t.strip():
-                print(t.strip())
-                sys.exit(0)
-    except Exception:
-        pass
-" 2>/dev/null
-  }
-  CHAT_SAY_TEXT=""
-  # Prefer journal with --since (our run's reply); fall back to gateway.log.
-  for unit in openclaw-gateway.service clawdbot-gateway.service; do
-    CHAT_SAY_TEXT=$(journalctl --user -u "$unit" --since "${RELAY_SINCE}" -n 500 --no-pager -o cat 2>/dev/null | _parse_chat_say)
-    [[ -n "$CHAT_SAY_TEXT" ]] && break
-  done
-  if [[ -z "$CHAT_SAY_TEXT" && -f "$GATEWAY_LOG" ]]; then
-    CHAT_SAY_TEXT=$(tail -n 500 "$GATEWAY_LOG" 2>/dev/null | _parse_chat_say)
-  fi
-  if [[ -z "$CHAT_SAY_TEXT" ]]; then
-    for unit in openclaw-gateway.service clawdbot-gateway.service; do
-      CHAT_SAY_TEXT=$(journalctl --user -u "$unit" -n 800 --no-pager -o cat 2>/dev/null | _parse_chat_say)
-      [[ -n "$CHAT_SAY_TEXT" ]] && break
-    done
-  fi
-  if [[ -n "$CHAT_SAY_TEXT" ]]; then
-    # Dedup: skip POST only if our last message has the same text AND was recent (< 5 min). If our last message is old, allow post so we don't stay stuck with one reply.
-      RECENT_FOR_DEDUP=$(curl -s -S -H "Authorization: Bearer $TOKEN" "$BASE_URL/chat/recent?limit=10" 2>/dev/null) || true
-      SKIP_RELAY=0
-      DEDUP_MAX_AGE_SEC="${MOLTWORLD_DEDUP_MAX_AGE_SEC:-300}"
-      if [[ -n "$RECENT_FOR_DEDUP" && -n "$CHAT_SAY_TEXT" ]]; then
-        export CHAT_SAY_TEXT AGENT_ID DEDUP_MAX_AGE_SEC
-        SKIP_RELAY=$(python3 -c "
+# 4) Post the model's response directly to theebie (no relay needed).
+if [[ -n "$CHAT_SAY_TEXT" && -n "$TOKEN" && -n "$AGENT_ID" ]]; then
+  # Dedup: skip if our last message is identical and recent
+  RECENT_FOR_DEDUP=$(curl -s -S -H "Authorization: Bearer $TOKEN" "$BASE_URL/chat/recent?limit=10" 2>/dev/null) || true
+  SKIP_POST=0
+  DEDUP_MAX_AGE_SEC="${MOLTWORLD_DEDUP_MAX_AGE_SEC:-300}"
+  if [[ -n "$RECENT_FOR_DEDUP" ]]; then
+    export CHAT_SAY_TEXT AGENT_ID DEDUP_MAX_AGE_SEC
+    SKIP_POST=$(python3 -c "
 import json, sys, os, time
 aid = (os.environ.get('AGENT_ID') or '').strip()
 new_text = (os.environ.get('CHAT_SAY_TEXT') or '').strip()
@@ -451,20 +340,19 @@ try:
 except Exception:
     print(0)
 " "$RECENT_FOR_DEDUP" 2>/dev/null) || echo "0"
-      fi
-      if [[ "$SKIP_RELAY" = "1" ]]; then
-        _trace "relay_skip_duplicate len=${#CHAT_SAY_TEXT}"
-      fi
-      if [[ $SKIP_RELAY -eq 0 ]]; then
-        RELAY_BODY=$(CHAT_SAY_TEXT="$CHAT_SAY_TEXT" AGENT_ID="$AGENT_ID" AGENT_NAME="$AGENT_NAME" python3 -c 'import json,os; print(json.dumps({"sender_id":os.environ["AGENT_ID"],"sender_name":os.environ["AGENT_NAME"],"text":os.environ.get("CHAT_SAY_TEXT","")}))' 2>/dev/null)
-        if [[ -n "$RELAY_BODY" ]]; then
-          RELAY_CODE=$(curl -s -S -o /dev/null -w "%{http_code}" -X POST "$BASE_URL/chat/say" \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "$RELAY_BODY" 2>/dev/null) || RELAY_CODE="000"
-          _trace "relay_chat_say code=$RELAY_CODE len=${#CHAT_SAY_TEXT}"
-        fi
-      fi
+  fi
+  if [[ "$SKIP_POST" = "1" ]]; then
+    _trace "post_skip_duplicate len=${#CHAT_SAY_TEXT}"
+  else
+    POST_BODY=$(CHAT_SAY_TEXT="$CHAT_SAY_TEXT" AGENT_ID="$AGENT_ID" AGENT_NAME="$AGENT_NAME" python3 -c 'import json,os; print(json.dumps({"sender_id":os.environ["AGENT_ID"],"sender_name":os.environ["AGENT_NAME"],"text":os.environ.get("CHAT_SAY_TEXT","")}))' 2>/dev/null)
+    if [[ -n "$POST_BODY" ]]; then
+      POST_CODE=$(curl -s -S -o /dev/null -w "%{http_code}" -X POST "$BASE_URL/chat/say" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$POST_BODY" 2>/dev/null) || POST_CODE="000"
+      _trace "chat_say_post code=$POST_CODE len=${#CHAT_SAY_TEXT}"
+      echo "{\"posted\":true,\"code\":\"$POST_CODE\",\"text_len\":${#CHAT_SAY_TEXT}}"
+    fi
   fi
 fi
 

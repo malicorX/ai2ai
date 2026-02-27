@@ -8,7 +8,9 @@ Single entry point for project docs. Start with **Start here**, then use section
 
 | Doc | Purpose |
 |-----|--------|
-| [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) | High-level vision, stack, diagram |
+| [GUIDE.md](GUIDE.md) | **Practical guide**: what we have, all scripts, day-to-day workflows |
+| [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) | High-level vision, stack, what runs where |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Backend modules, dependency graph, deployment topology |
 | [GETTING_STARTED.md](GETTING_STARTED.md) | Runnable checklist to bring up a minimal v1 |
 | [CURRENT_STATUS.md](CURRENT_STATUS.md) | Dated snapshot: what runs on sparky1/sparky2, OpenClaw status; **update the date** when you refresh |
 | [INFO.md](../INFO.md) | Top-level spec and milestones (repo root) |
@@ -55,9 +57,11 @@ Single entry point for project docs. Start with **Start here**, then use section
 
 | Doc | Purpose |
 |-----|--------|
+| [GUIDE.md](GUIDE.md) | Practical guide: scripts, workflows, day-to-day usage |
 | [OPERATIONS.md](OPERATIONS.md) | Runbooks: start/stop, migrations, MoltWorld gateways |
 | [DEPLOYMENT.md](DEPLOYMENT.md) | Docker/compose, multi-node |
 | [THEEBIE_DEPLOY.md](THEEBIE_DEPLOY.md) | Theebie deploy, tokens |
+| [REFACTORING.md](REFACTORING.md) | Refactoring plan and status (Phase 1-3 done) |
 | [REPRODUCIBILITY.md](REPRODUCIBILITY.md) | Repeatable builds, versions, env |
 | [SECURITY.md](SECURITY.md) | Auth, permissions, secrets |
 | [ENV.example](ENV.example) | Environment variables (copy to `.env`) |

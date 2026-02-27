@@ -34,6 +34,11 @@ MAX_CHAT_TO_SCAN = int(os.getenv("MAX_CHAT_TO_SCAN", "50"))
 
 USE_LANGGRAPH = os.getenv("USE_LANGGRAPH", "0").strip() == "1"
 
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "").strip()
+LLM_MODEL = os.getenv("LLM_MODEL", "qwen2.5-coder:32b").strip()
+LLM_API_KEY = os.getenv("LLM_API_KEY", "local").strip()
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT_SECONDS", "90"))
+
 # Shared HTTP session (Bearer token attached when configured)
 _world_session = requests.Session()
 if WORLD_AGENT_TOKEN:
@@ -713,6 +718,90 @@ def client_response_simulate(fingerprint: str, email_content: str) -> dict:
         return r.json() if r is not None else {"error": "no_response"}
     except Exception as e:
         return {"error": "client_response_simulate_failed", "detail": str(e)[:200]}
+
+
+# ---------------------------------------------------------------------------
+# LLM (standalone — works without LangGraph/LangChain, uses only requests)
+# ---------------------------------------------------------------------------
+
+def llm_generate(
+    system: str,
+    user: str,
+    *,
+    max_tokens: int = 1024,
+    temperature: float = 0.3,
+) -> str:
+    """Call an OpenAI-compatible chat completions endpoint.
+    Works with Ollama (/v1/chat/completions), vLLM, or OpenAI.
+    Returns empty string if LLM_BASE_URL is not configured or call fails.
+    """
+    if not LLM_BASE_URL:
+        return ""
+    url = f"{LLM_BASE_URL}/v1/chat/completions"
+    payload = {
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": False,
+    }
+    try:
+        r = requests.post(
+            url,
+            json=payload,
+            timeout=LLM_TIMEOUT,
+            headers={"Authorization": f"Bearer {LLM_API_KEY}"},
+        )
+        r.raise_for_status()
+        data = r.json()
+        choices = data.get("choices", [])
+        if not choices:
+            return ""
+        return (choices[0].get("message", {}).get("content", "") or "").strip()
+    except Exception as e:
+        trace_event("error", "llm_generate failed", {"error": str(e)[:300]})
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Code Execution (sandboxed subprocess)
+# ---------------------------------------------------------------------------
+
+def execute_python(code: str, *, timeout: int = 30, stdin_text: str = "") -> dict:
+    """Run Python code in an isolated temp directory.
+    Returns dict with stdout, stderr, exit_code, success.
+    Uses -I flag (isolated mode) to prevent import from CWD.
+    """
+    import subprocess
+    import sys
+    import tempfile
+    from pathlib import Path
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="agent_exec_") as td:
+            script = Path(td) / "task.py"
+            script.write_text(code, encoding="utf-8")
+            r = subprocess.run(
+                [sys.executable, "-I", str(script)],
+                cwd=td,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                input=stdin_text or None,
+            )
+            return {
+                "stdout": (r.stdout or "").strip()[:10000],
+                "stderr": (r.stderr or "").strip()[:5000],
+                "exit_code": r.returncode,
+                "success": r.returncode == 0,
+            }
+    except subprocess.TimeoutExpired:
+        return {"stdout": "", "stderr": f"timeout after {timeout}s", "exit_code": 124, "success": False}
+    except Exception as e:
+        return {"stdout": "", "stderr": str(e)[:2000], "exit_code": 1, "success": False}
 
 
 # ---------------------------------------------------------------------------
